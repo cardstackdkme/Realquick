@@ -6,7 +6,7 @@
 --   Mouse click sub-tabs     = switch sub-page (ESPs)
 --   Mouse drag header        = move window
 --   F3 (default)             = toggle GUI visibility (changeable in Settings)
---   End                      = unload script
+--   End (default)            = unload script (changeable in Settings)
 
 local Mouse = game:GetService("Players").LocalPlayer:GetMouse()
 local Players = game:GetService("Players")
@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v3.5"
+GUI.Version = "v3.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3324,8 +3324,35 @@ local function InputLoop()
         -- Close key = unload (skip first frame so a held-down key from
         -- before script launch doesn't immediately unload). The bound key
         -- is user-configurable in Settings; default is End.
+        --
+        -- Suspended while the Settings "Unload Script" widget is capturing: during capture the user
+        -- is pressing keys to CHOOSE one, so pressing the key that is currently bound would unload
+        -- the script instead of rebinding it. GUI._kbUnload is that control's handle and
+        -- handle.item.listening is true for exactly the capture window. Clearing CloseKeyReady also
+        -- forces whatever they pressed to be released before it can count as an unload.
+        -- Nil-safe: if the fork has no :Keybind the handle is never set and this is inert.
+        -- The suppression is TIME-BOUNDED, and that bound is load-bearing. A capture can be
+        -- stranded: the fork's arrow-key tab switch has no capture guard, so pressing an arrow to
+        -- bind it switches tab instead, the keybind item stops rendering, and only that item's own
+        -- render clears `listening`. An unbounded suppression would then be permanent -- and since
+        -- the branch below is the ONLY call site of UnloadScript in this file, the script would
+        -- become impossible to unload. 5s is far longer than a real rebind (you are already
+        -- holding the key down to complete it) and short enough to self-heal an abandoned one.
+        local kbItem = GUI._kbUnload and GUI._kbUnload.item
+        local capturing = type(kbItem) == "table" and kbItem.listening == true
+        if capturing then
+            GUI._kbCapAt = GUI._kbCapAt or os.clock()
+            if (os.clock() - GUI._kbCapAt) > 5 then
+                capturing = false
+                pcall(function() kbItem.listening = false end)   -- best-effort: unstick the fork too
+            end
+        else
+            GUI._kbCapAt = nil
+        end
         local closeDown = iskeypressed(GUI.CloseKey)
-        if GUI.CloseKeyReady then
+        if capturing then
+            GUI.CloseKeyReady = false
+        elseif GUI.CloseKeyReady then
             if closeDown and not GUI.WasCloseDown then
                 UnloadScript()
                 return
@@ -6453,11 +6480,37 @@ pcall(function() rawset(_G, "RQAP", AP) end)
 -- always agree, and expose it so the tab can convert without duplicating the table.
 local NAME2VK = {}
 for vk, n in pairs(VK_NAMES) do NAME2VK[string.lower(n)] = vk end
+
+-- ...except VK_NAMES is a DISPLAY table and the fork does NOT use its spellings. The fork builds
+-- its own key list -- aE("pageup",0x21), aE("plus",0xBB), aE("tilde",0xC0) -- and hands the
+-- callback THAT name. It disagrees with VK_NAMES on every non-alphanumeric ("PgUp" vs "pageup",
+-- "=" vs "plus", backquote vs "tilde") and VK_NAMES has no Space/Tab/Enter/arrows at all, so
+-- binding any of those resolved to nil and silently did nothing. This is the fork's exact contract.
+-- Letters, digits and F-keys agree already and are left to NAME2VK.
+-- The fork registers NO numpad keys, so a numpad bind cannot be captured through a Keybind control.
+local UI_NAME_VK = {
+    backspace = 0x08, tab   = 0x09, enter = 0x0D, space = 0x20,
+    shift     = 0x10, ctrl  = 0x11, alt   = 0x12,
+    lshift = 0xA0, rshift = 0xA1, lctrl = 0xA2, rctrl = 0xA3, lalt = 0xA4, ralt = 0xA5,
+    pageup = 0x21, pagedown = 0x22, ["end"] = 0x23, home = 0x24,
+    left = 0x25, up = 0x26, right = 0x27, down = 0x28,
+    insert = 0x2D, delete = 0x2E,
+    semicolon = 0xBA, plus = 0xBB, comma = 0xBC, minus = 0xBD, period = 0xBE, slash = 0xBF,
+    tilde = 0xC0, lbracket = 0xDB, backslash = 0xDC, rbracket = 0xDD, quote = 0xDE,
+}
+-- Reverse direction, so a control's INITIAL value is a name the fork recognises and renders.
+local VK_UI_NAME = {}
+for n, vk in pairs(UI_NAME_VK) do VK_UI_NAME[vk] = n end
+for i = 0x41, 0x5A do VK_UI_NAME[i] = string.lower(string.char(i)) end
+for i = 0x30, 0x39 do VK_UI_NAME[i] = string.char(i) end
+for i = 1, 12 do VK_UI_NAME[0x6F + i] = "f" .. i end
+
 GUI.VKFromName = function(n)
     if type(n) ~= "string" then return nil end
-    return NAME2VK[string.lower(n)]
+    n = string.lower(n)
+    return UI_NAME_VK[n] or NAME2VK[n]
 end
-GUI.VKToName = function(vk) return string.lower(VK_NAMES[vk] or "f") end
+GUI.VKToName = function(vk) return VK_UI_NAME[vk] or string.lower(VK_NAMES[vk] or "f") end
 
 local function rptr(a) local ok, v = pcall(memory_read, "uintptr", a) return ok and v or nil end
 local function rflt(a) local ok, v = pcall(memory_read, "float", a) return ok and v or nil end
@@ -8040,10 +8093,10 @@ end)()
                 notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
             end)
         end
+        -- Silent. drawCharLock already dims this panel and puts "VALUES LOCKED" + a Load Values
+        -- popup over it, so a toast on every blocked click was just noise on top of that.
         local function gateOK()
-            if warmed then return true end
-            notif("Character", "Locked - use the Load Values popup on this tab first", 2)
-            return false
+            return warmed and true or false
         end
 
         -- Apply/Reset run in a background task so even the first (cache-warming) sweep can't freeze the click.
@@ -8115,9 +8168,20 @@ end)()
             if key == "GearMaxVelocityMultiplier" then return veMax end
             return veInc
         end
-        secVe:Toggle("Auto-Apply (Exp)", false, function(v)
+        -- Declared first so the callback can close over the handle and push the pill back.
+        local uiVeAuto
+        uiVeAuto = secVe:Toggle("Auto-Apply (Exp)", false, function(v)
             if not v then veAutoGen = veAutoGen + 1; return end   -- off -> invalidate the running loop
-            if not gateOK() then return end                       -- locked until Values are loaded
+            if not gateOK() then
+                -- Every other gate guards a Button, which has no persistent state, so bailing is
+                -- enough. This one guards a Toggle: the pill has ALREADY flipped ON by the time we
+                -- get here, so returning would leave a switch that claims to be running while
+                -- nothing is. Put it back. Set(false) re-enters this callback once via the "not v"
+                -- branch, which just bumps the generation counter -- the same thing turning it off
+                -- by hand does -- and then stops.
+                pcall(function() uiVeAuto:Set(false) end)
+                return
+            end
             veAutoGen = veAutoGen + 1
             local myGen = veAutoGen
             local natural, lastWrite = {}, {}   -- per-key: game's current natural value / my last write
@@ -8872,14 +8936,44 @@ end)()
         pcall(function() secLook:Colorpicker("Accent", RUITHEME.baseAccent, function(c) RUITHEME.baseAccent = c; RUITHEME.baseAccentB = c end) end)
         secLook:Slider("Opacity", math.floor((RUITHEME.opacity or 1) * 100), 1, 30, 100, "%", function(v) RUITHEME.opacity = (tonumber(v) or 100) / 100 end)
 
+        -- Unload key. InputLoop just polls iskeypressed(GUI.CloseKey), so rebinding is only a
+        -- matter of moving that number; End is the default, not a hardcoded rule. Persisted as
+        -- binds.close, which means it survives only if you hit Save Config.
+        -- pcall'd like the other :Keybind uses: the method exists in the fork but not necessarily
+        -- in the upstream fallback lib, and an error here would drop the whole Settings tab.
+        local secKeys = setTab:Section("Keybinds", "Right", "Click, then press a key")
+        pcall(function()
+            GUI._kbUnload = secKeys:Keybind("Unload Script", GUI.VKToName(GUI.CloseKey), function(k)
+                local vk = GUI.VKFromName(k)
+                if not vk then
+                    -- Mouse buttons and anything else with no virtual-key mapping (m1/m2/mb3-5 are
+                    -- capturable by the fork but have no iskeypressed VK here). Leaving CloseKey
+                    -- alone is the safe failure -- an unbindable unload key would strand the script
+                    -- -- but the fork has ALREADY written the new name into the control, so simply
+                    -- returning would leave the pill advertising a key that does nothing while the
+                    -- real unload key still fires unannounced. Put the displayed value back.
+                    -- Set() re-enters this callback once with the old, valid name; that maps
+                    -- cleanly and stops there, so there is no recursion.
+                    uiNotify("Keybinds", "that key cannot be used - unload key unchanged", 3, "warning")
+                    pcall(function() GUI._kbUnload:Set(GUI.VKToName(GUI.CloseKey)) end)
+                    return
+                end
+                GUI.CloseKey = vk
+                -- The rebind is COMPLETED by a key press, so that key is physically down at this
+                -- instant. Without re-arming, InputLoop's next poll sees a fresh press edge on the
+                -- new key and unloads the script the moment you bind it. CloseKeyReady = false
+                -- makes the loop wait for a release first.
+                GUI.CloseKeyReady = false
+                GUI.WasCloseDown  = true
+            end, "click, then press any key to rebind unloading - Save Config to keep it")
+        end)
+
         local secAbout = setTab:Section("About", "Right", "Requiem")
         pcall(function() secAbout:Label(function() return "Menu key:   F3" end) end)
-        pcall(function() secAbout:Label(function() return "Unload:   " .. GetKeyName(GUI.CloseKey) end) end)
         pcall(function() secAbout:Label(function() return "Player ESP:   " .. GetKeyName(GUI.PlayerEspKey) end) end)
         pcall(function() secAbout:Label(function() return "Player List:   " .. GetKeyName(GUI.PlayerListKey) end) end)
     end)
 
-    uiNotify("Requiem", "Loaded  -  F3 menu  -  " .. GetKeyName(GUI.CloseKey) .. " unload", 4)
     print("[Requiem] loaded with INS-ui front-end")
 end)()
 
