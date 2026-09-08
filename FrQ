@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v3.6"
+GUI.Version = "v3.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -8342,8 +8342,22 @@ end)()
             end
             if ts and skipped == 0 then return false, "partition failed - refused to touch spears" end
             if #list == 0 then return false, "nothing to write" end
-            local ok, done = writeEntries(key, list, value)
-            if not ok then return false, string.format("%d/%d writes landed", done, #list) end
+            -- NEVER RAISE a gun above its own stock. One slider sends one number to every gun, but
+            -- the stocks differ (inaccuracy 2.5 / 7.5 / 8.5, recoil 2 / 4), so an unclamped write at
+            -- the 7.5 default made the ACCURATE guns worse: the Kar98k is 2.5 stock and got flattened
+            -- to three times its spread. Clamping per entry against the captured original keeps
+            -- "lower is better" true for every gun, and 0 still zeroes all of them.
+            -- Written one entry at a time because the clamped value differs per gun, and a 1-entry
+            -- applygc list is the documented safe write anyway.
+            local done = 0
+            for _, e in ipairs(list) do
+                local a = gcKey(e)
+                local orig = a and fireOrig[key][a]
+                local v = value
+                if type(orig) == "number" and orig < v then v = orig end
+                if writeEntries(key, { e }, v) then done = done + 1 end
+            end
+            if done ~= #list then return false, string.format("%d/%d writes landed", done, #list) end
             return true
         end
         local function fireRestore()
@@ -8621,10 +8635,10 @@ end)()
         -- is no reason to offer a setting that shoots straighter guns crooked.
         secBB:Slider("Inaccuracy", wmInacc, 0.1, 0, 8.5, "",
             function(v) wmInacc = tonumber(v) or wmInacc end,
-            "Aim-point scatter, for every gun EXCEPT thunderspears. Stock is 2.5 / 7.5 / 8.5 depending on the weapon and one slider sets them all to the same number. 0 = dead centre.")
+            "Aim-point scatter, for every gun EXCEPT thunderspears. Stock is 2.5 (Kar98k, scoped Kar98k) / 7.5 (musket, flintlock) / 8.5. This only ever LOWERS a gun - a gun already tighter than the slider keeps its own value, so you cannot accidentally make the Kar98k worse. 0 = dead centre.")
         secBB:Slider("Recoil", wmRecoil, BB_STEP, 0, 4, "",
             function(v) wmRecoil = tonumber(v) or wmRecoil end,
-            "Camera kick, for every gun. Stock 2 on most, 4 on one. 0 = no kick. Thunderspears have no recoil constant at all - they kick via a separate camera shake.")
+            "Camera kick, for every gun. Stock 2 on most, 4 on one. Only ever LOWERS a gun. 0 = no kick. Thunderspears have no recoil constant at all - they kick via a separate camera shake.")
         secBB:Slider("Pellet Spread", bbVal.spread, BB_STEP, 0, BB_STOCK.spread, "",
             function(v) bbVal.spread = tonumber(v) or bbVal.spread end,
             "BlunderBuss ONLY - pellet cone radius (x max(0.5, accuracy)). 0 = all 10 pellets dead centre. Stock 8.35")
