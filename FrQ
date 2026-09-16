@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v3.7"
+GUI.Version = "v3.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4734,6 +4734,9 @@ UnloadScript = function()
         pcall(function() data.label:Remove() end)
     end
     MARCS.Objects = {}
+    -- Via a hook, NOT a direct reference: UnloadScript is defined above the
+    -- landmine engine, so naming LANDMINE here would resolve to a nil global.
+    if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
     for _, data in pairs(GEAR.Objects) do
         pcall(function() data.label:Remove() end)
     end
@@ -5304,15 +5307,231 @@ local function hideResupplyLabels()
 end
 
 -- ESP loop (separate thread, optimized: only runs active features)
+-- ============================================================
+-- LANDMINE ESP ENGINE
+-- ============================================================
+-- 613 Models named "Landmine" sit as siblings in Workspace, each a cluster of
+-- ~12 unnamed Parts. That count drives every decision here, and it is why this
+-- engine does NOT follow the shape of the ones above:
+--
+--   * POSITIONS ARE CACHED at register time. Mines do not move, so a frame costs
+--     pure Lua maths over a flat array and zero instance reads. The other engines
+--     re-read part.Position every frame -- fine for a dozen objects, 613 property
+--     reads per frame here.
+--   * DRAWINGS ARE POOLED AND CAPPED. 613 Text objects would cost more than the
+--     scanning ever did. Only the nearest MaxLabels are drawn, and the pool is
+--     reused frame to frame.
+--   * DISCOVERY IS CHUNKED. Workspace has ~6040 children; walking all of them
+--     reading .Name is exactly the synchronous burst that stalls Matcha's single
+--     cooperative thread (the documented cause of periodic ESP stutter). We walk
+--     a slice per scan tick and wrap around. The one exception is the first pass
+--     after you enable it -- see NeedFull.
+--   * LIVENESS IS A ROLLING RE-CHECK of a few entries per scan tick, not a Parent
+--     test on all 613 every frame. A detonated mine lingering for a second is
+--     invisible; a per-frame sweep would not be.
+local LANDMINE = {
+    Enabled      = false,
+    MaxDistance  = 1500,   -- own range, NOT the global ESP slider: 613 mines at
+                           -- 50000 would just be noise
+    MaxLabels    = 40,     -- hard ceiling on Drawing objects
+    ESPColor     = Color3.fromRGB(255, 85, 85),
+    TextSize     = 16,
+    Entries      = {},     -- array of { obj, part, pos, addr }
+    Index        = {},     -- addr -> true, so a re-scan cannot double-register
+    Labels       = {},     -- pooled Drawing.Text
+    Cand         = {},     -- reused scratch for the pick, so picking allocates nothing
+    DrawN        = 0,      -- how many of Cand are live this pick
+    scanCursor   = 1,
+    verifyCursor = 1,
+    pickTimer    = 0,
+    NeedFull     = false,
+}
+
+-- Wrapped in do...end so the helpers never reach the main chunk's local budget,
+-- which is already at 178 of Lua's 200.
+do
+    local SCAN_CHUNK   = 700   -- workspace children examined per scan tick
+    local VERIFY_CHUNK = 40    -- cached entries re-checked per scan tick
+    local PICK_FRAMES  = 12    -- frames between re-picking the nearest set
+    local labelDist    = {}    -- per-slot last drawn distance; Drawing objects are
+                               -- shims, so we cannot hang a field on them
+
+    local function firstPart(obj)
+        local part
+        pcall(function()
+            for _, d in ipairs(obj:GetChildren()) do
+                local ok, pos = pcall(function() return d.Position end)
+                if ok and pos then part = d return end
+            end
+        end)
+        return part
+    end
+
+    local function register(obj)
+        if obj.Name ~= "Landmine" then return end
+        local addr = tostring(obj.Address)
+        if LANDMINE.Index[addr] then return end
+        local part = firstPart(obj)
+        if not part then return end
+        local pos
+        pcall(function() pos = part.Position end)
+        if not pos then return end
+        LANDMINE.Index[addr] = true
+        LANDMINE.Entries[#LANDMINE.Entries + 1] = { obj = obj, part = part, pos = pos, addr = addr }
+    end
+
+    local function label(i)
+        local lbl = LANDMINE.Labels[i]
+        if lbl then return lbl end
+        lbl = Drawing.new("Text")
+        lbl.Color   = LANDMINE.ESPColor
+        lbl.Size    = LANDMINE.TextSize
+        lbl.Center  = true
+        lbl.Outline = true
+        lbl.Visible = false
+        lbl.ZIndex  = 50
+        LANDMINE.Labels[i] = lbl
+        return lbl
+    end
+
+    -- Choose the nearest MaxLabels. Runs every PICK_FRAMES rather than every
+    -- frame: which mines are closest barely changes in a fifth of a second, but
+    -- where they are ON SCREEN changes constantly -- that part is per frame.
+    local function pick(playerPos)
+        local maxSq = LANDMINE.MaxDistance * LANDMINE.MaxDistance
+        local cand, entries = LANDMINE.Cand, LANDMINE.Entries
+        local count = 0
+        local px, py, pz = playerPos.X, playerPos.Y, playerPos.Z
+        for i = 1, #entries do
+            local p = entries[i].pos
+            local dx, dy, dz = px - p.X, py - p.Y, pz - p.Z
+            local d2 = dx * dx + dy * dy + dz * dz
+            if d2 <= maxSq then
+                count = count + 1
+                local c = cand[count]
+                if c then c.pos, c.d2 = p, d2 else cand[count] = { pos = p, d2 = d2 } end
+            end
+        end
+        for i = #cand, count + 1, -1 do cand[i] = nil end
+        -- Sort only when there is actually a choice to make. Squared distance
+        -- orders identically to distance, so no sqrt in here either.
+        if count > LANDMINE.MaxLabels then
+            table.sort(cand, function(a, b) return a.d2 < b.d2 end)
+        end
+        LANDMINE.DrawN = count < LANDMINE.MaxLabels and count or LANDMINE.MaxLabels
+    end
+
+    function LANDMINE.hide()
+        for _, lbl in ipairs(LANDMINE.Labels) do lbl.Visible = false end
+    end
+
+    -- First pass after enabling is a FULL walk: one ~6000-child sweep costs a
+    -- single hitch but shows every mine immediately, where the chunked cadence
+    -- would dribble them in over ~9 seconds in workspace order (not distance
+    -- order, so the nearby ones would not even come first). Upkeep is chunked.
+    function LANDMINE.scan()
+        local kids = Workspace:GetChildren()
+        local total = #kids
+        if total == 0 then return end
+        if LANDMINE.NeedFull then
+            LANDMINE.NeedFull = false
+            for i = 1, total do pcall(register, kids[i]) end
+            LANDMINE.scanCursor = 1
+            return
+        end
+        local i, done = LANDMINE.scanCursor, 0
+        if i > total then i = 1 end
+        while done < SCAN_CHUNK and done < total do
+            pcall(register, kids[i])
+            i = i + 1
+            if i > total then i = 1 end
+            done = done + 1
+        end
+        LANDMINE.scanCursor = i
+    end
+
+    -- Rolling liveness + position refresh, and the only place entries are
+    -- dropped: a detonated mine is unparented, so it falls out here.
+    function LANDMINE.cleanup()
+        local e = LANDMINE.Entries
+        local total = #e
+        if total == 0 then return end
+        local i, checked = LANDMINE.verifyCursor, 0
+        if i > total then i = 1 end
+        while checked < VERIFY_CHUNK and total > 0 do
+            local ent = e[i]
+            local okP, par = pcall(function() return ent.obj.Parent end)
+            if (not okP) or par == nil then
+                LANDMINE.Index[ent.addr] = nil
+                e[i] = e[total]
+                e[total] = nil
+                total = total - 1
+            else
+                local okPos, p = pcall(function() return ent.part.Position end)
+                if okPos and p then ent.pos = p end
+                i = i + 1
+            end
+            if i > total then i = 1 end
+            checked = checked + 1
+        end
+        LANDMINE.verifyCursor = i
+    end
+
+    -- Reached from UnloadScript, which is defined above this block.
+    function GUI.LandmineCleanup()
+        for _, lbl in ipairs(LANDMINE.Labels) do pcall(function() lbl:Remove() end) end
+        LANDMINE.Labels = {}
+        LANDMINE.Entries, LANDMINE.Index, LANDMINE.Cand, LANDMINE.DrawN = {}, {}, {}, 0
+    end
+
+    function LANDMINE.update()
+        if not LANDMINE.Enabled then LANDMINE.hide() return end
+        local playerPos = getPlayerPos()
+        if not playerPos then LANDMINE.hide() return end
+
+        LANDMINE.pickTimer = LANDMINE.pickTimer + 1
+        if LANDMINE.pickTimer >= PICK_FRAMES then
+            LANDMINE.pickTimer = 0
+            pick(playerPos)
+        end
+
+        local cand, shown = LANDMINE.Cand, 0
+        local px, py, pz = playerPos.X, playerPos.Y, playerPos.Z
+        for i = 1, LANDMINE.DrawN do
+            local c = cand[i]
+            if c then
+                local screenPos, onScreen = WorldToScreen(c.pos)
+                if onScreen and screenPos then
+                    shown = shown + 1
+                    local lbl = label(shown)
+                    local p = c.pos
+                    local dx, dy, dz = px - p.X, py - p.Y, pz - p.Z
+                    local fd = math.floor(math.sqrt(dx * dx + dy * dy + dz * dz))
+                    -- Labels are reused by whichever mine lands in this slot, so
+                    -- the text cache is keyed on the SLOT, not the mine.
+                    if labelDist[shown] ~= fd then
+                        lbl.Text = "Mine [" .. fd .. "m]"
+                        labelDist[shown] = fd
+                    end
+                    lbl.Position = Vector2.new(screenPos.X, screenPos.Y)
+                    lbl.Visible = true
+                end
+            end
+        end
+        for i = shown + 1, #LANDMINE.Labels do LANDMINE.Labels[i].Visible = false end
+    end
+end
+
 local function ESPLoop()
     local scanTimer = 0
-    local wasOn = { ore = false, marcs = false, gear = false, resupply = false, flintlock = false, titan = false, animal = false, playerEsp = false, actorEsp = false }
+    local wasOn = { ore = false, marcs = false, gear = false, resupply = false, flintlock = false, titan = false, animal = false, playerEsp = false, actorEsp = false, landmine = false }
 
     while GUI.Running do
         -- Check what's active
         local oreOn = anyOreEnabled()
         local anyActive = oreOn or MARCS.Enabled or GEAR.Enabled or RESUPPLY.Enabled or FLINTLOCK.Enabled
-            or TITAN.Enabled or ANIMAL.Enabled or PLAYER_ESP.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled or GUI.CounterVisible
+            or TITAN.Enabled or ANIMAL.Enabled or PLAYER_ESP.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
+            or LANDMINE.Enabled or GUI.CounterVisible
 
         -- If nothing is active, sleep longer
         if not anyActive then
@@ -5323,6 +5542,7 @@ local function ESPLoop()
             if wasOn.gear then hideESPLabels(GEAR.Objects); wasOn.gear = false end
             if wasOn.resupply then hideResupplyLabels(); wasOn.resupply = false end
             if wasOn.flintlock then hideESPLabels(FLINTLOCK.Objects); wasOn.flintlock = false end
+            if wasOn.landmine then LANDMINE.hide(); wasOn.landmine = false end
             if wasOn.titan then
                 for _, data in pairs(TITAN.Objects) do
                     for _, ln in ipairs(data.boneLines) do ln.Visible = false end
@@ -5377,6 +5597,9 @@ local function ESPLoop()
 
             if FLINTLOCK.Enabled then flintlockUpdate(); wasOn.flintlock = true
             elseif wasOn.flintlock then hideESPLabels(FLINTLOCK.Objects); wasOn.flintlock = false end
+
+            if LANDMINE.Enabled then LANDMINE.update(); wasOn.landmine = true
+            elseif wasOn.landmine then LANDMINE.hide(); wasOn.landmine = false end
 
             if TITAN.Enabled then titanUpdate(); wasOn.titan = true
             elseif wasOn.titan then
@@ -5450,6 +5673,7 @@ local function ESPLoop()
                 if RESUPPLY.Enabled or GUI.CounterVisible then resupplyScan(); resupplyCleanup() end
                 if RESUPPLY.Enabled or GUI.CounterVisible then updateResupplyCounter() end
                 if FLINTLOCK.Enabled then flintlockScan(); flintlockCleanup() end
+                if LANDMINE.Enabled then LANDMINE.scan(); LANDMINE.cleanup() end
                 if TITAN.Enabled then titanScan(); titanCleanup() end
                 if ANIMAL.Enabled then animalScan(); animalCleanup() end
                 if PLAYER_ESP.Enabled then
@@ -5499,6 +5723,7 @@ saveConfig = function()
             gear         = GEAR.Enabled,
             resupply     = RESUPPLY.Enabled,
             flintlock    = FLINTLOCK.Enabled,
+            landmine     = LANDMINE.Enabled,
             titan        = TITAN.Enabled,
             animal       = ANIMAL.Enabled,
             playerEsp    = PLAYER_ESP.Enabled,
@@ -5579,6 +5804,10 @@ loadConfig = function()
         if type(f.gear)         == "boolean" then GEAR.Enabled             = f.gear         end
         if type(f.resupply)     == "boolean" then RESUPPLY.Enabled         = f.resupply     end
         if type(f.flintlock)    == "boolean" then FLINTLOCK.Enabled        = f.flintlock    end
+        if type(f.landmine)     == "boolean" then
+            LANDMINE.Enabled    = f.landmine
+            LANDMINE.NeedFull   = f.landmine    -- restored ON: sweep once so it paints immediately
+        end
         if type(f.titan)        == "boolean" then TITAN.Enabled            = f.titan        end
         if type(f.animal)       == "boolean" then ANIMAL.Enabled           = f.animal       end
         if type(f.playerEsp)    == "boolean" then PLAYER_ESP.Enabled       = f.playerEsp    end
@@ -7519,6 +7748,18 @@ end)()
         secTools:Toggle("Gear", GEAR.Enabled, function(v) GEAR.Enabled = v end)
         secTools:Toggle("Resupply", RESUPPLY.Enabled, function(v) RESUPPLY.Enabled = v end)
         secTools:Toggle("Flintlock", FLINTLOCK.Enabled, function(v) FLINTLOCK.Enabled = v end)
+        secTools:Toggle("Landmines", LANDMINE.Enabled, function(v)
+            LANDMINE.Enabled = v
+            -- Full sweep on the way ON so every mine appears at once; hide on the
+            -- way OFF so nothing is left painted.
+            if v then LANDMINE.NeedFull = true else LANDMINE.hide() end
+        end):Tooltip("613 of them in this map. Has its OWN range and label cap below - the global Max Distance slider does not touch it")
+        secTools:Slider("Mine Range", math.floor(LANDMINE.MaxDistance), 50, 100, 10000, "", function(v)
+            LANDMINE.MaxDistance = math.floor(tonumber(v) or LANDMINE.MaxDistance)
+        end):Tooltip("only mines within this range are considered. Separate from the global ESP range on purpose")
+        secTools:Slider("Mine Labels", LANDMINE.MaxLabels, 5, 5, 150, "", function(v)
+            LANDMINE.MaxLabels = math.floor(tonumber(v) or LANDMINE.MaxLabels)
+        end):Tooltip("hard cap on how many mine labels exist at once - the nearest ones win. This is what keeps 613 mines cheap; raising it costs real frames")
 
         local secEnt = tab:Section("Entity ESP", "Right", "Living things")
         secEnt:Toggle("Titan", TITAN.Enabled, function(v) TITAN.Enabled = v end)
