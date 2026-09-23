@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v3.8"
+GUI.Version = "v3.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7888,7 +7888,9 @@ end)()
             SC.state = "starting"
             local myGen = scGen
             task.spawn(function()
-                local ROT_OFFSET                          = nil   -- discovered at runtime, see below
+                -- ROT_OFFSET is no longer chosen by fingerprint alone -- see discoverRotCands.
+                local ROT_OFFSET, ROT_CANDS               = nil, {}
+                local candMoves, candPrev                 = {}, {}
                 -- The game's own hit test (decompiled from Client.Interfaces.Routes.Screen.Skillcheck)
                 -- is `zone-20 <= spinner <= zone+20`, i.e. a FORTY degree window. Pressing only
                 -- inside +/-9 used the middle 45% of it for no reason and threw away margin on a
@@ -7943,17 +7945,58 @@ end)()
                     if abs(((math.deg(math.atan2(s, c)) - d + 540) % 360) - 180) > 0.05 then return nil end
                     return d
                 end
-                local function discoverRotOffset(addrs)
-                    local best, bestHits = nil, 0
-                    for off = 240, 560, 4 do
-                        local hits = 0
+                -- Propose every offset where the triple holds on EVERY probe. Two things changed
+                -- after this broke a third time:
+                --
+                --   1. The sweep was 240..560. The offset is now +216, so the real field was
+                --      OUTSIDE the search window and could never be found. Widened to 120..800.
+                --   2. It used to return a single winner. It cannot: at rest a GuiObject reads
+                --      (0, 0, 1), and that passes the fingerprint TRIVIALLY (0*0+1*1 == 1,
+                --      atan2(0,1) == 0). Discovery runs the moment the check appears, while
+                --      everything is still at rotation 0, so every candidate looks equally valid
+                --      and a dead one wins the coin flip -- which is precisely how it locked +280
+                --      and then read a constant forever.
+                --
+                -- Measured live: exactly TWO offsets pass here, 216 (real) and 280 (zeros), so
+                -- the per-frame cost of carrying the whole candidate list is nothing.
+                local function discoverRotCands(addrs)
+                    local out = {}
+                    for off = 120, 800, 4 do
+                        local all = true
                         for i = 1, #addrs do
-                            if rotTripleAt(addrs[i], off) then hits = hits + 1 end
+                            if not rotTripleAt(addrs[i], off) then all = false break end
                         end
-                        -- must hold on EVERY probe, and beat whatever came before
-                        if hits == #addrs and hits > bestHits then best, bestHits = off, hits end
+                        if all then out[#out + 1] = off end
                     end
-                    return best
+                    return out
+                end
+                -- The tiebreak the fingerprint cannot make: whichever candidate actually CHANGES
+                -- while the spinner is spinning is the real Rotation. A dead offset holds still,
+                -- so it can never win, and a Roblox update that moves the field again just makes
+                -- a different candidate start winning on its own.
+                local function trackCands(addr)
+                    for i = 1, #ROT_CANDS do
+                        local off = ROT_CANDS[i]
+                        local ok, v = pcall(mread, "float", addr + off)
+                        if ok and type(v) == "number" and v == v then
+                            local prev = candPrev[off]
+                            if prev ~= nil and abs(v - prev) > 0.01 then
+                                candMoves[off] = (candMoves[off] or 0) + 1
+                            end
+                            candPrev[off] = v
+                        end
+                    end
+                    -- needs a few real changes, so one glitched read cannot win the lock
+                    local best, bestN = nil, 2
+                    for i = 1, #ROT_CANDS do
+                        local off = ROT_CANDS[i]
+                        local cnt = candMoves[off] or 0
+                        if cnt > bestN then best, bestN = off, cnt end
+                    end
+                    if best and best ~= ROT_OFFSET then
+                        ROT_OFFSET = best
+                        SC.off = best
+                    end
                 end
                 local function readRot(addr)
                     if not (addr and ROT_OFFSET) then return nil end
@@ -7994,22 +8037,30 @@ end)()
                                 cache = { spin = sa, val = va, t = now }
                                 -- Locate Rotation once per check, off these two plus a third
                                 -- unrelated GuiObject so the triple has to agree three ways.
-                                if not ROT_OFFSET then
+                                if #ROT_CANDS == 0 then
                                     local probes = { sa, va }
                                     local extra = content:FindFirstChild("Circle") or sc
                                     local ea = addrOf(extra)
                                     if ea then probes[#probes + 1] = ea end
-                                    ROT_OFFSET = discoverRotOffset(probes)
-                                    SC.off = ROT_OFFSET
+                                    ROT_CANDS = discoverRotCands(probes)
+                                    SC.cands = #ROT_CANDS
                                 end
+                                -- The Spinner is rebuilt per check, so these addresses are new.
+                                -- Carrying the old values over would read as a movement and hand
+                                -- the lock to whatever offset happened to differ.
+                                candPrev = {}
                             else
                                 cache = nil
                                 SC.state = "Spinner/Validation not found"
                             end
                         end
-                        if cache and not ROT_OFFSET then SC.state = "rotation offset NOT FOUND" end
+                        if cache and #ROT_CANDS == 0 then SC.state = "no rotation candidates" end
 
                         if cache then
+                            -- Learn first: until a candidate has visibly moved there is no
+                            -- ROT_OFFSET, readRot returns nil, and we simply wait.
+                            trackCands(cache.spin)
+                            if not ROT_OFFSET then SC.state = "learning offset (spin the check)" end
                             local s = readRot(cache.spin)
                             local t = readRot(cache.val)
                             if s and t then
@@ -8091,8 +8142,8 @@ end)()
                 local S = _G.RQSC
                 if type(S) ~= "table" then return "Skillcheck:  not started" end
                 if S.state == "off" then return "Skillcheck:  off" end
-                return string.format("%s  |  off +%s  taps %d",
-                    tostring(S.state), tostring(S.off or "?"), S.presses or 0)
+                return string.format("%s  |  off +%s of %s cand  taps %d",
+                    tostring(S.state), tostring(S.off or "learning"), tostring(S.cands or "?"), S.presses or 0)
             end)
         end)
         pcall(function()
