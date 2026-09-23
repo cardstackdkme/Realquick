@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v3.9"
+GUI.Version = "v4.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -8080,6 +8080,9 @@ end)()
                                             end
                                         end
                                         lastChangeT = now
+                                        -- Published for "Press E after minigame": a moving spinner
+                                        -- IS an on-screen minigame (see that toggle).
+                                        SC.lastMoveT = now
                                         lastS = s
                                     end
                                 end
@@ -8137,6 +8140,130 @@ end)()
                 end
             end)
         end):Tooltip("Legit auto-tap: reads the spinner + zone angle from memory and presses SPACE on time. Roblox must be the focused window. Not an instant-win.")
+
+        -- ---------- Press E after minigame: chain checks back to back ----------
+        -- You start the FIRST minigame yourself. From then on, the moment one ends, this taps E
+        -- until the next one is on screen, then goes quiet while Auto Skillcheck plays it.
+        --
+        -- "On screen" is read off the spinner, because nothing else works: PlayerGui.Skillcheck
+        -- exists permanently, and Visible / Enabled / GroupTransparency all read nil through
+        -- Matcha. The game's controller advances the spinner every RenderStepped from the first
+        -- frame of a check and never pauses it mid-combo (a hit only flips direction), so
+        -- "spinner moved in the last ACTIVE_GRACE" is exactly "a minigame is running".
+        -- That signal comes from the Auto Skillcheck loop, so this needs it switched ON.
+        local EP = { state = "off", presses = 0 }
+        local epGen = 0
+        local epInterval = 1 / 10     -- default 10 taps/s: fast, as asked, and still a real tap
+        secAuto:Toggle("Press E after minigame", false, function(on)
+            epGen = epGen + 1
+            if not on then
+                EP.state = "off"
+                pcall(keyrelease, 0x45)   -- never leave E held on the way out
+                return
+            end
+            local myGen = epGen
+            EP.state = "starting"
+            task.spawn(function()
+                -- 0.25s of stillness = over. The spinner steps every frame (~16ms) for the whole
+                -- check, so this is ~15 missed frames: far past any render hitch, and short
+                -- enough that the next E goes out almost as soon as the result lands.
+                local ACTIVE_GRACE = 1 / 4
+                local HOLD         = 3 / 100  -- same tap length Auto Skillcheck uses for SPACE
+                -- If no minigame appears for this long, stop and wait for YOU to start one again.
+                -- Without it, running out of materials or walking off would leave it tapping E
+                -- into whatever prompt is nearby indefinitely.
+                local GIVE_UP      = 20
+                local VK_E         = 0x45
+                local clk          = os.clock
+                local seenGame     = false    -- only chain AFTER a minigame you started yourself
+                -- Remembers WHY we are idle. Without it the give-up message was overwritten by
+                -- "start the first minigame yourself" on the very next pass and never shown.
+                local gaveUp       = false
+                local spamSince, lastTap = nil, 0
+
+                local function focused()
+                    local ok, r = pcall(isrbxactive)
+                    if ok then return r end
+                    return true
+                end
+
+                -- Is the menu actually on screen? isrbxactive() cannot tell us: the menu is drawn
+                -- INSIDE Roblox, so Roblox stays focused while you use it. That matters because the
+                -- fork polls every key while open -- an injected E would be taken by a keybind
+                -- capture (click Unload Script -> rebind, and E becomes your unload key, so the
+                -- NEXT tap unloads the script) or typed into a textbox.
+                -- _G.RQGeo is rebuilt as a fresh table every frame the window renders, so table
+                -- identity is the heartbeat; a MINIMISED menu leaves it frozen at open=true, which
+                -- the 0.25s staleness check catches. Same test drawBadge uses.
+                local geoRef, geoAt = nil, 0
+                local function menuBusy(now)
+                    local g = _G.RQGeo
+                    if g ~= geoRef then geoRef, geoAt = g, now end
+                    if type(g) == "table" and g.open == true and (now - geoAt) <= 0.25 then return true end
+                    -- belt and braces: the unload capture specifically
+                    local kb = GUI._kbUnload and GUI._kbUnload.item
+                    return type(kb) == "table" and kb.listening == true
+                end
+
+                while epGen == myGen and GUI.Running do
+                    local now = clk()
+                    local S = SC
+                    local liveT = S and S.lastMoveT
+                    local active = liveT ~= nil and (now - liveT) < ACTIVE_GRACE
+
+                    if S == nil or S.state == "off" then
+                        -- No liveness signal without the skillcheck loop -- do nothing rather
+                        -- than tap E blind.
+                        EP.state = "turn on Auto Skillcheck"
+                        seenGame, spamSince, gaveUp = false, nil, false
+                    elseif active then
+                        seenGame, spamSince, gaveUp = true, nil, false
+                        EP.state = "minigame running"
+                    elseif not seenGame then
+                        EP.state = gaveUp and ("no minigame for " .. GIVE_UP .. "s - start one to resume")
+                                           or "start the first minigame yourself"
+                    else
+                        spamSince = spamSince or now
+                        if now - spamSince > GIVE_UP then
+                            -- Re-arm rather than stop: the next minigame you start by hand picks
+                            -- the chain straight back up.
+                            seenGame, spamSince, gaveUp = false, nil, true
+                        elseif not focused() then
+                            -- keypress is OS-level: with Roblox in the background every E would
+                            -- be typed into whatever window has focus instead. A pause, not idle
+                            -- time: it must not run down the give-up clock.
+                            spamSince = nil
+                            EP.state = "paused - Roblox not focused"
+                        elseif menuBusy(now) then
+                            spamSince = nil
+                            EP.state = "paused - menu open"
+                        else
+                            EP.state = "pressing E"
+                            if now - lastTap >= epInterval then
+                                lastTap = now
+                                EP.presses = EP.presses + 1
+                                pcall(keypress, VK_E)
+                                task.wait(HOLD)
+                                pcall(keyrelease, VK_E)
+                            end
+                        end
+                    end
+                    task.wait()
+                end
+                pcall(keyrelease, VK_E)
+                if epGen == myGen then EP.state = "off" end
+            end)
+        end):Tooltip("Start the first minigame yourself. After each one ends this taps E until the next one shows, then waits. Needs Auto Skillcheck ON (it reads the spinner to know when a minigame is up). Pauses while this menu is open or Roblox is not focused, so E never lands in a keybind or textbox. Gives up after 20s with no minigame.")
+        secAuto:Slider("E Tap Interval", epInterval, 1 / 100, 1 / 20, 1 / 2, "s", function(v)
+            epInterval = tonumber(v) or epInterval
+        end):Tooltip("seconds between E taps while waiting for the next minigame. 0.10 = ten a second")
+        pcall(function()
+            secAuto:Label(function()
+                if EP.state == "off" then return "E loop:  off" end
+                return string.format("E loop:  %s   (E taps %d)", tostring(EP.state), EP.presses)
+            end)
+        end)
+
         pcall(function()
             secAuto:Label(function()
                 local S = _G.RQSC
