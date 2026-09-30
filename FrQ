@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.1"
+GUI.Version = "v4.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6635,7 +6635,9 @@ end
 local function drawCharLock()
     local geo = _G.RQGeo
     -- Locked = menu open, on the Character tab, Values not yet loaded.
-    local locked = type(geo) == "table" and geo.open == true and geo.tab == "Character"
+    -- R.geoLive (the render loop's heartbeat): a MINIMISED menu leaves RQGeo frozen at open=true, and
+    -- trusting it painted this scrim over the game with no menu under it.
+    local locked = R.geoLive == true and type(geo) == "table" and geo.open == true and geo.tab == "Character"
         and not (GUI.CharIsLoaded and GUI.CharIsLoaded())
     -- Freeze the lib's OWN control input while locked — the patched fork's cN()
     -- callback dispatcher checks this flag and swallows every control callback,
@@ -6664,7 +6666,8 @@ local function drawCharLock()
     txt("VALUES LOCKED", px + pw / 2, py + 22, 16, T.red, Z + 4, true, Drawing.Fonts.SystemBold)
     txt("Load Values to use the Character tab.", px + pw / 2, py + 52, 12, T.text, Z + 4, true)
     txt("Scans memory once (~15s). Cached until you rejoin.", px + pw / 2, py + 72, 11, T.muted, Z + 4, true)
-    button("charlockload", px + (pw - 210) / 2, py + ph - 48, 210, 34, "Load Values  (~15s)", function()
+    local scanning = GUI.CharIsLoading and GUI.CharIsLoading()
+    button("charlockload", px + (pw - 210) / 2, py + ph - 48, 210, 34, scanning and "Scanning memory..." or "Load Values  (~15s)", function()
         if GUI.CharLoad then GUI.CharLoad() end
     end, true, T.red, Z + 5)
     -- This popup is drawn ABOVE the menu (it sits on top of the Character tab), so its click must
@@ -6779,8 +6782,19 @@ task.spawn(function()
         beginFrame(); clicks={}; drags={}; scrolls={}; resizes={}
         -- drawBadge FIRST and in its own pcall: the rest share one, so a player row or enchant
         -- card that throws would otherwise blink the version out for that whole frame.
+        -- Menu heartbeat, taken BEFORE drawing: RQGeo is a fresh table every frame the menu renders, so
+        -- an unchanged one (minimised to the bubble) is stale after 0.25s. drawCharLock needs this to
+        -- tell a live menu from a frozen one, and the click guard below reuses it.
+        local g=_G.RQGeo
+        if g~=R.geoRef then R.geoRef=g; R.geoAt=nowc end
+        local geoLive=type(g)=="table" and g.open==true and (nowc-(R.geoAt or 0))<=0.25
+        R.geoLive=geoLive
         pcall(drawBadge)
-        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS(); drawVelo(); drawCharLock() end)
+        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS(); drawVelo() end)
+        -- Its OWN pcall, still drawn last (on top): if a panel throws, the lock popup must not vanish
+        -- and _G.RQBlockInput must not freeze at whatever it was last frame.
+        local okL,errL=pcall(drawCharLock)
+        if not okL then _G.RQBlockInput=nil; warn("[Requiem UI] "..tostring(errL)) end
         endFrame()
         if not ok then warn("[Requiem UI] "..tostring(err)) end
 
@@ -6791,10 +6805,15 @@ task.spawn(function()
         -- spotlight is open (those can hang outside the window). RQGeo is a fresh table every frame
         -- the menu renders, so an unchanged one (minimised to the bubble) is stale after 0.25s.
         -- Older/upstream libs publish neither field: no guard, exactly the old behaviour.
-        local g=_G.RQGeo
-        if g~=R.geoRef then R.geoRef=g; R.geoAt=nowc end
-        local geoLive=type(g)=="table" and g.open==true and (nowc-(R.geoAt or 0))<=0.25
-        local overMenu=geoLive and (g.pop==true
+        -- (g / geoLive: the heartbeat taken before drawing, above)
+        -- The minimised menu is a 42px bubble the fork publishes as _G.RQBubble -- a fresh table every
+        -- frame it is drawn, so the same identity trick tells a live bubble from a faded one.
+        local bub=_G.RQBubble
+        if bub~=R.bubRef then R.bubRef=bub; R.bubAt=nowc end
+        local onBubble=type(bub)=="table" and (nowc-(R.bubAt or 0))<=0.25
+            and type(bub.x)=="number" and type(bub.y)=="number" and type(bub.s)=="number"
+            and R.mx>=bub.x-2 and R.mx<=bub.x+bub.s+2 and R.my>=bub.y-2 and R.my<=bub.y+bub.s+2
+        local overMenu=onBubble or geoLive and (g.pop==true
             or (type(g.wx)=="number" and type(g.wy)=="number" and type(g.ww)=="number" and type(g.wh)=="number"
                 and R.mx>=g.wx-2 and R.mx<=g.wx+g.ww+2 and R.my>=g.wy-2 and R.my<=g.wy+g.wh+2))
         -- Clicking anywhere but the search box ends typing, like any text field -- including a click
@@ -6807,7 +6826,7 @@ task.spawn(function()
         end
         -- Over the menu, only our own overlays drawn ABOVE it (tagged `top`, e.g. the Character
         -- tab's Load Values popup) may take the click. No drags/resizes/scrolls start there.
-        if R.justP and overMenu and g.pop~=true and not R.dragKey and not R.scrollOff and not R.resizeKey then
+        if R.justP and overMenu and not (type(g)=="table" and g.pop==true) and not R.dragKey and not R.scrollOff and not R.resizeKey then
             for i=#clicks,1,-1 do local c=clicks[i]
                 if c.top and R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end
         end
@@ -8772,11 +8791,16 @@ end)()
         -- fork publishes each frame). Here we just expose the load state + trigger to that engine, and
         -- hard-block pin actions until loaded (the scrim is visual only; clicks still reach the lib).
         GUI.CharIsLoaded = function() return warmed end
+        -- In-flight flag: a double-click used to start a SECOND ~15s memory scan behind the first.
+        local charLoading = false
+        GUI.CharIsLoading = function() return charLoading end
         GUI.CharLoad = function()
-            if warmed then return end
+            if warmed or charLoading then return end
+            charLoading = true
             task.spawn(function()
                 notif("Values", "Scanning memory... (~15s freeze)", 2)
                 pcall(warm)
+                charLoading = false
                 notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
             end)
         end
