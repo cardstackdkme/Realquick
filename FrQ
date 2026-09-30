@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.2"
+GUI.Version = "v4.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -98,7 +98,6 @@ GUI.PLScrollDragLastY = 0
 GUI.PLCachedPlayers = {}    -- cached player data, fetched on open
 GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
-GUI.PLFreezeTyping = true   -- anchor your character while the Player List search box has focus
 
 -- Personal gas bar (self only, from Tools toggle). Same widget as the health bar.
 GUI.GasBarVisible = false
@@ -4741,7 +4740,6 @@ UnloadScript = function()
     -- Via a hook, NOT a direct reference: UnloadScript is defined above the
     -- landmine engine, so naming LANDMINE here would resolve to a nil global.
     if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
-    -- never leave the character anchored because the search box had focus when you unloaded
     if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
     for _, data in pairs(GEAR.Objects) do
         pcall(function() data.label:Remove() end)
@@ -6149,21 +6147,15 @@ local function healthbar(x,y,w,hp,maxHp,z)
     if r>0 then rect(x,y,maxf(3,w*r),6,col,z+1,0.95,3) end
 end
 
--- ---------- Player List search box: typing, and freezing the character while you type ----------
+-- ---------- Player List search box: typing ----------
 -- WHY TYPING WAS DEAD: the keys were read by InputLoop's OLD Player List block, which only runs
 -- while GUI.PlayerListElements is non-empty -- and nothing has filled that table since this engine
 -- took over drawing the panel. Clicking focused the box (the caret showed) but no key ever reached
 -- it. The keys are now polled here, in the same loop that draws the box.
 --
--- WHAT MATCHA CAN'T DO: swallow a key. It reads key state from outside the game and
--- setrobloxinput() does not block input (session-tested), so every key typed here ALSO reaches
--- Roblox. What it CAN do is stop the character moving: anchor the HumanoidRootPart while the box
--- has focus. No client script in this game anchors the local root part (Baking/Cooking anchor a
--- CLONED camera rig, not you), so this freeze is the only anchor on it and releasing it can't undo
--- the game's. Anchored cannot be READ through Matcha's shim, only written -- which is why nothing
--- here tries to check it first. A client-side anchor doesn't replicate: to the server you are simply
--- standing still.
-local PLI = { was = {}, box = nil, frozen = nil, checkAt = 0, bsAt = 0, blink = 0, KEYS = {}, MAX = 20 }
+-- Matcha can't swallow a key (it reads key state from outside the game), so every key typed here
+-- ALSO reaches Roblox. Nothing here touches your character.
+local PLI = { was = {}, box = nil, bsAt = 0, blink = 0, KEYS = {}, MAX = 20 }
 for vk = 0x41, 0x5A do PLI.KEYS[vk] = { string.char(vk + 32), string.char(vk) } end        -- a-z, Shift = A-Z
 for vk = 0x30, 0x39 do PLI.KEYS[vk] = { string.char(vk), false } end                       -- 0-9, Shift = symbol: ignored
 for vk = 0x60, 0x69 do PLI.KEYS[vk] = { string.char(vk - 0x30), string.char(vk - 0x30) } end -- numpad 0-9
@@ -6180,40 +6172,6 @@ GUI.PLTyping = function(vk)
     if PLI.KEYS[vk] ~= nil or vk == 0x08 or vk == 0x0D or vk == 0x1B then return true end
     -- Shift (capitals) and Ctrl (Ctrl+Backspace) are used by the box too, incl. their L/R codes
     return vk == 0x10 or vk == 0x11 or (vk >= 0xA0 and vk <= 0xA3)
-end
-
-function PLI.hrp()
-    local lp = Players.LocalPlayer
-    local ch = lp and lp.Character
-    return ch and ch:FindFirstChild("HumanoidRootPart") or nil
-end
-
-function PLI.release()
-    local f = PLI.frozen; PLI.frozen = nil
-    if not (f and f.part) then return end
-    -- Write through a FRESH lookup that still resolves to the part we anchored. After a respawn the
-    -- old body is destroyed along with that part, so there is nothing to undo -- and writing
-    -- through a stale reference would poke memory the game may already have freed.
-    pcall(function()
-        local cur = PLI.hrp()
-        if cur and (f.key == nil or tostring(cur.Address) == f.key) then cur.Anchored = false end
-    end)
-end
-
--- Anchor the CURRENT root part. Re-resolved on every check, so dying and respawning while the box
--- still has focus freezes the new body too instead of leaving you free to walk.
-function PLI.freeze()
-    if not GUI.PLFreezeTyping then PLI.release(); return end
-    local hrp, key
-    pcall(function()
-        hrp = PLI.hrp()
-        if hrp then key = tostring(hrp.Address) end
-    end)
-    if not hrp then return end
-    if PLI.frozen and PLI.frozen.key == key then return end
-    PLI.release()
-    local ok = pcall(function() hrp.Anchored = true end)
-    PLI.frozen = { key = key, part = ok and hrp or nil }
 end
 
 -- Snapshot every key we watch as "already down", so a key held (or stuck -- Matcha's iskeypressed
@@ -6237,19 +6195,24 @@ function PLI.focus(on)
     if on then
         GUI.PLTypingAt = os.clock()
         pcall(PLI.seed)
-        PLI.checkAt = 0          -- freeze on the very next tick, not up to 0.25s later
-    else
-        PLI.release()
     end
 end
 -- Reached from UnloadScript, which is defined above this engine.
-GUI.PLSearchCleanup = function() GUI.PLSearchFocused = false; PLI.release() end
+GUI.PLSearchCleanup = function() GUI.PLSearchFocused = false end
+
+-- v4.1/v4.2 anchored your HumanoidRootPart while this box had focus. That is gone; this one-time
+-- un-anchor on load frees a character an older build left frozen. Nothing in the game's client
+-- anchors your own root part (Baking/Cooking anchor a cloned camera rig), so this undoes only ours.
+pcall(function()
+    local ch = Players.LocalPlayer and Players.LocalPlayer.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Anchored = false end
+end)
 
 function PLI.poll(now)
     if not GUI.PLSearchFocused then return end
     if not GUI.PlayerListOpen then PLI.focus(false); return end
     GUI.PLTypingAt = now
-    if now >= PLI.checkAt then PLI.checkAt = now + 0.25; PLI.freeze() end
     -- keys go to whatever window has focus: while Roblox is in the background they are not ours
     local active = true
     pcall(function() active = isrbxactive() and true or false end)
@@ -6336,15 +6299,14 @@ local function drawPlayers()
         rect(x+14,searchY,sw,sh,mixc(C3(32,30,36),C3(48,46,54),shv*0.5),62,0.82,5)
         rect(x+14,searchY,sw,sh,mixc(T.soft,T.red,fa),63,0.4+shv*0.3+fa*0.3,5,false,1)
         local q=GUI.PLSearchText or ""
-        local frozen=foc and PLI.frozen~=nil and PLI.frozen.part~=nil
-        local hint=foc and (frozen and "frozen, Enter to finish" or "Enter to finish") or nil
+        local hint=foc and "Enter to finish" or nil
         local hintW=hint and tw(hint,11) or 0
         local room=maxf(4,floor((sw-24-(hint and hintW+10 or 0))/6.5))
         local shown=(q~="" and q) or (foc and "" or "Search players...")
         if #shown>room then shown=shown:sub(-room) end
         local caret=(foc and (PLI.blink%1)<0.55) and "|" or ""
         txt(shown..caret,x+24,searchY+6,13,(q~="" or foc) and T.text or T.muted,64)
-        if hint then txt(hint,x+14+sw-10-hintW,searchY+7,11,frozen and T.red or T.muted,64) end
+        if hint then txt(hint,x+14+sw-10-hintW,searchY+7,11,T.muted,64) end
         PLI.box={x=x+14,y=searchY+R.yoff,w=sw,h=sh}
     end
     local sortY=searchY+32; local sbw=floor((listW-16)/3)
@@ -8110,7 +8072,6 @@ end)()
             if v then GUI.PLScrollOffset = 0; BuildPlayerList() else ClearPlayerList() end
         end)
         secPL:Toggle("Auto Update", GUI.PLAutoUpdate, function(v) GUI.PLAutoUpdate = v end)
-        secPL:Toggle("Freeze While Typing", GUI.PLFreezeTyping, function(v) GUI.PLFreezeTyping = v end):Tooltip("Anchors your character while the Player List search box has focus, so typing a name can't walk you around. Matcha can't stop the keys themselves reaching the game: E, Q, F, number keys etc. still do their normal thing while you type. Enter, Esc or clicking anywhere else finishes typing.")
 
         local secPanels = tab:Section("Panels", "Right", "Floating windows")
         secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
