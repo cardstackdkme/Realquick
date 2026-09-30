@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.0"
+GUI.Version = "v4.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -98,6 +98,7 @@ GUI.PLScrollDragLastY = 0
 GUI.PLCachedPlayers = {}    -- cached player data, fetched on open
 GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
+GUI.PLFreezeTyping = true   -- anchor your character while the Player List search box has focus
 
 -- Personal gas bar (self only, from Tools toggle). Same widget as the health bar.
 GUI.GasBarVisible = false
@@ -3350,7 +3351,10 @@ local function InputLoop()
             GUI._kbCapAt = nil
         end
         local closeDown = iskeypressed(GUI.CloseKey)
-        if capturing then
+        -- Typing that key into the Player List search must not unload the script: treated like a
+        -- capture (disarm, and it has to be released before it counts again). PLTyping goes stale
+        -- 0.5s after the typing loop last ran, so this can never lock the unload key for good.
+        if capturing or (GUI.PLTyping and GUI.PLTyping(GUI.CloseKey)) then
             GUI.CloseKeyReady = false
         elseif GUI.CloseKeyReady then
             if closeDown and not GUI.WasCloseDown then
@@ -3366,7 +3370,7 @@ local function InputLoop()
 
         -- Player list toggle key
         local plKeyDown = iskeypressed(GUI.PlayerListKey)
-        if plKeyDown and not GUI.WasPLKeyDown then
+        if plKeyDown and not GUI.WasPLKeyDown and not (GUI.PLTyping and GUI.PLTyping(GUI.PlayerListKey)) then
             GUI.PlayerListOpen = not GUI.PlayerListOpen
             if GUI.PlayerListOpen then
                 GUI.PLScrollOffset = 0
@@ -3380,7 +3384,7 @@ local function InputLoop()
 
         -- Player ESP toggle key
         local peKeyDown = iskeypressed(GUI.PlayerEspKey)
-        if peKeyDown and not GUI.WasPEKeyDown then
+        if peKeyDown and not GUI.WasPEKeyDown and not (GUI.PLTyping and GUI.PLTyping(GUI.PlayerEspKey)) then
             PLAYER_ESP.Enabled = not PLAYER_ESP.Enabled
             if GUI._uiPE then pcall(function() GUI._uiPE:Set(PLAYER_ESP.Enabled) end) end
         end
@@ -4737,6 +4741,8 @@ UnloadScript = function()
     -- Via a hook, NOT a direct reference: UnloadScript is defined above the
     -- landmine engine, so naming LANDMINE here would resolve to a nil global.
     if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
+    -- never leave the character anchored because the search box had focus when you unloaded
+    if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
     for _, data in pairs(GEAR.Objects) do
         pcall(function() data.label:Remove() end)
     end
@@ -6143,10 +6149,160 @@ local function healthbar(x,y,w,hp,maxHp,z)
     if r>0 then rect(x,y,maxf(3,w*r),6,col,z+1,0.95,3) end
 end
 
+-- ---------- Player List search box: typing, and freezing the character while you type ----------
+-- WHY TYPING WAS DEAD: the keys were read by InputLoop's OLD Player List block, which only runs
+-- while GUI.PlayerListElements is non-empty -- and nothing has filled that table since this engine
+-- took over drawing the panel. Clicking focused the box (the caret showed) but no key ever reached
+-- it. The keys are now polled here, in the same loop that draws the box.
+--
+-- WHAT MATCHA CAN'T DO: swallow a key. It reads key state from outside the game and
+-- setrobloxinput() does not block input (session-tested), so every key typed here ALSO reaches
+-- Roblox. What it CAN do is stop the character moving: anchor the HumanoidRootPart while the box
+-- has focus. No client script in this game anchors the local root part (Baking/Cooking anchor a
+-- CLONED camera rig, not you), so this freeze is the only anchor on it and releasing it can't undo
+-- the game's. Anchored cannot be READ through Matcha's shim, only written -- which is why nothing
+-- here tries to check it first. A client-side anchor doesn't replicate: to the server you are simply
+-- standing still.
+local PLI = { was = {}, box = nil, frozen = nil, checkAt = 0, bsAt = 0, blink = 0, KEYS = {}, MAX = 20 }
+for vk = 0x41, 0x5A do PLI.KEYS[vk] = { string.char(vk + 32), string.char(vk) } end        -- a-z, Shift = A-Z
+for vk = 0x30, 0x39 do PLI.KEYS[vk] = { string.char(vk), false } end                       -- 0-9, Shift = symbol: ignored
+for vk = 0x60, 0x69 do PLI.KEYS[vk] = { string.char(vk - 0x30), string.char(vk - 0x30) } end -- numpad 0-9
+PLI.KEYS[0xBD] = { "_", "_" }   -- the minus key: Roblox names only ever contain underscores
+
+-- Shared with the script's own hotkeys (InputLoop, Auto Parry, Fast Swing): true while the search
+-- box has focus AND this key is one it uses, so typing "g" doesn't also flip Auto Parry and a typed
+-- "3" doesn't close the list (Numpad3 is its default key). PLTypingAt is refreshed every frame the
+-- box is serviced, so if this loop ever died with the box focused, the 0.5s staleness hands every
+-- hotkey back on its own -- the unload key must never be lockable.
+GUI.PLTyping = function(vk)
+    if GUI.PLSearchFocused ~= true or vk == nil then return false end
+    if (os.clock() - (GUI.PLTypingAt or 0)) >= 0.5 then return false end
+    if PLI.KEYS[vk] ~= nil or vk == 0x08 or vk == 0x0D or vk == 0x1B then return true end
+    -- Shift (capitals) and Ctrl (Ctrl+Backspace) are used by the box too, incl. their L/R codes
+    return vk == 0x10 or vk == 0x11 or (vk >= 0xA0 and vk <= 0xA3)
+end
+
+function PLI.hrp()
+    local lp = Players.LocalPlayer
+    local ch = lp and lp.Character
+    return ch and ch:FindFirstChild("HumanoidRootPart") or nil
+end
+
+function PLI.release()
+    local f = PLI.frozen; PLI.frozen = nil
+    if not (f and f.part) then return end
+    -- Write through a FRESH lookup that still resolves to the part we anchored. After a respawn the
+    -- old body is destroyed along with that part, so there is nothing to undo -- and writing
+    -- through a stale reference would poke memory the game may already have freed.
+    pcall(function()
+        local cur = PLI.hrp()
+        if cur and (f.key == nil or tostring(cur.Address) == f.key) then cur.Anchored = false end
+    end)
+end
+
+-- Anchor the CURRENT root part. Re-resolved on every check, so dying and respawning while the box
+-- still has focus freezes the new body too instead of leaving you free to walk.
+function PLI.freeze()
+    if not GUI.PLFreezeTyping then PLI.release(); return end
+    local hrp, key
+    pcall(function()
+        hrp = PLI.hrp()
+        if hrp then key = tostring(hrp.Address) end
+    end)
+    if not hrp then return end
+    if PLI.frozen and PLI.frozen.key == key then return end
+    PLI.release()
+    local ok = pcall(function() hrp.Anchored = true end)
+    PLI.frozen = { key = key, part = ok and hrp or nil }
+end
+
+-- Snapshot every key we watch as "already down", so a key held (or stuck -- Matcha's iskeypressed
+-- can report one permanently held) at the moment you click the box is never typed.
+function PLI.seed()
+    for vk in pairs(PLI.KEYS) do PLI.was[vk] = iskeypressed(vk) and true or false end
+    PLI.was[0x08] = iskeypressed(0x08) and true or false
+    PLI.was[0x0D] = iskeypressed(0x0D) and true or false
+    PLI.was[0x1B] = iskeypressed(0x1B) and true or false
+    -- Park the Backspace repeat: a Backspace already held (or stuck) here must not start deleting.
+    -- A fresh press takes the first-press branch in poll(), which sets the real repeat delay.
+    PLI.bsAt = math.huge
+end
+
+function PLI.focus(on)
+    on = on == true
+    if GUI.PLSearchFocused == on then return end
+    GUI.PLSearchFocused = on
+    PLI.blink = 0
+    PLI.ending = nil
+    if on then
+        GUI.PLTypingAt = os.clock()
+        pcall(PLI.seed)
+        PLI.checkAt = 0          -- freeze on the very next tick, not up to 0.25s later
+    else
+        PLI.release()
+    end
+end
+-- Reached from UnloadScript, which is defined above this engine.
+GUI.PLSearchCleanup = function() GUI.PLSearchFocused = false; PLI.release() end
+
+function PLI.poll(now)
+    if not GUI.PLSearchFocused then return end
+    if not GUI.PlayerListOpen then PLI.focus(false); return end
+    GUI.PLTypingAt = now
+    if now >= PLI.checkAt then PLI.checkAt = now + 0.25; PLI.freeze() end
+    -- keys go to whatever window has focus: while Roblox is in the background they are not ours
+    local active = true
+    pcall(function() active = isrbxactive() and true or false end)
+    if not active then pcall(PLI.seed); return end
+    local text, changed = GUI.PLSearchText or "", false
+    local shift = iskeypressed(0x10) and true or false
+    local ctrl = iskeypressed(0x11) and true or false
+    -- a key this script presses for you (Auto Parry's F) is not typing
+    local injVK = (GUI._injAt and (now - GUI._injAt) < 0.2) and GUI._injVK or nil
+    for vk, ch in pairs(PLI.KEYS) do
+        local down = iskeypressed(vk) and true or false
+        if down and not PLI.was[vk] and not ctrl and vk ~= injVK and #text < PLI.MAX then
+            local c = ch[shift and 2 or 1]
+            if c then text = text .. c; changed = true end
+        end
+        PLI.was[vk] = down
+    end
+    -- Backspace deletes (hold to repeat); Ctrl+Backspace clears the whole box
+    local bs = iskeypressed(0x08) and true or false
+    if bs and #text > 0 then
+        if not PLI.was[0x08] then
+            text = ctrl and "" or text:sub(1, -2); changed = true; PLI.bsAt = now + 0.45
+        elseif now >= PLI.bsAt then
+            text = text:sub(1, -2); changed = true; PLI.bsAt = now + 0.035
+        end
+    end
+    PLI.was[0x08] = bs
+    if changed then GUI.PLSearchText = text; GUI.PLScrollOffset = 0; PLI.blink = 0 end
+    -- Enter or Esc finishes -- on RELEASE, not on press. While the key is still down the box keeps
+    -- focus, so PLTyping keeps gating it and every hotkey loop records it as held; a toggle bound to
+    -- Enter therefore can't flip on the same press that ends your search. (Esc also opens Roblox's
+    -- own menu -- Matcha can't stop that.)
+    -- Only the key that ARMED the finish is waited on, so a stuck Esc can't stop Enter from working
+    -- (and vice versa); if its release is somehow missed, finish anyway after 1s.
+    local en = iskeypressed(0x0D) and true or false
+    local esc = iskeypressed(0x1B) and true or false
+    if not PLI.ending then
+        if en and not PLI.was[0x0D] then PLI.ending, PLI.endAt = 0x0D, now
+        elseif esc and not PLI.was[0x1B] then PLI.ending, PLI.endAt = 0x1B, now end
+    end
+    PLI.was[0x0D], PLI.was[0x1B] = en, esc
+    if PLI.ending then
+        -- (not `ending==0x0D and en or esc`: with en==false that idiom falls through to esc)
+        local held
+        if PLI.ending == 0x0D then held = en else held = esc end
+        if not held or (now - (PLI.endAt or now)) > 1 then PLI.focus(false) end
+    end
+end
+
 local plTimer = 0
 local enCache, enSig, enTimer = nil, nil, 0  -- cache the (sorted) enchant list; rebuild only on filter change / every 0.4s
 local function drawPlayers()
-    if not GUI.PlayerListOpen then anim.plopen=0; return end
+    if not GUI.PlayerListOpen then anim.plopen=0; PLI.box=nil; return end
     local op=av("plopen",1,14); R.fade=op; R.yoff=(1-op)*12
     plTimer=plTimer+R.dt
     if plTimer>1.5 then plTimer=0; pcall(function() GUI.PLCachedPlayers=ReadPlayerData() end) end
@@ -6169,7 +6325,28 @@ local function drawPlayers()
     tabs("pltab",x+14,cy,listW,{"Players","Staff","Dead"},tab,function(n) GUI.PlayerListTab=n; GUI.PLScrollOffset=0; GUI.PlayerListSelected=nil end,nil)
     -- search bar (full width) with the sort buttons on their own row below it
     local searchY=cy+42
-    button("plsearch",x+14,searchY,listW,26,(GUI.PLSearchText~="" and GUI.PLSearchText or "Search players...")..(GUI.PLSearchFocused and "|" or ""),function() GUI.PLSearchFocused=not GUI.PLSearchFocused end,false,GUI.PLSearchFocused and T.red or T.soft)
+    -- A text field, not a button: text left-aligned, blinking caret, and clicking it FOCUSES (a
+    -- second click no longer silently un-focuses). Clicking anywhere else ends typing -- see the
+    -- render loop. Long input keeps its END visible, which is where you are typing.
+    do
+        local sw,sh=listW,26; local foc=GUI.PLSearchFocused==true
+        local shv=hot("plsearch",x+14,searchY,sw,sh,function() PLI.focus(true) end)
+        local fa=av("plsf",foc and 1 or 0,18)
+        PLI.blink=PLI.blink+R.dt
+        rect(x+14,searchY,sw,sh,mixc(C3(32,30,36),C3(48,46,54),shv*0.5),62,0.82,5)
+        rect(x+14,searchY,sw,sh,mixc(T.soft,T.red,fa),63,0.4+shv*0.3+fa*0.3,5,false,1)
+        local q=GUI.PLSearchText or ""
+        local frozen=foc and PLI.frozen~=nil and PLI.frozen.part~=nil
+        local hint=foc and (frozen and "frozen, Enter to finish" or "Enter to finish") or nil
+        local hintW=hint and tw(hint,11) or 0
+        local room=maxf(4,floor((sw-24-(hint and hintW+10 or 0))/6.5))
+        local shown=(q~="" and q) or (foc and "" or "Search players...")
+        if #shown>room then shown=shown:sub(-room) end
+        local caret=(foc and (PLI.blink%1)<0.55) and "|" or ""
+        txt(shown..caret,x+24,searchY+6,13,(q~="" or foc) and T.text or T.muted,64)
+        if hint then txt(hint,x+14+sw-10-hintW,searchY+7,11,frozen and T.red or T.muted,64) end
+        PLI.box={x=x+14,y=searchY+R.yoff,w=sw,h=sh}
+    end
     local sortY=searchY+32; local sbw=floor((listW-16)/3)
     for i,s in ipairs({"None","Rank","Health"}) do button("plsort"..s,x+14+(i-1)*(sbw+8),sortY,sbw,26,s,function() GUI.PLSortMode=s; GUI.PLScrollOffset=0 end, GUI.PLSortMode==s, T.red) end
     local listY=sortY+36; local listH=(y+h-14)-listY; local rowH=42
@@ -6297,6 +6474,49 @@ local function drawEnchants()
     R.fade=1; R.yoff=0
 end
 
+-- RS Diff row layout. A row WRAPS its path over as many lines as it needs instead of cutting it at
+-- a fixed 64 characters (which also made the cut look like a path ending in "."), and the class is
+-- right-aligned INSIDE the card -- it used to START at the card's right edge and run off the
+-- window. Matcha's Drawing exposes no TextBounds, so widths come from tw(), which runs ~20% wide:
+-- a line can wrap slightly early but never spill. Cached per result list + width, because that only
+-- changes on Compare / Clear / a resize, and a diff can be thousands of rows.
+local RSL = { res = nil, cw = nil, rows = {}, total = 0, LINE = 15, PAD = 9, PATHX = 48 }
+function RSL.wrap(s, maxc)
+    local out = {}
+    while #s > maxc do
+        -- prefer to break just after a "." so a line ends on a whole name; hard-cut a name that is
+        -- itself too long for one line
+        local cut = maxc
+        for i = maxc, maxf(1, floor(maxc * 0.5)), -1 do
+            if s:byte(i) == 46 then cut = i; break end
+        end
+        -- never split a UTF-8 character: step back off continuation bytes (0x80-0xBF)
+        while cut > 1 and (s:byte(cut + 1) or 0) >= 128 and (s:byte(cut + 1) or 0) < 192 do cut = cut - 1 end
+        out[#out + 1] = s:sub(1, cut)
+        s = s:sub(cut + 1)
+    end
+    out[#out + 1] = s
+    return out
+end
+function RSL.layout(res, cw)
+    if RSL.res == res and RSL.cw == cw then return RSL end
+    local rows, yy = {}, 0
+    local right = cw - 14                  -- inside the card, clear of the scrollbar
+    local capW = floor(cw * 0.35)          -- a long "A -> B" class change can't eat the path
+    for i, rr in ipairs(res) do
+        local d = tostring(rr.detail or "")
+        if tw(d, 11) > capW then d = trim(d, floor(capW / 5.5)) end
+        local dW = (d ~= "") and tw(d, 11) or 0
+        local maxc = maxf(10, floor((right - dW - (d ~= "" and 12 or 0) - RSL.PATHX) / 6))
+        local lines = RSL.wrap(tostring(rr.path or ""), maxc)
+        local rh = #lines * RSL.LINE + RSL.PAD
+        rows[i] = { y = yy, h = rh, lines = lines, d = d, dW = dW }
+        yy = yy + rh
+    end
+    RSL.res, RSL.cw, RSL.rows, RSL.total = res, cw, rows, yy
+    return RSL
+end
+
 local function drawRS()
     if not GUI.RSDiffOpen then anim.rsopen=0; return end
     local op=av("rsopen",1,14); R.fade=op; R.yoff=(1-op)*12
@@ -6320,18 +6540,25 @@ local function drawRS()
     end,false,T.green)
     button("rsclr",x+14+3*(bw+10),cy,bw,30,"Clear",function() GUI.RSDiffResults=nil; GUI.RSDiffStatus=""; GUI.RSDiffScrollOffset=0 end,false,T.red)
     txt((GUI.RSDiffStatus~="" and GUI.RSDiffStatus or "Snapshot or Load Saved, then Compare."),x+14,cy+40,13,T.muted,63)
-    local res=GUI.RSDiffResults or {}; local listY=cy+64; local listH=(y+h-14)-listY; local rowH=24
-    local maxS=maxf(0,#res*rowH-listH)
+    local res=GUI.RSDiffResults or {}; local listY=cy+64; local listH=(y+h-14)-listY
+    -- Wrap against the width rounded DOWN to 32px: a resize drag re-wraps once per 32px instead of
+    -- every frame, and lines wrapped for a narrower width can only end further left. The class is
+    -- placed from the LIVE width below, so it stays pinned to the right edge while you drag.
+    local L=RSL.layout(res,cw-(cw%32))
+    local maxS=maxf(0,L.total+8-listH)
     card(x+14,listY,cw,listH,61,false)
-    local off=scrollbar("rs","RSDiffScrollOffset",x+14+cw-6,listY,listH,maxS,listH,#res*rowH)
+    local off=scrollbar("rs","RSDiffScrollOffset",x+14+cw-6,listY,listH,maxS,listH,L.total+8)
     R.clipTop=listY-1; R.clipBot=y+h-12
+    local base=listY+4-off
     for i,rr in ipairs(res) do
-        local rY=listY+4+(i-1)*rowH-off
-        if rY+rowH>listY and rY<y+h-12 then
+        local ro=L.rows[i]; local rY=base+ro.y
+        if rY>=y+h-12 then break end          -- rows are in y order: nothing further is visible
+        if rY+ro.h>listY then
             local kc=rr.kind=="ADD" and T.green or (rr.kind=="DEL" and T.red or T.yellow)
-            rect(x+20,rY+4,34,15,C3(28,28,34),63,0.8,3); txt(rr.kind,x+37,rY+5,10,kc,64,true,Drawing.Fonts.SystemBold)
-            txt(trim(rr.path or "",64),x+62,rY+4,12,T.text,64)
-            if rr.detail and rr.detail~="" then txt(trim(rr.detail,26),x+cw-10,rY+4,11,T.muted,64) end
+            -- Center=true centres BOTH axes on Position, so pass the badge's midpoint
+            rect(x+20,rY+4,34,15,C3(28,28,34),63,0.8,3); txt(rr.kind,x+37,rY+11,10,kc,64,true,Drawing.Fonts.SystemBold)
+            for j,line in ipairs(ro.lines) do txt(line,x+14+RSL.PATHX,rY+4+(j-1)*RSL.LINE,12,T.text,64) end
+            if ro.d~="" then txt(ro.d,x+14+(cw-14)-ro.dW,rY+4,11,T.muted,64) end
         end
     end
     R.clipTop=nil; R.clipBot=nil
@@ -6440,6 +6667,10 @@ local function drawCharLock()
     button("charlockload", px + (pw - 210) / 2, py + ph - 48, 210, 34, "Load Values  (~15s)", function()
         if GUI.CharLoad then GUI.CharLoad() end
     end, true, T.red, Z + 5)
+    -- This popup is drawn ABOVE the menu (it sits on top of the Character tab), so its click must
+    -- still land while the cursor is over the menu -- the render loop's overMenu guard lets only
+    -- clicks tagged `top` through.
+    if clicks[#clicks] then clicks[#clicks].top = true end
 end
 
 -- Version badge, drawn by US rather than by the UI library.
@@ -6543,6 +6774,8 @@ task.spawn(function()
         if R._wasManip and not manip then pcall(function() if saveConfig then saveConfig() end end) end
         R._wasManip = manip
 
+        -- typing first, so this frame already draws what you just typed
+        pcall(PLI.poll, nowc)
         beginFrame(); clicks={}; drags={}; scrolls={}; resizes={}
         -- drawBadge FIRST and in its own pcall: the rest share one, so a player row or enchant
         -- card that throws would otherwise blink the version out for that whole frame.
@@ -6551,7 +6784,34 @@ task.spawn(function()
         endFrame()
         if not ok then warn("[Requiem UI] "..tostring(err)) end
 
-        if R.justP and not R.dragKey and not R.scrollOff and not R.resizeKey then
+        -- The INS-ui menu is drawn ABOVE these panels, so a click on it belongs to it -- never to a
+        -- panel control hidden underneath. Without this a menu click could focus the covered search
+        -- box (freezing you) or hit RS Diff's Overwrite/Clear. The fork publishes its window rect in
+        -- RQGeo (wx/wy/ww/wh) plus `pop` while a dropdown / colour picker / key menu / dialog /
+        -- spotlight is open (those can hang outside the window). RQGeo is a fresh table every frame
+        -- the menu renders, so an unchanged one (minimised to the bubble) is stale after 0.25s.
+        -- Older/upstream libs publish neither field: no guard, exactly the old behaviour.
+        local g=_G.RQGeo
+        if g~=R.geoRef then R.geoRef=g; R.geoAt=nowc end
+        local geoLive=type(g)=="table" and g.open==true and (nowc-(R.geoAt or 0))<=0.25
+        local overMenu=geoLive and (g.pop==true
+            or (type(g.wx)=="number" and type(g.wy)=="number" and type(g.ww)=="number" and type(g.wh)=="number"
+                and R.mx>=g.wx-2 and R.mx<=g.wx+g.ww+2 and R.my>=g.wy-2 and R.my<=g.wy+g.wh+2))
+        -- Clicking anywhere but the search box ends typing, like any text field -- including a click
+        -- on the menu where it happens to cover the box. Checked BEFORE the click is dispatched so
+        -- the click itself still lands (a sort button, a row, the menu, the game).
+        if R.justP and GUI.PLSearchFocused then
+            local b=PLI.box
+            local inBox=b and R.mx>=b.x and R.mx<=b.x+b.w and R.my>=b.y and R.my<=b.y+b.h
+            if overMenu or not inBox then pcall(PLI.focus,false) end
+        end
+        -- Over the menu, only our own overlays drawn ABOVE it (tagged `top`, e.g. the Character
+        -- tab's Load Values popup) may take the click. No drags/resizes/scrolls start there.
+        if R.justP and overMenu and g.pop~=true and not R.dragKey and not R.scrollOff and not R.resizeKey then
+            for i=#clicks,1,-1 do local c=clicks[i]
+                if c.top and R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end
+        end
+        if R.justP and not overMenu and not R.dragKey and not R.scrollOff and not R.resizeKey then
             local handled=false
             for i=#resizes,1,-1 do local rz=resizes[i]
                 if R.mx>=rz.x and R.mx<=rz.x+rz.w and R.my>=rz.y and R.my<=rz.y+rz.h then
@@ -6572,6 +6832,8 @@ task.spawn(function()
                 if R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end end
         end
         R.down=down
+        -- keep the typing heartbeat fresh right up to the yield, so a slow frame can't let it lapse
+        if GUI.PLSearchFocused then GUI.PLTypingAt=os.clock() end
         task.wait()
     end
 end)
@@ -6981,6 +7243,7 @@ local function press()
     AP.Presses = AP.Presses + 1
     AP.LastPress = os.clock()
     AP.PressAt = AP.LastPress
+    GUI._injVK, GUI._injAt = vk, AP.LastPress   -- so the Player List search doesn't type our F
     pcall(keypress, vk)
     AP.Armed = AP.LastPress
 end
@@ -7182,7 +7445,7 @@ task.spawn(function()
             pcall(function() d = iskeypressed(FS.Key) and true or false end)
             if not ready then
                 if not d then ready = true end
-            elseif d and not wasK and FS.Enabled then
+            elseif d and not wasK and FS.Enabled and not (GUI.PLTyping and GUI.PLTyping(FS.Key)) then
                 -- only meaningful while armed, and it must NOT move the pill
                 FS.On = not FS.On
                 pcall(function() uiNotify("Fast Swing", FS.On and "ON" or "OFF", 2) end)
@@ -7220,7 +7483,7 @@ task.spawn(function()
             pcall(function() td = iskeypressed(AP.ToggleKey) and true or false end)
             if not toggleReady then
                 if not td then toggleReady = true end
-            elseif td and not wasToggle and AP.Enabled then
+            elseif td and not wasToggle and AP.Enabled and not (GUI.PLTyping and GUI.PLTyping(AP.ToggleKey)) then
                 -- only meaningful while armed, and it must NOT move the pill
                 AP.On = not AP.On
                 pcall(function() uiNotify("Auto Parry", AP.On and "ON" or "OFF", 2) end)
@@ -7828,6 +8091,7 @@ end)()
             if v then GUI.PLScrollOffset = 0; BuildPlayerList() else ClearPlayerList() end
         end)
         secPL:Toggle("Auto Update", GUI.PLAutoUpdate, function(v) GUI.PLAutoUpdate = v end)
+        secPL:Toggle("Freeze While Typing", GUI.PLFreezeTyping, function(v) GUI.PLFreezeTyping = v end):Tooltip("Anchors your character while the Player List search box has focus, so typing a name can't walk you around. Matcha can't stop the keys themselves reaching the game: E, Q, F, number keys etc. still do their normal thing while you type. Enter, Esc or clicking anywhere else finishes typing.")
 
         local secPanels = tab:Section("Panels", "Right", "Floating windows")
         secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
@@ -8234,6 +8498,10 @@ end)()
                             -- time: it must not run down the give-up clock.
                             spamSince = nil
                             EP.state = "paused - Roblox not focused"
+                        elseif GUI.PLSearchFocused then
+                            -- every tap would type an "e" into the Player List search
+                            spamSince = nil
+                            EP.state = "paused - typing in Player List"
                         elseif menuBusy(now) then
                             spamSince = nil
                             EP.state = "paused - menu open"
