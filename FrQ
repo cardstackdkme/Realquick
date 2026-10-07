@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.4"
+GUI.Version = "v4.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -8565,11 +8565,11 @@ end)()
             GearVelocityIncreaseRate    = { lo = 0, hi = 100,   fb = 1.75 },
             -- Dash (Canisters) + Burst Dash (Client Unique enchant) + Blades parry — added 2026-07-03,
             -- all confirmed as the ONLY numeric entry for their key (live getgc). ⚠ GAS_COST hi is
-            -- capped BELOW 240 so we only ever hit the CLIENT Burst Dash (150), never the SERVER
+            -- capped BELOW 240 so we only ever hit the CLIENT Burst Dash (100; was 150), never the SERVER
             -- Burst Dash (240 — which isn't in client memory anyway, but belt-and-suspenders).
             DASH_FALLBACK_MIN_SPEED             = { lo = 1, hi = 100000, fb = 150 },
             DASH_BASE_GAS_COST                  = { lo = 0, hi = 100000, fb = 50  },
-            GAS_COST                            = { lo = 0, hi = 200,    fb = 150 },
+            GAS_COST                            = { lo = 0, hi = 200,    fb = 100 },
             BURST_FORCE                         = { lo = 1, hi = 100000, fb = 280 },
             -- Burst Dash's extra max-velocity gain (added by the game 2026-10). Read client-side at
             -- activation: signals.addVelocityGain:Fire(cfg.VELOCITY_GAIN_ADDITION). Live getgc: ONE
@@ -8893,16 +8893,16 @@ end)()
 
         -- ---------- Dash (Canisters + Client Burst Dash) — ONE button sets all four ----------
         -- Fixed targets (not sliders): Fallback Min Speed 150->220, Base Gas 50->0,
-        -- Burst Dash gas 150->0, Burst Force 280->350, Burst velocity gain 25->50.
+        -- Burst Dash gas 100->0, Burst Force 280->350, Burst velocity gain 25->75.
         -- "Restore Default" puts your captured
         -- originals back. GAS_COST is the CLIENT Burst Dash only (its accept-range excludes 240).
         local secDash = tab:Section("Dash", "Left", "Canisters + Burst Dash")
         secDash:Label(function() return "Speed 220 | Gas 0/0 | Force 350" end)
-        secDash:Label(function() return "Burst velo gain 25 -> 50" end)
+        secDash:Label(function() return "Burst velo gain 25 -> 75" end)
         secDash:Button("Apply Dash", function()
             applyMany("Dash",
                 { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" },
-                { 220, 0, 0, 350, 50 })
+                { 220, 0, 0, 350, 75 })
         end)
         secDash:Button("Restore Default", function()
             resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" })
