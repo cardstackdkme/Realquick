@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.3"
+GUI.Version = "v4.4"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -8571,6 +8571,10 @@ end)()
             DASH_BASE_GAS_COST                  = { lo = 0, hi = 100000, fb = 50  },
             GAS_COST                            = { lo = 0, hi = 200,    fb = 150 },
             BURST_FORCE                         = { lo = 1, hi = 100000, fb = 280 },
+            -- Burst Dash's extra max-velocity gain (added by the game 2026-10). Read client-side at
+            -- activation: signals.addVelocityGain:Fire(cfg.VELOCITY_GAIN_ADDITION). Live getgc: ONE
+            -- numeric entry (25); the other two same-name entries are strings, excluded by type.
+            VELOCITY_GAIN_ADDITION              = { lo = 0, hi = 1000,   fb = 25  },
             NON_SUCCESSFUL_PARRY_WINDOW_SECONDS = { lo = 0, hi = 60,     fb = 5   },
             -- Firearm no-spread / no-recoil (Musket + Flintlock; getgc hits ALL guns by name).
             -- Real numerics: inaccuracy 2.5/7.5/8.5/15, recoil 2/4; every other same-name GC entry
@@ -8889,17 +8893,19 @@ end)()
 
         -- ---------- Dash (Canisters + Client Burst Dash) — ONE button sets all four ----------
         -- Fixed targets (not sliders): Fallback Min Speed 150->220, Base Gas 50->0,
-        -- Burst Dash gas 150->0, Burst Force 280->350. "Restore Default" puts your captured
+        -- Burst Dash gas 150->0, Burst Force 280->350, Burst velocity gain 25->50.
+        -- "Restore Default" puts your captured
         -- originals back. GAS_COST is the CLIENT Burst Dash only (its accept-range excludes 240).
         local secDash = tab:Section("Dash", "Left", "Canisters + Burst Dash")
         secDash:Label(function() return "Speed 220 | Gas 0/0 | Force 350" end)
+        secDash:Label(function() return "Burst velo gain 25 -> 50" end)
         secDash:Button("Apply Dash", function()
             applyMany("Dash",
-                { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE" },
-                { 220, 0, 0, 350 })
+                { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" },
+                { 220, 0, 0, 350, 50 })
         end)
         secDash:Button("Restore Default", function()
-            resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE" })
+            resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" })
         end)
 
         -- ---------- Blades (non-successful parry window) — slider ----------
