@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.2"
+GUI.Version = "v5.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6850,11 +6850,13 @@ end)()  -- /Requiem UI smooth engine
 -- (the toggle), GUI.PDStatus (the two status lines) and GUI.PowerDoubleCleanup (unload).
 ;(function()
 local WINDOWS = { "Logs", "Pings" }   -- Editor windows that are kept open-but-hidden
+local HIDE_TOOLBAR, HIDE_POPUPS = true, true
 
 local function say(msg, secs)
     pcall(function() uiNotify("Admin", msg, secs or 4) end)
 end
 
+-- ---- shared engine: identical in Menu.lua (Admin block) and in EditorGhost.lua ----
 -- Instance.Address is a hex string on some builds and a number on others.
 local function addrOf(inst)
     local a = inst and inst.Address
@@ -6890,34 +6892,32 @@ local function logicallyOpen(sel, name)
     return cont ~= nil and cont:FindFirstChild("Background") ~= nil
 end
 
--- Which pages the game has open right now, as one string. It changes exactly when a page is
--- opened or closed -- a layout change measured to make a pending top-panel hide land.
-local function openSet(sel)
+-- Everything the game has selected on the top panel right now, as a set { Name = true }.
+local function openPages(sel)
     local t = {}
     if sel then
         for _, ic in ipairs(sel:GetChildren()) do
             local cont = ic:FindFirstChild("IconContainer")
-            if cont and cont:FindFirstChild("Background") then t[#t + 1] = ic.Name end
+            if cont and cont:FindFirstChild("Background") then t[ic.Name] = true end
         end
     end
-    table.sort(t)
-    return table.concat(t, ",")
+    return t
 end
 
 -- Find where the Visible flag lives in a GUI object, on THIS Roblox build. Evidence used:
 --   * the panel's icon row and every icon's container are always shown        -> must read 1
 --   * every window the game says is closed                                    -> must read 0
 --   * the Editor root (Editor on / off) and the top panel (we may have hidden it) -> 0 or 1
+--   * the parts INSIDE closed windows are still declared visible              -> mostly 1
 -- Exactly one byte may satisfy all of it, or we refuse to write anything. The root and the panel
 -- are NOT required to read 1: with the Editor off, or after we hid the panel, the real flag reads
--- 0 there, and requiring 1 would rule the real flag out and let only a wrong byte through. Open
--- windows are not used either: one we already hid reads 0 while open.
+-- 0 there. Open windows are not used: one we already hid reads 0 while open.
 local function findVisibleOffset(sp)
     local sel = selections(sp)
     local spA = addrOf(sp)
     local toolsA = addrOf(sp:FindFirstChild("Tools"))
     if not sel or not spA or not toolsA then return nil, "Editor top panel not found - turn the Editor on" end
-    local shown, closed = {}, {}
+    local shown, closed, kids = {}, {}, {}
     local sa = addrOf(sel)
     if sa then shown[#shown + 1] = sa end
     for _, ic in ipairs(sel:GetChildren()) do
@@ -6927,16 +6927,21 @@ local function findVisibleOffset(sp)
         local w = sp:FindFirstChild(ic.Name)
         if w and w.ClassName == "Frame" and not logicallyOpen(sel, ic.Name) then
             local a = addrOf(w)
-            if a then closed[#closed + 1] = a end
+            if a then
+                closed[#closed + 1] = a
+                for _, ch in ipairs(w:GetChildren()) do
+                    local cn = ch.ClassName
+                    if cn == "Frame" or cn == "TextLabel" or cn == "TextButton" or cn == "ImageLabel"
+                        or cn == "ImageButton" or cn == "ScrollingFrame" or cn == "TextBox" then
+                        local ka = addrOf(ch)
+                        if ka then kids[#kids + 1] = ka end
+                    end
+                end
+            end
         end
     end
     if #shown < 5 then return nil, "Editor not ready" end
     if #closed < 3 then return nil, "close some Editor windows (need 3 closed, have " .. #closed .. ")" end
-    local function spotList(c, p)
-        local t = {}
-        for i, off in ipairs(c) do t[#t + 1] = tostring(off) .. (p[i] and ("(" .. p[i] .. "%)") or "") end
-        return table.concat(t, " ")
-    end
     local cands = {}
     -- Search only the region where a GUI object keeps its basic properties (Position is at +1280
     -- on this build, Visible at +1437; in June they were +1304 / +1461). Further out there are
@@ -6958,49 +6963,40 @@ local function findVisibleOffset(sp)
         end
         if ok then cands[#cands + 1] = off end
     end
-    -- TIE-BREAK. A byte that only means "this object is DRAWN right now" also reads 1 on the shown
-    -- frames and 0 on closed windows. What separates it from the declared Visible flag: the
-    -- children of a closed window are still DECLARED visible (the game hides only the window), but
-    -- they are not drawn. So the declared flag reads 1 on most of those children, a "drawn" byte
-    -- reads 0 on all of them. Keep a candidate only if it reads 1 on at least 60% of them.
+    -- The counts are in the messages on purpose: they are the only clue when this fails on a PC
+    -- we cannot look at.
+    if #cands == 0 then
+        return nil, "flag not found on this Roblox version (" .. #shown .. " shown, " .. #closed .. " closed)"
+    end
+    -- CHILD CHECK. The parts inside a closed window are still DECLARED visible (the game hides only
+    -- the window), so the real flag reads 1 on most of them; a byte that merely tracks what is
+    -- being drawn reads 0 there. It is applied even to a single candidate: if the real flag was
+    -- ruled out for some reason, a lone look-alike must not be accepted by default.
     local pcts = {}
-    if #cands > 1 then
-        local kids = {}
-        for _, ic in ipairs(sel:GetChildren()) do
-            local w = sp:FindFirstChild(ic.Name)
-            if w and w.ClassName == "Frame" and not logicallyOpen(sel, ic.Name) then
-                for _, ch in ipairs(w:GetChildren()) do
-                    local cn = ch.ClassName
-                    if cn == "Frame" or cn == "TextLabel" or cn == "TextButton" or cn == "ImageLabel"
-                        or cn == "ImageButton" or cn == "ScrollingFrame" or cn == "TextBox" then
-                        local a = addrOf(ch)
-                        if a then kids[#kids + 1] = a end
-                    end
-                end
+    local function spotList()
+        local t = {}
+        for i, off in ipairs(cands) do t[#t + 1] = tostring(off) .. (pcts[i] and ("(" .. pcts[i] .. "%)") or "") end
+        return table.concat(t, " ")
+    end
+    if #kids >= 5 then
+        local strong, weak = {}, 0
+        for i, off in ipairs(cands) do
+            local ones = 0
+            for k = 1, #kids do
+                if readByte(kids[k] + off) == 1 then ones = ones + 1 end
             end
+            local pct = math.floor(ones * 100 / #kids + 1 / 2)
+            pcts[i] = pct
+            if pct >= 60 then strong[#strong + 1] = off elseif pct <= 20 then weak = weak + 1 end
         end
-        -- Accept only a CLEAR split: exactly one candidate at 60% or more, every other one at 20%
-        -- or less. Anything murkier is refused, with the percentages shown for diagnosis.
-        if #kids >= 5 then
-            local strong, weak = {}, 0
-            for i, off in ipairs(cands) do
-                local ones = 0
-                for k = 1, #kids do
-                    if readByte(kids[k] + off) == 1 then ones = ones + 1 end
-                end
-                local pct = math.floor(ones * 100 / #kids + 1 / 2)
-                pcts[i] = pct
-                if pct >= 60 then strong[#strong + 1] = off elseif pct <= 20 then weak = weak + 1 end
-            end
-            if #strong == 1 and weak == #cands - 1 then cands = strong end
+        if #cands == 1 then
+            if pcts[1] < 60 then return nil, "only candidate fails the child check: " .. spotList() end
+        elseif #strong == 1 and weak == #cands - 1 then
+            return strong[1]
         end
     end
-    local found, count = cands[1], #cands
-    -- The counts are in the message on purpose: they are the only clue when this fails on a PC
-    -- we cannot look at (a different Roblox version moves or reshapes the flag).
-    if count == 0 then return nil, "flag not found on this Roblox version (" .. #shown .. " shown, " .. #closed .. " closed)" end
-    if count > 1 then return nil, count .. " possible spots: " .. spotList(cands, pcts) end
-    return found
+    if #cands > 1 then return nil, #cands .. " possible spots: " .. spotList() end
+    return cands[1]
 end
 
 -- The newest row id in each Editor list, as { ["Logs/Chat"] = 3225, ... }. Row frames are named
@@ -7029,9 +7025,9 @@ local function rowHeads(sp)
     return heads
 end
 
--- True only when some list has a HIGHER newest id than it had in `base`. A row being removed, a
--- search narrowing a list, or a list that could not be read never counts: only an arrival was
--- measured to cause the redraw, so only an arrival may confirm a hide.
+-- True only when some list has a HIGHER newest id than it had in the baseline. A row being
+-- removed, a search narrowing a list, or a list that could not be read never counts: only an
+-- arrival was measured to cause the redraw, so only an arrival may confirm a hide.
 local function rowArrived(base, now)
     for k, hi in pairs(now) do
         local b = base[k]
@@ -7040,16 +7036,29 @@ local function rowArrived(base, now)
     return false
 end
 
+-- Is there anything in this table? Written with pairs on purpose: the built-in for stepping a
+-- table by hand is not confirmed to exist in every Matcha build, and a missing function here
+-- would stop the whole pass.
+local function hasAny(t)
+    if t then
+        for _ in pairs(t) do return true end
+    end
+    return false
+end
+
 local OFF = nil            -- the Visible flag's position, once found
-local findWhy = nil        -- why OFF could not be found yet (shown in the status line)
+local findWhy = nil        -- why OFF could not be found yet (shown in the status)
 local told = {}            -- last message per topic, so nothing is repeated every pass
 local nextFind = 0         -- the search for OFF is ~2000 reads: at most once a second
 local nextCheck = 0        -- "did a row arrive?" walks every list: at most twice a second
 
--- Per window:  want = what we last wrote ("hide" / nil), base = newest row ids when we wrote it
---              (nil once the change is confirmed), open = what the game last said.
--- "@toolbar": the same, plus sel = the open pages at the moment we wrote.
--- "@popups" : want, ids = pop-ups present last pass, blocked = pop-ups that arrived while hidden.
+-- Per window:  want = "hide" once we wrote it, base = newest row ids when we wrote it (nil once
+--              the hide is confirmed on screen), open = what the game last said.
+-- "@toolbar": the same, plus sel = the pages open when we wrote, lost = the panel may be gone
+--             with no way for a row to bring it back.
+-- "@popups" : want, ids = cards present last pass, stale = cards that were already on screen when
+--             the container was switched off (they stay until they expire), blocked = cards that
+--             arrived while it was off, missing = the container was not found.
 local st = { ["@toolbar"] = {}, ["@popups"] = { blocked = 0 } }
 for _, name in ipairs(WINDOWS) do st[name] = {} end
 
@@ -7081,30 +7090,102 @@ local function setFrame(w, drawn)
     return nil
 end
 
--- Make everything visible again: every managed window the game still has OPEN (one closed from
--- the top panel is hidden by the game itself and is left alone), the top panel, and the pop-up
--- container. Returns true when it could run.
+-- Make everything visible again. Returns true only if every write that was needed landed.
 local function restoreAll()
     local sp = statesProvider()
-    if not sp then return false end
-    if not OFF then OFF = findVisibleOffset(sp) end
+    if not OFF and sp then OFF = findVisibleOffset(sp) end
     if not OFF then return false end
+    local ok = true
+    -- Pop-ups first: they live in a different ScreenGui, so they must come back even if the
+    -- Editor GUI is missing right now.
+    local pp = st["@popups"]
+    local pc = popupContainer()
+    if pc and setFrame(pc, true) == nil then ok = false end
+    pp.want, pp.ids, pp.stale, pp.missing = nil, nil, nil, nil
+    if not sp then return false end
     local sel = selections(sp)
     for _, name in ipairs(WINDOWS) do
-        if logicallyOpen(sel, name) then setFrame(sp:FindFirstChild(name), true) end
+        -- Only a window the game still has OPEN: one closed from the top panel is hidden by the
+        -- game itself and must stay that way.
+        if logicallyOpen(sel, name) then
+            local r = setFrame(sp:FindFirstChild(name), true)
+            if r == nil then ok = false end
+            -- The game may have closed it between our check and our write. A closed window left
+            -- at "visible" would be drawn at the next row, so take the write back.
+            if r == "written" and not logicallyOpen(sel, name) then
+                setFrame(sp:FindFirstChild(name), false)
+            end
+        end
         st[name].want, st[name].base = nil, nil
     end
-    setFrame(sp:FindFirstChild("Tools"), true)
-    st["@toolbar"].want, st["@toolbar"].base, st["@toolbar"].sel = nil, nil, nil
-    setFrame(popupContainer(), true)
-    st["@popups"].want, st["@popups"].ids = nil, nil
-    return true
+    if setFrame(sp:FindFirstChild("Tools"), true) == nil then ok = false end
+    local tb = st["@toolbar"]
+    tb.want, tb.base, tb.sel, tb.lost = nil, nil, nil, nil
+    return ok
 end
 
--- One pass with the toggle ON: hide everything, and work out what has actually landed.
+-- Keep the pop-up container switched off. Separate from the Editor work on purpose: it is another
+-- ScreenGui, so it must keep running even when the Editor GUI is missing, and Editor rows prove
+-- nothing about it. The container is empty when idle, so a card that arrives while it is off is
+-- not drawn (measured twice, ~3s after arrival; a one-frame flash was not ruled out). A card that
+-- was already on screen when the container went off stays until it expires.
+local function popupStep()
+    local pp = st["@popups"]
+    if not HIDE_POPUPS then return end
+    local cont = popupContainer()
+    if not cont then
+        pp.want, pp.ids, pp.stale = nil, nil, nil
+        pp.missing = true
+        if told["@popups"] ~= "missing" then
+            told["@popups"] = "missing"
+            say("Ping pop-ups: container not found - treat them as VISIBLE", 6)
+        end
+        return
+    end
+    pp.missing = nil
+    local pres = setFrame(cont, false)
+    if pres == nil then
+        -- Never leave a stale "hidden" standing, and warn again if it fails again later.
+        pp.want, pp.ids, pp.stale = nil, nil, nil
+        if told["@popups"] ~= "fail" then
+            told["@popups"] = "fail"
+            say("Ping pop-ups: could not set the flag - treat them as VISIBLE", 6)
+        end
+        return
+    end
+    told["@popups"] = nil
+    local ids = {}
+    for _, ch in ipairs(cont:GetChildren()) do
+        if tonumber(ch.Name) then ids[ch.Name] = true end
+    end
+    if pres == "written" or pp.want ~= "hide" then
+        -- The container was on (or may have been) until this pass: any card present now was drawn.
+        pp.want = "hide"
+        pp.stale = {}
+        for id in pairs(ids) do pp.stale[id] = true end
+    else
+        -- The flag was already off when these arrived (their ids are not in order: compare sets).
+        if pp.ids then
+            for id in pairs(ids) do
+                if not pp.ids[id] then pp.blocked = (pp.blocked or 0) + 1 end
+            end
+        end
+        if pp.stale then
+            for id in pairs(pp.stale) do
+                if not ids[id] then pp.stale[id] = nil end
+            end
+        end
+    end
+    pp.ids = ids
+end
+
+-- One pass with hiding ON: hide everything, and work out what has actually landed.
 local function step(now)
     local sp = statesProvider()
-    if not sp then return end
+    if not sp then
+        if OFF then popupStep() end     -- the pop-ups do not depend on the Editor being there
+        return
+    end
     if not OFF then
         if now < nextFind then return end
         nextFind = now + 1
@@ -7160,7 +7241,7 @@ local function step(now)
                 end
             else
                 s.want, s.base = nil, nil
-                told[name] = "closed"     -- no toast: the status line shows it
+                told[name] = "closed"     -- no toast: the status shows it
             end
         else
             anyOpen = true
@@ -7176,7 +7257,7 @@ local function step(now)
                 s.want = "hide"
                 s.base = base
                 told[name] = "pending"
-                -- Only the surprising case gets a toast; a normal hide shows in the status line.
+                -- Only the surprising case gets a toast; a normal hide shows in the status.
                 if reopened then say(name .. " was re-opened: it is VISIBLE until the next row arrives", 6) end
             elseif res == "same" then
                 if s.want == nil then
@@ -7207,96 +7288,145 @@ local function step(now)
     -- Hidden only while one of the windows is open in the game: rows from an open list are what
     -- make a hide or a show land, and a hidden panel cannot be clicked to open one.
     local tb = st["@toolbar"]
-    local tres = setFrame(sp:FindFirstChild("Tools"), not anyOpen)
-    if tres == "written" then
-        -- Baseline read fresh, AFTER this write (same reason as for a window).
-        local base = rowHeads(sp)
-        tb.want = anyOpen and "hide" or nil
-        tb.base = anyOpen and base or nil
-        tb.sel = anyOpen and openSet(sel) or nil
-        told["@toolbar"] = anyOpen and "pending" or "showing"
-    elseif tres == "same" then
-        if anyOpen and tb.want == nil then
-            tb.want = "hide"
-            tb.base = rowHeads(sp)
-            tb.sel = openSet(sel)
-        end
-        if tb.base ~= nil and due then
-            heads = heads or rowHeads(sp)
-            -- A row arriving, or a page being opened / closed (measured: the panel vanished the
-            -- instant a page was clicked), is the layout change that lands it.
-            if rowArrived(tb.base, heads) or openSet(sel) ~= tb.sel then
-                tb.base, tb.sel = nil, nil
-                told["@toolbar"] = "hidden"
+    if HIDE_TOOLBAR then
+        local wasHide = (tb.want == "hide")
+        local tres = setFrame(sp:FindFirstChild("Tools"), not anyOpen)
+        if tres == "written" then
+            if anyOpen then
+                -- Baseline read fresh, AFTER this write (same reason as for a window).
+                local base = rowHeads(sp)
+                tb.want, tb.base, tb.sel, tb.lost = "hide", base, openPages(sel), nil
+                told["@toolbar"] = "pending"
+            else
+                -- We just asked for the panel back because no window is open any more. If its
+                -- hide had been written, your click on the last window may have landed that hide:
+                -- then the panel is gone, and with no list open no row will bring it back.
+                tb.want, tb.base, tb.sel = nil, nil, nil
+                tb.lost = wasHide
+                told["@toolbar"] = "showing"
+            end
+        elseif tres == "same" then
+            if anyOpen then
+                tb.lost = nil
+                if tb.want == nil then
+                    tb.want, tb.base, tb.sel = "hide", rowHeads(sp), openPages(sel)
+                end
+            end
+            if tb.base ~= nil and due then
+                heads = heads or rowHeads(sp)
+                -- A row arriving lands it. So does a page being OPENED (measured: the panel
+                -- vanished the instant a page was clicked open). A page being CLOSED is not
+                -- counted: closing a window we already hid writes the value that is already
+                -- there, which was never seen to cause a redraw.
+                local opened = false
+                for pname in pairs(openPages(sel)) do
+                    if not tb.sel[pname] then opened = true end
+                end
+                if rowArrived(tb.base, heads) or opened then
+                    tb.base, tb.sel = nil, nil
+                    told["@toolbar"] = "hidden"
+                end
+            end
+        else
+            tb.want, tb.base, tb.sel = nil, nil, nil
+            if told["@toolbar"] ~= "fail" then
+                told["@toolbar"] = "fail"
+                say("Top panel: could not set the flag - treat it as VISIBLE", 6)
             end
         end
-    else
-        tb.want, tb.base, tb.sel = nil, nil, nil
-        if told["@toolbar"] ~= "fail" then
-            told["@toolbar"] = "fail"
-            say("Top panel: could not set the flag - treat it as VISIBLE", 6)
-        end
     end
-    -- The only routine toasts: one when hiding starts, one when everything has actually landed.
-    -- Per-item progress is in the two status lines under the toggle.
+
+    popupStep()
+
+    -- ---- the only routine toasts: one when hiding starts, one when it has actually landed ----
+    local pp = st["@popups"]
     if not anyOpen then
-        told.on, told.all = nil, nil
-        if told["@tbwait"] ~= true then
-            told["@tbwait"] = true
-            say("Open Logs or Pings from the top panel first", 5)
+        told.on = nil
+        if told.all ~= nil then say("NOT hidden any more - no window is open", 5) end
+        told.all = nil
+        if tb.lost then
+            if told["@tbwait"] ~= "lost" then
+                told["@tbwait"] = "lost"
+                say("Top panel may be INVISIBLE now: switch the Editor off and on to get it back", 8)
+            end
+        elseif told["@tbwait"] ~= "open" then
+            told["@tbwait"] = "open"
+            say("Open Logs or Pings from the top panel first (panel missing? switch the Editor off and on)", 6)
         end
     else
         told["@tbwait"] = nil
         if told.on ~= true then
             told.on = true
-            say("On - everything vanishes at the next row (status lines show when)", 5)
+            say("On - everything vanishes at the next row (the status shows when)", 5)
         end
-        local allDone = (tb.want == "hide" and tb.base == nil)
+        local editorDone = (not HIDE_TOOLBAR) or (tb.want == "hide" and tb.base == nil)
         for _, name in ipairs(WINDOWS) do
             local s = st[name]
-            if s.open and not (s.want == "hide" and s.base == nil) then allDone = false end
+            -- not done while a hide is pending (also for a window closed before it landed), or
+            -- while an open window is not hidden at all
+            if s.base ~= nil or (s.open and s.want ~= "hide") then editorDone = false end
         end
-        if allDone then
-            if told.all ~= true then told.all = true; say("Everything hidden", 3) end
+        if editorDone then
+            local popsDone = (not HIDE_POPUPS)
+                or (pp.want == "hide" and not hasAny(pp.stale))
+            -- Other Editor pages (Statistics, ...) are not managed: say so if one is showing.
+            local others = {}
+            for pname in pairs(openPages(sel)) do
+                if st[pname] == nil then
+                    local w = sp:FindFirstChild(pname)
+                    if w and w.ClassName == "Frame" then others[#others + 1] = pname end
+                end
+            end
+            table.sort(others)
+            local key = (popsDone and "all" or "editor") .. ":" .. table.concat(others, ",")
+            if told.all ~= key then
+                told.all = key
+                local msg = popsDone and "Everything hidden" or "Windows and top panel hidden - a ping pop-up may still be showing"
+                if #others > 0 then msg = msg .. " (still showing: " .. table.concat(others, ", ") .. ")" end
+                say(msg, 4)
+            end
         else
+            if told.all ~= nil then say("NOT fully hidden any more - wait for the next confirmation", 6) end
             told.all = nil
         end
     end
 
-    -- ---- ping pop-ups ----
-    -- A different ScreenGui from the Editor: Editor rows prove nothing here. The container is
-    -- empty when idle, so there is no old picture to wait out. The flag is re-checked every pass
-    -- in case the game rewrites it.
-    local pp = st["@popups"]
-    local cont = popupContainer()
-    if cont then
-        local pres = setFrame(cont, false)
-        if pres == "written" then
-            pp.want = "hide"
-        elseif pres == "same" then
-            pp.want = "hide"
-        elseif told["@popups"] ~= "fail" then
-            told["@popups"] = "fail"
-            pp.want = nil
-            say("Ping pop-ups: could not set the flag - treat them as VISIBLE", 6)
-        end
-        -- Count pop-ups that arrive while hidden (their ids are not in order, so compare sets).
-        local ids = {}
-        for _, ch in ipairs(cont:GetChildren()) do
-            if tonumber(ch.Name) then ids[ch.Name] = true end
-        end
-        if pp.want == "hide" and pp.ids then
-            for id in pairs(ids) do
-                if not pp.ids[id] then pp.blocked = (pp.blocked or 0) + 1 end
-            end
-        end
-        pp.ids = ids
-    else
-        pp.want = nil
-    end
-
     if due then nextCheck = now + 1 / 2 end
 end
+
+-- Two short lines describing what is hidden right now (valid while hiding is on).
+local function status()
+    if not OFF then return "cannot start yet:", tostring(findWhy or "locating...") end
+    local parts = {}
+    for _, name in ipairs(WINDOWS) do
+        local s = st[name]
+        local w
+        if s.open == false then w = (s.base ~= nil) and "closed (may show)" or "closed"
+        elseif s.want == "hide" then w = s.base and "hiding..." or "hidden"
+        else w = "visible" end
+        parts[#parts + 1] = name .. " " .. w
+    end
+    local tb, pp = st["@toolbar"], st["@popups"]
+    local panel
+    if not HIDE_TOOLBAR then panel = "not managed"
+    elseif tb.lost then panel = "may be gone (Editor off/on)"
+    elseif tb.want == "hide" then panel = tb.base and "hiding..." or "hidden"
+    else panel = "visible" end
+    local pops
+    if not HIDE_POPUPS then pops = "not managed"
+    elseif pp.missing then pops = "not found"
+    elseif pp.want == "hide" then
+        if hasAny(pp.stale) then pops = "card still showing"
+        else pops = "hidden (" .. tostring(pp.blocked or 0) .. ")" end
+    else pops = "visible" end
+    return table.concat(parts, "  |  "), "Panel " .. panel .. "  |  Pop-ups " .. pops
+end
+
+-- Forget everything said so far, so the next "on" announces itself again.
+local function resetTold()
+    for k in pairs(told) do told[k] = nil end
+end
+-- ---- /shared engine ----
 
 local engaged = false      -- we may have hidden something that needs putting back
 local noEditor = false
@@ -7305,17 +7435,7 @@ local noEditor = false
 GUI.PDStatus = function()
     if GUI.PowerDouble ~= true then return "off", " " end
     if noEditor then return "no staff Editor on this account", " " end
-    if not OFF then return "cannot start yet:", tostring(findWhy or "locating...") end
-    local function win(name)
-        local s = st[name]
-        if s.open == false then return "closed" end
-        if s.want == "hide" then return s.base and "hiding..." or "hidden" end
-        return "visible"
-    end
-    local tb, pp = st["@toolbar"], st["@popups"]
-    local panel = (tb.want == "hide") and (tb.base and "hiding..." or "hidden") or "visible"
-    local pops = (pp.want == "hide") and ("hidden (" .. tostring(pp.blocked or 0) .. " blocked)") or "visible"
-    return "Logs " .. win("Logs") .. "  |  Pings " .. win("Pings"), "Panel " .. panel .. "  |  Pop-ups " .. pops
+    return status()
 end
 
 -- Reached from UnloadScript, which is defined above this block.
@@ -7337,32 +7457,31 @@ task.spawn(function()
         if on then
             engaged = true
             sweepUntil = 0
-            if statesProvider() == nil then
-                noEditor = true
+            local had = statesProvider() ~= nil
+            noEditor = (not had) and (OFF == nil)
+            if noEditor then
                 if told.noed ~= true then told.noed = true; say("No staff Editor found on this account", 5) end
             else
-                noEditor = false
                 told.noed = nil
-                local ok, err = pcall(step, os.clock())
-                if not ok and told.err ~= tostring(err) then
-                    told.err = tostring(err)
-                    say("Error: " .. tostring(err), 6)
-                end
+            end
+            -- step() also runs with the Editor missing, so the pop-ups stay off once we know how.
+            local ok, err = pcall(step, os.clock())
+            if not ok and told.err ~= tostring(err) then
+                told.err = tostring(err)
+                say("Error: " .. tostring(err), 6)
             end
         elseif engaged or os.clock() < sweepUntil then
-            if statesProvider() ~= nil then
-                local ok, restored = pcall(restoreAll)
-                if engaged then
-                    if ok and restored then
-                        say("Off - everything comes back at the next row (or switch the Editor off and on)", 6)
-                    else
-                        say("Off, but could NOT restore - switch the Editor off and on, then re-open Logs / Pings", 8)
-                    end
+            local ok, restored = pcall(restoreAll)
+            if engaged then
+                if ok and restored then
+                    say("Off - everything comes back at the next row (or switch the Editor off and on)", 6)
+                else
+                    say("Off, but could NOT restore everything - turn it on and off again (rejoin if that fails)", 8)
                 end
-                if ok and restored then sweepUntil = 0 end
             end
+            if ok and restored then sweepUntil = 0 end
             engaged = false
-            for k in pairs(told) do told[k] = nil end
+            resetTold()
         end
         task.wait(on and 1 / 10 or 1 / 2)
     end
