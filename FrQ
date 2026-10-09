@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.5"
+GUI.Version = "v4.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -98,6 +98,7 @@ GUI.PLScrollDragLastY = 0
 GUI.PLCachedPlayers = {}    -- cached player data, fetched on open
 GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
+GUI.PowerDouble = false     -- Tools -> PowerDouble: hide the staff Editor (windows, top panel, ping pop-ups)
 
 -- Personal gas bar (self only, from Tools toggle). Same widget as the health bar.
 GUI.GasBarVisible = false
@@ -4741,6 +4742,8 @@ UnloadScript = function()
     -- landmine engine, so naming LANDMINE here would resolve to a nil global.
     if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
     if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
+    -- never leave the staff Editor hidden behind us (see the POWERDOUBLE block)
+    if GUI.PowerDoubleCleanup then pcall(GUI.PowerDoubleCleanup) end
     for _, data in pairs(GEAR.Objects) do
         pcall(function() data.label:Remove() end)
     end
@@ -6821,6 +6824,483 @@ end)
 end)()  -- /Requiem UI smooth engine
 
 
+-- ============================================================
+-- POWERDOUBLE  --  hide the staff Editor from your own screen
+-- ============================================================
+-- For an account that has the staff Editor GUI. One toggle (Tools -> PowerDouble) hides, at once:
+--   * the Logs and Pings windows   * the Editor's top panel   * the ping pop-ups on the left
+-- while the game still considers the windows OPEN, so the server keeps sending their rows.
+--
+-- HOW: the game keeps "is this window open" in its own state and tells the server only when you
+-- click the window's icon on the top panel. What is DRAWN is a separate Visible flag on each
+-- Frame, which the game writes when that state changes and never reads back. We flip only that
+-- flag, in memory. Nothing is sent to the server.
+--
+-- MEASURED LIVE (2026-10-09) -- every rule below comes from these:
+--   * A hide or a show does NOT land when it is written. Roblox keeps drawing its last picture
+--     until the Editor's layout changes: a new ROW arriving in any Editor list, or a page being
+--     opened / closed from the top panel. Only then is "hidden" true, so only then do we say so.
+--   * Ping pop-ups live in a different ScreenGui whose container is empty when idle, so a pop-up
+--     that arrives after the write is not drawn (seen twice; a one-frame flash was not ruled out).
+--   * Writing a ScreenGui's Enabled flag CRASHED the game. Only Frame Visible flags are written.
+--   * The flag's position moves with Roblox updates, so it is located at runtime from evidence,
+--     and nothing is written unless exactly one byte fits.
+-- Wrapped in an IIFE for its own local budget. It talks to the menu only through GUI.PowerDouble
+-- (the toggle), GUI.PDStatus (the two status lines) and GUI.PowerDoubleCleanup (unload).
+;(function()
+local WINDOWS = { "Logs", "Pings" }   -- Editor windows that are kept open-but-hidden
+
+local function say(msg, secs)
+    pcall(function() uiNotify("PowerDouble", msg, secs or 4) end)
+end
+
+-- Instance.Address is a hex string on some builds and a number on others.
+local function addrOf(inst)
+    local a = inst and inst.Address
+    if type(a) == "number" then return a end
+    if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+    return nil
+end
+
+local function readByte(a)
+    local ok, v = pcall(memory_read, "byte", a)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+-- Always a FRESH lookup: never keep an instance reference across passes.
+local function statesProvider()
+    local sp
+    pcall(function() sp = Players.LocalPlayer.PlayerGui.Editor.StatesProvider end)
+    return sp
+end
+
+local function selections(sp)
+    local tools = sp:FindFirstChild("Tools")
+    return tools and tools:FindFirstChild("Selections") or nil
+end
+
+-- Does the GAME think this window is open? A selected icon on the top panel gets a "Background"
+-- child, so this needs no Visible read (Matcha cannot read Visible) and is independent of what
+-- we hide.
+local function logicallyOpen(sel, name)
+    local ic = sel and sel:FindFirstChild(name)
+    local cont = ic and ic:FindFirstChild("IconContainer")
+    return cont ~= nil and cont:FindFirstChild("Background") ~= nil
+end
+
+-- Which pages the game has open right now, as one string. It changes exactly when a page is
+-- opened or closed -- a layout change measured to make a pending top-panel hide land.
+local function openSet(sel)
+    local t = {}
+    if sel then
+        for _, ic in ipairs(sel:GetChildren()) do
+            local cont = ic:FindFirstChild("IconContainer")
+            if cont and cont:FindFirstChild("Background") then t[#t + 1] = ic.Name end
+        end
+    end
+    table.sort(t)
+    return table.concat(t, ",")
+end
+
+-- Find where the Visible flag lives in a GUI object, on THIS Roblox build. Evidence used:
+--   * the panel's icon row and every icon's container are always shown        -> must read 1
+--   * every window the game says is closed                                    -> must read 0
+--   * the Editor root (Editor on / off) and the top panel (we may have hidden it) -> 0 or 1
+-- Exactly one byte may satisfy all of it, or we refuse to write anything. The root and the panel
+-- are NOT required to read 1: with the Editor off, or after we hid the panel, the real flag reads
+-- 0 there, and requiring 1 would rule the real flag out and let only a wrong byte through. Open
+-- windows are not used either: one we already hid reads 0 while open.
+local function findVisibleOffset(sp)
+    local sel = selections(sp)
+    local spA = addrOf(sp)
+    local toolsA = addrOf(sp:FindFirstChild("Tools"))
+    if not sel or not spA or not toolsA then return nil, "Editor top panel not found" end
+    local shown, closed = {}, {}
+    local sa = addrOf(sel)
+    if sa then shown[#shown + 1] = sa end
+    for _, ic in ipairs(sel:GetChildren()) do
+        local cont = ic:FindFirstChild("IconContainer")
+        local ca = cont and addrOf(cont)
+        if ca then shown[#shown + 1] = ca end
+        local w = sp:FindFirstChild(ic.Name)
+        if w and w.ClassName == "Frame" and not logicallyOpen(sel, ic.Name) then
+            local a = addrOf(w)
+            if a then closed[#closed + 1] = a end
+        end
+    end
+    if #shown < 5 then return nil, "Editor not ready" end
+    if #closed < 3 then return nil, "need at least 3 closed Editor windows to locate the flag safely" end
+    local found, count = nil, 0
+    for off = 0x100, 0x900 do
+        local v = readByte(spA + off)
+        local tv = readByte(toolsA + off)
+        local ok = (v == 0 or v == 1) and (tv == 0 or tv == 1)
+        if ok then
+            for i = 1, #shown do
+                if readByte(shown[i] + off) ~= 1 then ok = false break end
+            end
+        end
+        if ok then
+            for i = 1, #closed do
+                if readByte(closed[i] + off) ~= 0 then ok = false break end
+            end
+        end
+        if ok then found = off; count = count + 1 end
+    end
+    if count == 0 then return nil, "could not locate the flag on this Roblox version" end
+    if count > 1 then return nil, count .. " possible spots - not safe to guess" end
+    return found
+end
+
+-- The newest row id in each Editor list, as { ["Logs/Chat"] = 3225, ... }. Row frames are named
+-- by a running number, so a list's newest id only goes UP when a row ARRIVES -- the layout change
+-- measured to make Roblox redraw, i.e. the moment a pending hide or show really lands.
+local function rowHeads(sp)
+    local heads = {}
+    for _, wname in ipairs(WINDOWS) do
+        local w = sp:FindFirstChild(wname)
+        if w then
+            for _, panel in ipairs(w:GetChildren()) do
+                local c1 = panel:FindFirstChild("Content")
+                local c2 = c1 and c1:FindFirstChild("Content")
+                local sc = c2 and c2:FindFirstChild("Scroll")
+                if sc then
+                    local hi = 0
+                    for _, r in ipairs(sc:GetChildren()) do
+                        local k = tonumber(r.Name)
+                        if k and k > hi then hi = k end
+                    end
+                    heads[wname .. "/" .. panel.Name] = hi
+                end
+            end
+        end
+    end
+    return heads
+end
+
+-- True only when some list has a HIGHER newest id than it had in `base`. A row being removed, a
+-- search narrowing a list, or a list that could not be read never counts: only an arrival was
+-- measured to cause the redraw, so only an arrival may confirm a hide.
+local function rowArrived(base, now)
+    for k, hi in pairs(now) do
+        local b = base[k]
+        if b ~= nil and hi > b then return true end
+    end
+    return false
+end
+
+local OFF = nil            -- the Visible flag's position, once found
+local told = {}            -- last message per topic, so nothing is repeated every pass
+local nextFind = 0         -- the search for OFF is ~2000 reads: at most once a second
+local nextCheck = 0        -- "did a row arrive?" walks every list: at most twice a second
+
+-- Per window:  want = what we last wrote ("hide" / nil), base = newest row ids when we wrote it
+--              (nil once the change is confirmed), open = what the game last said.
+-- "@toolbar": the same, plus sel = the open pages at the moment we wrote.
+-- "@popups" : want, ids = pop-ups present last pass, blocked = pop-ups that arrived while hidden.
+local st = { ["@toolbar"] = {}, ["@popups"] = { blocked = 0 } }
+for _, name in ipairs(WINDOWS) do st[name] = {} end
+
+-- The ping pop-ups: PlayerGui.Notifications is a ScreenGui holding ONE Frame, also named
+-- "Notifications"; each pop-up is a child Frame of that Frame. Only the Frame is ever touched --
+-- never the ScreenGui (writing a ScreenGui's flag crashed the game).
+local function popupContainer()
+    local c
+    pcall(function()
+        local g = Players.LocalPlayer.PlayerGui:FindFirstChild("Notifications")
+        c = g and g:FindFirstChild("Notifications")
+    end)
+    if c and c.ClassName == "Frame" then return c end
+    return nil
+end
+
+-- Write the flag on one Frame. Refuses unless the target is a Frame whose byte currently holds a
+-- plain 0 or 1, so a wrong spot can never be overwritten. Returns "same", "written" or nil.
+local function setFrame(w, drawn)
+    if not w or w.ClassName ~= "Frame" then return nil end
+    local a = addrOf(w)
+    if not a or a <= 4096 then return nil end
+    local cur = readByte(a + OFF)
+    if cur ~= 0 and cur ~= 1 then return nil end
+    local want = drawn and 1 or 0
+    if cur == want then return "same" end
+    pcall(memory_write, "byte", a + OFF, want)
+    if readByte(a + OFF) == want then return "written" end
+    return nil
+end
+
+-- Make everything visible again: every managed window the game still has OPEN (one closed from
+-- the top panel is hidden by the game itself and is left alone), the top panel, and the pop-up
+-- container. Returns true when it could run.
+local function restoreAll()
+    local sp = statesProvider()
+    if not sp then return false end
+    if not OFF then OFF = findVisibleOffset(sp) end
+    if not OFF then return false end
+    local sel = selections(sp)
+    for _, name in ipairs(WINDOWS) do
+        if logicallyOpen(sel, name) then setFrame(sp:FindFirstChild(name), true) end
+        st[name].want, st[name].base = nil, nil
+    end
+    setFrame(sp:FindFirstChild("Tools"), true)
+    st["@toolbar"].want, st["@toolbar"].base, st["@toolbar"].sel = nil, nil, nil
+    setFrame(popupContainer(), true)
+    st["@popups"].want, st["@popups"].ids = nil, nil
+    return true
+end
+
+-- One pass with the toggle ON: hide everything, and work out what has actually landed.
+local function step(now)
+    local sp = statesProvider()
+    if not sp then return end
+    if not OFF then
+        if now < nextFind then return end
+        nextFind = now + 1
+        local off, why = findVisibleOffset(sp)
+        if not off then
+            if told.find ~= why then told.find = why; say("Waiting: " .. tostring(why), 5) end
+            return
+        end
+        OFF = off
+    end
+    -- The Editor root is hidden as a whole when you switch the Editor off with its keybind. The
+    -- game then tells the server so, and rows may stop: nothing pending can be confirmed until
+    -- it is back on.
+    local rootOn = readByte((addrOf(sp) or 0) + OFF) == 1
+    if told.editor ~= rootOn then
+        if told.editor ~= nil or not rootOn then
+            say(rootOn and "Editor is back on" or "Editor is OFF - rows may have stopped until you turn it back on", 5)
+        end
+        told.editor = rootOn
+    end
+    local sel = selections(sp)
+    local due = now >= nextCheck
+    local heads = nil    -- current newest row ids; read at most once per pass, and only when due
+    local anyOpen = false
+    for _, name in ipairs(WINDOWS) do
+        local s = st[name]
+        local open = logicallyOpen(sel, name)
+        s.open = open
+        if not open then
+            if s.want == "hide" and s.base ~= nil then
+                -- Closed before our hide had landed. The game's own "hide" then wrote the value
+                -- that was already there, which gives Roblox no reason to redraw: the old picture
+                -- can stay up. Keep watching for the row that clears it.
+                if told[name] ~= "closed-pending" then
+                    told[name] = "closed-pending"
+                    say(name .. " closed before its hide landed: it may STAY ON SCREEN until a row arrives in another open list", 8)
+                end
+                if due then
+                    heads = heads or rowHeads(sp)
+                    if rowArrived(s.base, heads) then s.want, s.base = nil, nil end
+                end
+            else
+                s.want, s.base = nil, nil
+                if told[name] ~= "closed" then
+                    told[name] = "closed"
+                    say(name .. " is CLOSED in the Editor - no rows are being received. Open it from the top panel.", 6)
+                end
+            end
+        else
+            anyOpen = true
+            if told[name] == "closed" or told[name] == "closed-pending" then told[name] = nil end
+            local res = setFrame(sp:FindFirstChild(name), false)
+            if res == "written" then
+                -- Either our first write, or the game re-drew the window (it was re-opened) and
+                -- we just hid it again. Neither is on screen yet. The baseline is read fresh,
+                -- AFTER this window's own write: a row that arrived before the write redrew the
+                -- window while it was still visible, and must not count as its confirmation.
+                local reopened = (s.want == "hide")
+                local base = rowHeads(sp)
+                s.want = "hide"
+                s.base = base
+                told[name] = "pending"
+                say(name .. (reopened and " was re-opened: it is VISIBLE until the next row arrives" or ": hiding - it vanishes when the next row arrives"), 6)
+            elseif res == "same" then
+                if s.want == nil then
+                    -- Already hidden when we first looked (left so by an earlier run). We cannot
+                    -- know whether that landed, so treat it as pending.
+                    s.want = "hide"
+                    s.base = rowHeads(sp)
+                end
+                if s.base ~= nil and due then
+                    heads = heads or rowHeads(sp)
+                    if rowArrived(s.base, heads) then
+                        s.base = nil     -- a row arrived after our write: the hide is on screen
+                        told[name] = "hidden"
+                        say(name .. " hidden (confirmed) - still receiving rows", 4)
+                    end
+                end
+            else
+                -- Could not read or set the flag. Never leave a stale "hidden" standing.
+                s.want, s.base = nil, nil
+                if told[name] ~= "fail" then
+                    told[name] = "fail"
+                    say(name .. ": could not set the flag - treat it as VISIBLE", 6)
+                end
+            end
+        end
+    end
+
+    -- ---- the top panel ----
+    -- Hidden only while one of the windows is open in the game: rows from an open list are what
+    -- make a hide or a show land, and a hidden panel cannot be clicked to open one.
+    local tb = st["@toolbar"]
+    local tres = setFrame(sp:FindFirstChild("Tools"), not anyOpen)
+    if tres == "written" then
+        -- Baseline read fresh, AFTER this write (same reason as for a window).
+        local base = rowHeads(sp)
+        tb.want = anyOpen and "hide" or nil
+        tb.base = anyOpen and base or nil
+        tb.sel = anyOpen and openSet(sel) or nil
+        if anyOpen then
+            told["@toolbar"] = "pending"
+            say("Top panel: hiding - it vanishes at the next row, or the moment you open or close a page", 6)
+        else
+            told["@toolbar"] = "showing"
+            say("Top panel: showing - if it does not appear, switch the Editor off and on", 7)
+        end
+    elseif tres == "same" then
+        if anyOpen and tb.want == nil then
+            tb.want = "hide"
+            tb.base = rowHeads(sp)
+            tb.sel = openSet(sel)
+        end
+        if tb.base ~= nil and due then
+            heads = heads or rowHeads(sp)
+            -- A row arriving, or a page being opened / closed (measured: the panel vanished the
+            -- instant a page was clicked), is the layout change that lands it.
+            if rowArrived(tb.base, heads) or openSet(sel) ~= tb.sel then
+                tb.base, tb.sel = nil, nil
+                told["@toolbar"] = "hidden"
+                say("Top panel hidden (confirmed)", 4)
+            end
+        end
+    else
+        tb.want, tb.base, tb.sel = nil, nil, nil
+        if told["@toolbar"] ~= "fail" then
+            told["@toolbar"] = "fail"
+            say("Top panel: could not set the flag - treat it as VISIBLE", 6)
+        end
+    end
+    if not anyOpen then
+        if told["@tbwait"] ~= true then
+            told["@tbwait"] = true
+            say("Open Logs or Pings from the top panel - it stays visible until one is open", 6)
+        end
+    else
+        told["@tbwait"] = nil
+    end
+
+    -- ---- ping pop-ups ----
+    -- A different ScreenGui from the Editor: Editor rows prove nothing here. The container is
+    -- empty when idle, so there is no old picture to wait out. The flag is re-checked every pass
+    -- in case the game rewrites it.
+    local pp = st["@popups"]
+    local cont = popupContainer()
+    if cont then
+        local pres = setFrame(cont, false)
+        if pres == "written" then
+            pp.want = "hide"
+            say("Ping pop-ups: hidden - new ones are not drawn (one already showing stays until it expires)", 6)
+        elseif pres == "same" then
+            pp.want = "hide"
+        elseif told["@popups"] ~= "fail" then
+            told["@popups"] = "fail"
+            pp.want = nil
+            say("Ping pop-ups: could not set the flag - treat them as VISIBLE", 6)
+        end
+        -- Count pop-ups that arrive while hidden (their ids are not in order, so compare sets).
+        local ids = {}
+        for _, ch in ipairs(cont:GetChildren()) do
+            if tonumber(ch.Name) then ids[ch.Name] = true end
+        end
+        if pp.want == "hide" and pp.ids then
+            for id in pairs(ids) do
+                if not pp.ids[id] then pp.blocked = (pp.blocked or 0) + 1 end
+            end
+        end
+        pp.ids = ids
+    else
+        pp.want = nil
+    end
+
+    if due then nextCheck = now + 1 / 2 end
+end
+
+local engaged = false      -- we may have hidden something that needs putting back
+local noEditor = false
+
+-- Two short lines for the Tools tab, so "is it actually hidden yet?" is one glance.
+GUI.PDStatus = function()
+    if GUI.PowerDouble ~= true then return "off", " " end
+    if noEditor then return "no staff Editor on this account", " " end
+    if not OFF then return "locating... (turn the Editor on)", " " end
+    local function win(name)
+        local s = st[name]
+        if s.open == false then return "closed" end
+        if s.want == "hide" then return s.base and "hiding..." or "hidden" end
+        return "visible"
+    end
+    local tb, pp = st["@toolbar"], st["@popups"]
+    local panel = (tb.want == "hide") and (tb.base and "hiding..." or "hidden") or "visible"
+    local pops = (pp.want == "hide") and ("hidden (" .. tostring(pp.blocked or 0) .. " blocked)") or "visible"
+    return "Logs " .. win("Logs") .. "  |  Pings " .. win("Pings"), "Panel " .. panel .. "  |  Pop-ups " .. pops
+end
+
+-- Reached from UnloadScript, which is defined above this block.
+GUI.PowerDoubleCleanup = function()
+    if engaged then pcall(restoreAll); engaged = false end
+end
+
+task.spawn(function()
+    -- A re-run of the menu starts a new copy of this loop; the old one sees the token change and
+    -- stops WITHOUT restoring (the new copy owns the windows now).
+    local gen = {}
+    _G.__RQ_POWERDOUBLE = gen
+    -- A re-run starts with the toggle off while windows may still be hidden by the previous copy.
+    -- So for the first seconds an "off" toggle also sweeps: a window the game has open can only
+    -- read "not visible" because a copy of this engine hid it.
+    local sweepUntil = os.clock() + 15
+    while GUI.Running and _G.__RQ_POWERDOUBLE == gen do
+        local on = GUI.PowerDouble == true
+        if on then
+            engaged = true
+            sweepUntil = 0
+            if statesProvider() == nil then
+                noEditor = true
+                if told.noed ~= true then told.noed = true; say("No staff Editor found on this account", 5) end
+            else
+                noEditor = false
+                told.noed = nil
+                local ok, err = pcall(step, os.clock())
+                if not ok and told.err ~= tostring(err) then
+                    told.err = tostring(err)
+                    say("Error: " .. tostring(err), 6)
+                end
+            end
+        elseif engaged or os.clock() < sweepUntil then
+            if statesProvider() ~= nil then
+                local ok, restored = pcall(restoreAll)
+                if engaged then
+                    if ok and restored then
+                        say("Off - everything comes back at the next row (or switch the Editor off and on)", 6)
+                    else
+                        say("Off, but could NOT restore - switch the Editor off and on, then re-open Logs / Pings", 8)
+                    end
+                end
+                if ok and restored then sweepUntil = 0 end
+            end
+            engaged = false
+            for k in pairs(told) do told[k] = nil end
+        end
+        task.wait(on and 1 / 10 or 1 / 2)
+    end
+end)
+end)()  -- /PowerDouble
+
+
 
 -- ============================================================
 -- AUTO PARRY v3  —  Requiem "Blade Parry".  No tuning sliders.
@@ -8072,6 +8552,26 @@ end)()
             if v then GUI.PLScrollOffset = 0; BuildPlayerList() else ClearPlayerList() end
         end)
         secPL:Toggle("Auto Update", GUI.PLAutoUpdate, function(v) GUI.PLAutoUpdate = v end)
+
+        -- ---------- PowerDouble: hide the staff Editor from your own screen ----------
+        -- One switch for the whole POWERDOUBLE engine: the Logs + Pings windows, the Editor's top
+        -- panel and the ping pop-ups, all hidden while the game still treats the windows as open.
+        -- Off puts everything back. Does nothing on an account that has no staff Editor.
+        local secPD = tab:Section("PowerDouble", "Left", "Hide the staff Editor from your screen")
+        GUI._uiPD = secPD:Toggle("PowerDouble", GUI.PowerDouble == true, function(v)
+            GUI.PowerDouble = v == true
+        end):Tooltip("Staff accounts only. Open Logs and/or Pings from the Editor's top panel first, then turn this on. Hides those windows, the top panel and the ping pop-ups while they keep receiving rows. A hide lands when the next row arrives (or when you open / close a page), so wait for 'hidden' below before sharing your screen. Off brings everything back.")
+        pcall(function()
+            secPD:Label(function()
+                local a = GUI.PDStatus and GUI.PDStatus()
+                return tostring(a or "off")
+            end)
+            secPD:Label(function()
+                if not GUI.PDStatus then return " " end
+                local _, b = GUI.PDStatus()
+                return tostring(b or " ")
+            end)
+        end)
 
         local secPanels = tab:Section("Panels", "Right", "Floating windows")
         secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
