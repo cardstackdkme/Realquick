@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.4"
+GUI.Version = "v5.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7848,16 +7848,23 @@ if not LP then return end
 local C_WHIFF_LOCKOUT = 5.0
 local C_SWING_LOCKOUT = 0.1
 
--- AnimationTrack memory layout (validated live on this build)
-local OA, ON, OT, OO, OM, OS, OP, OI = 2944, 0, 16, 264, 184, 212, 216, 192
--- Track WEIGHT (+220) and WEIGHT TARGET (+224). These are the liveness discriminator and they are
--- load-bearing: Roblox leaves an AnimationTrack in the Animator's active list AFTER it stops, so
--- "the swing animation is present" does NOT mean "they are swinging". Measured live on two enemies:
---   playing swing -> TimePosition advancing, 220=1.000, 224=1.000
---   finished swing -> TimePosition frozen,   220=0.000, 224=0.000   (lingered for 21-25 SECONDS)
+-- Animator / AnimationTrack memory layout. These USED to be constants right here (2944, 264, 184,
+-- 212, 216, 192, weights 220 / 224), and that is what killed both features that read animations:
+-- Roblox has moved them three times, a stale number raises no error, and the track walk simply
+-- finds nothing. They are now LOCATED at runtime by the "animator layout" block further down and
+-- copied into these names by layAdopt(); until then they are nil and scan() / fsApply() stand down.
+--   OA  list of playing tracks on the Animator     ON / OT   node -> next, node -> track (stable)
+--   OO  track -> its Animator                      OM / OI   track -> Animation, its id string
+--   OS / OP   Speed / TimePosition                 OW / OWT  blend weight / weight target
+-- OW / OWT are the liveness discriminator and they are load-bearing: Roblox leaves an
+-- AnimationTrack in the Animator's active list AFTER it stops, so "the swing animation is present"
+-- does NOT mean "they are swinging". Measured live on two enemies:
+--   playing swing -> TimePosition advancing, weight 1.000, target 1.000
+--   finished swing -> TimePosition frozen,   weight 0.000, target 0.000   (lingered for 21-25 SECONDS)
 -- Without this gate the script tracks a dead swing and fires when the attacker merely walks past
 -- with their blade out — which is exactly the "slashes near me then leaves" bait.
-local OW, OWT = 220, 224
+local OA, ON, OT, OO, OM, OS, OP, OI = nil, 0, 16, nil, nil, nil, nil, nil
+local OW, OWT = nil, nil
 
 -- STRICT allowlist. 82 of the 93 ids in Common.Animations.Gear are harmless, and the worst
 -- look-alikes (Grapples.Double, Dashes, Launches) play exactly during a closing approach — so
@@ -7987,6 +7994,180 @@ end
 -- animator), so only the trailing number is comparable.
 local function idNum(s) if type(s) ~= "string" then return nil end return string.match(s, "(%d+)%s*$") end
 
+-- ---- animator layout: identical in Menu.lua and in Fast swing.lua ----
+-- Where things live inside an Animator and an AnimationTrack. These are NOT constants. Roblox has
+-- moved them three times, and each time everything built on the old numbers went silent -- a stale
+-- offset raises no error, the track walk just finds nothing:
+--     list of playing tracks      2944 -> 2896 -> 2688
+--     track -> its Animator        264 ->  272 ->  256
+--     track -> Animation           184 ->  184 ->  168      Animation id string  192 -> 192 -> 176
+--     Speed / TimePosition     212/216 -> 212/216 -> 196/200     weight / target  220/224 -> 204/208
+-- So they are FOUND, on your own animator, from what each field has to do:
+--   * the list is a real linked list: walking it returns to its head in exactly as many steps as
+--     the count stored beside the head, and every node's back link is the node before it
+--   * a track points back at the animator it belongs to
+--   * a track points at an Animation whose id reads as an asset id
+--   * TimePosition is the float that advances, at the rate held in the float just before it
+--     (Speed); the two floats after it are the blend weight and its target, both 0..1
+-- Every track that shows all of that has to agree, or nothing is used.
+-- Needs rptr / rflt / ri32 from the file around it.
+local LAY = { ok = false, why = "not located yet", tries = 0 }
+local LAY_HINT = { 2688, 2896, 2944 }   -- tried first; the search covers everything else
+
+local function layPtr(p) return type(p) == "number" and p > 0x10000 and p < 0x7FFFFFFFFFFF end
+
+-- A std::string that has to LOOK like one: printable, with a capacity that fits its length.
+local function layStr(base)
+    local len, cap = rptr(base + 16), rptr(base + 24)
+    if not (len and cap) or len < 8 or len > 128 or cap < len or cap > 4096 then return nil end
+    local src = (cap < 16) and base or rptr(base)
+    if not layPtr(src) then return nil end
+    local out, i = {}, 0
+    while i < len do
+        local w = ri32(src + i)
+        if not w then return nil end
+        for b = 0, 3 do
+            if i + b < len then
+                local ch = bit32.band(bit32.rshift(w, b * 8), 255)
+                if ch < 32 or ch > 126 then return nil end
+                out[#out + 1] = string.char(ch)
+            end
+        end
+        i = i + 4
+    end
+    return table.concat(out)
+end
+
+-- Both spellings Roblox uses, ending in the numeric id.
+local function layIsAsset(s)
+    if type(s) ~= "string" or not string.match(s, "%d%d%d%d+%s*$") then return false end
+    return string.find(s, "rbxassetid://", 1, true) ~= nil or string.find(s, "asset/?id=", 1, true) ~= nil
+end
+
+-- The elements of the linked list at A+off, or nil when it is not a well-formed one.
+local function layList(A, off)
+    local head, size = rptr(A + off), rptr(A + off + 8)
+    if not layPtr(head) or not size or size < 1 or size > 64 then return nil end
+    local out, prev, node = {}, head, rptr(head)
+    while layPtr(node) and node ~= head and #out < size do
+        if rptr(node + 8) ~= prev then return nil end
+        out[#out + 1] = rptr(node + 16) or 0
+        prev, node = node, rptr(node)
+    end
+    if node ~= head or #out ~= size or rptr(head + 8) ~= prev then return nil end
+    return out
+end
+
+-- FIRST LOOK. Every well-formed list on the animator whose elements point back at it, with a
+-- snapshot of each element's floats. Returns nil when there is nothing to study.
+local function layLook(A)
+    local found = {}
+    local function consider(off)
+        local els = layList(A, off)
+        if not els then return end
+        local mine = {}
+        for i = 1, #els do
+            local t = els[i]
+            -- No cap on how many are studied: finished tracks stay in this list for 20+ seconds,
+            -- so in a fight the playing ones can sit behind a dozen dead ones (layList already
+            -- bounds the list at 64).
+            if layPtr(t) and t ~= A then
+                local owners = {}
+                for o = 128, 512, 8 do
+                    if rptr(t + o) == A then owners[#owners + 1] = o end
+                end
+                if #owners > 0 then
+                    local f = {}
+                    for o = 96, 400, 4 do f[o] = rflt(t + o) end
+                    mine[#mine + 1] = { t = t, owners = owners, f = f, at = os.clock() }
+                end
+            end
+        end
+        if #mine > 0 then found[#found + 1] = { off = off, tracks = mine } end
+    end
+    for i = 1, #LAY_HINT do consider(LAY_HINT[i]) end
+    for off = 1024, 4096, 8 do
+        if #found >= 4 then break end
+        if off ~= LAY_HINT[1] and off ~= LAY_HINT[2] and off ~= LAY_HINT[3] then consider(off) end
+    end
+    if #found == 0 then return nil end
+    return found
+end
+
+-- SECOND LOOK, dt seconds after the first. Fills LAY and returns true, or returns false and why.
+-- Neither look yields: the caller waits between them, OUTSIDE any pcall.
+local function layDecide(A, found, dt)
+    if type(dt) ~= "number" or dt < 0.05 then return false, "clock did not advance" end
+    local why = "no animation was playing to measure"
+    for li = 1, #found do
+        local L = found[li]
+        local sig, n, clash, live = nil, 0, false, false
+        for ti = 1, #L.tracks do
+            local tr = L.tracks[ti]
+            local t = tr.t
+            if n < 4 and rptr(t + tr.owners[1]) == A then      -- still the same object
+                -- TimePosition: it advanced, at the rate the float before it (Speed) says.
+                -- Timed against THIS track's own first sample: the tracks are sampled one after
+                -- another, and one shared interval read every later track as faster than it is.
+                local el = os.clock() - tr.at
+                if el < 0.05 then el = dt end
+                local op, nOp = nil, 0
+                for o = 100, 400, 4 do
+                    local a, b, s = tr.f[o], rflt(t + o), tr.f[o - 4]
+                    if a and b and s and a >= 0 and b > a and b < 36000 and s >= 0.05 and s <= 30 then
+                        if math.abs((b - a) / el - s) <= 0.25 * s + 0.05 then op = o; nOp = nOp + 1 end
+                    end
+                end
+                if nOp == 1 then
+                    local w, wt = rflt(t + op + 4), rflt(t + op + 8)
+                    local om, oi = nil, nil
+                    for m = 96, 400, 8 do
+                        local p = rptr(t + m)
+                        if layPtr(p) and p ~= A then
+                            for i = 96, 400, 8 do
+                                if layIsAsset(layStr(p + i)) then om, oi = m, i break end
+                            end
+                        end
+                        if om then break end
+                    end
+                    if om and w and wt and w >= 0 and w <= 1.001 and wt >= 0 and wt <= 1.001 then
+                        if w > 0.5 and wt > 0.5 then live = true end
+                        if sig == nil then
+                            sig = { op = op, om = om, oi = oi, owners = tr.owners }
+                        elseif sig.op ~= op or sig.om ~= om or sig.oi ~= oi then
+                            clash = true
+                        else
+                            -- keep only the owner offsets every track shares
+                            local keep = {}
+                            for a1 = 1, #sig.owners do
+                                for a2 = 1, #tr.owners do
+                                    if sig.owners[a1] == tr.owners[a2] then keep[#keep + 1] = sig.owners[a1] end
+                                end
+                            end
+                            sig.owners = keep
+                        end
+                        n = n + 1
+                    end
+                end
+            end
+        end
+        if sig and not clash and #sig.owners == 1 and live then
+            LAY.OA, LAY.OO, LAY.OM, LAY.OI = L.off, sig.owners[1], sig.om, sig.oi
+            LAY.OS, LAY.OP, LAY.OW, LAY.OWT = sig.op - 4, sig.op, sig.op + 4, sig.op + 8
+            LAY.ok, LAY.why, LAY.n = true, "ok", n
+            return true
+        elseif clash then
+            why = "tracks disagree about the layout"
+        elseif sig and #sig.owners ~= 1 then
+            why = "owner field is ambiguous"
+        elseif sig then
+            why = "blend weights not confirmed yet"
+        end
+    end
+    return false, why
+end
+-- ---- /animator layout ----
+
 -- Animation-pointer keyed (NOT track-keyed): tracks are pooled and a freed track's address gets
 -- reused, which would return a previous swing's id.
 local IDC = {}
@@ -8002,6 +8183,14 @@ local function trackId(t)
     return id
 end
 
+-- Copy a located layout into the short names the hot paths use. Ids cached before this were read
+-- through no layout at all, so the cache starts over.
+local function layAdopt()
+    OA, OO, OM, OI = LAY.OA, LAY.OO, LAY.OM, LAY.OI
+    OS, OP, OW, OWT = LAY.OS, LAY.OP, LAY.OW, LAY.OWT
+    IDC = {}
+end
+
 -- Second half of the liveness test: is TimePosition actually ADVANCING?
 -- Weight alone is not enough — measured live, a swing track sat at FULL weight for 24.6 seconds
 -- with its TimePosition frozen. Tracking that as a live swing is the stale-swing bait all over
@@ -8014,10 +8203,25 @@ local TPWn = 0
 local function advancing(t, tp, now)
     local r = TPW[t]
     if not r then
-        TPW[t] = { tp, now }
+        if TPWn >= 400 then
+            -- bound the table by dropping only records that have not moved lately (emptying
+            -- it wholesale made every long-frozen track look newly seen again)
+            local keep, n = {}, 0
+            for k, v in pairs(TPW) do
+                if now - v[2] < 2 then keep[k] = v; n = n + 1 end
+            end
+            if n >= 400 then keep, n = {}, 0 end
+            TPW, TPWn = keep, n
+        end
+        -- First seen at the START of its timeline = a swing that has just begun: trust it.
+        -- First seen mid-timeline has to be SEEN moving first. It used to count as live on
+        -- sight, and "mid-timeline and not moving" is exactly a held charge (or a finished
+        -- track still in the list): someone flying in holding one got a parry pressed at them
+        -- the moment they crossed the watch radius, which is a 5 second lockout for nothing.
+        local early = tp < 0.10
+        TPW[t] = { tp, early and now or (now - 1) }
         TPWn = TPWn + 1
-        if TPWn > 400 then TPW = {}; TPWn = 0 end   -- bounded; pointers get recycled anyway
-        return true
+        return early
     end
     if tp > r[1] + 0.0005 then r[1] = tp; r[2] = now; return true end
     if tp < r[1] - 0.05 then r[1] = tp; r[2] = now; return true end   -- looped/restarted
@@ -8027,6 +8231,7 @@ end
 -- One walk, one pass: returns the first id found from `want`, plus its track pointer and TimePosition.
 -- The owner check is load-bearing: foreign tracks genuinely appear in this list.
 local function scan(A, want)
+    if not LAY.ok then return nil end
     local head = rptr(A + OA)
     if not head or head < 0x10000 then return nil end
     local node, guard = rptr(head + ON), 0
@@ -8225,20 +8430,49 @@ local function espText(i)
     return t
 end
 
-AP.Gen = (AP.Gen or 0) + 1
-local myGen = AP.Gen
+-- One token per run of the menu, held in _G. _G survives a re-run of the script; AP and GUI do
+-- not (they are new tables every time), so the old test, a generation counter kept ON the AP
+-- table, was true forever and a re-run left the PREVIOUS copy's parry and swing loops running
+-- behind a menu that showed them
+-- off. Each loop below now stops the moment a newer copy takes the token: the swing loop hands
+-- its speeds back on the way out and the parry loop releases its key.
+local myGen = {}
+_G.__RQ_AUTOPARRY = myGen
 
 -- ============================================================
 -- FAST SWING  —  local playback speed on your OWN swing animations
 -- ============================================================
--- Writes AnimationTrack.Speed (+212) on your own swing tracks. Entirely local: it changes how fast
--- YOUR client plays the animation. Nothing is sent to the server, no remote is touched.
+-- Writes AnimationTrack.Speed on your own swing tracks. Entirely local: it changes how fast YOUR
+-- client plays the animation. Nothing is sent to the server, no remote is touched.
 --   tap / release : play the slash at Swing Speed, then zoom the recovery tail at Recovery Speed so
 --                   you become actionable again sooner
---   M1 held       : boost only the windup for a short, auto-sized window and then go COMPLETELY
---                   hands-off, so the game parks the charge at that animation's own keyframe.
---                   Guessing a fixed freeze point does not work — combo animations freeze at
---                   different places, which is what made earlier versions slip on rapid re-swings.
+--   M1 held       : with Charge Hold on, boost only the windup and then go COMPLETELY hands-off, so
+--                   the game parks the charge at that animation's own keyframe.
+--
+-- WHY IT WAS DEAD (fixed in v5.5): not the matching, the memory layout. Every offset this read was
+-- a constant from an older Roblox build, so the "is this MY track" test failed on every track and
+-- no speed was ever written. The offsets are now located at runtime (the "animator layout" block).
+--
+-- MATCHING is the rule set of the standalone Fast swing.lua v4, which replaced the
+-- ambient-denylist version that used to live here:
+--   * strict allowlist: the seeded swing ids, plus ids LEARNED from a real swing signature -- the
+--     track APPEARS, at the very start of its timeline, within 0.3s of an M1 press. Locomotion is
+--     already playing and mid-timeline when you click, so it does not qualify. (The old rule,
+--     "anything not yet seen while idle is an attack", sped up running, jumping and grappling.)
+--   * anything seen advancing while you are NOT attacking is ambient and can never be learned
+--     KNOWN LIMIT, inherited from v4: something that is not a swing but happens to START inside a
+--     click, before it was ever seen without one (a jump on the same instant), is learned too.
+--     That is what the Relearn Animations button is for.
+--   * the parry and the stuns are never touched: the parry window is opened by a KEYFRAME inside
+--     the parry animation, and racing it means the keyframe never fires
+-- Two things v4 got wrong are fixed here rather than copied:
+--   * it learned an animation's length from the running maximum of TimePosition DURING the first
+--     play, so "45% of the length" was always behind the playhead and the slash itself got the
+--     recovery speed. Length now comes only from a play that has ENDED, and it can only move the
+--     slash / recovery cut LATER than the fixed default (long Crossguard swings), never earlier.
+--   * its "never slow a track down" guard compared against the speed it had itself just written,
+--     so a Recovery Speed below Swing Speed never applied. The game's own speed is now remembered
+--     separately from ours (see fsSetSpeed).
 local FS = {
     -- same two-stage arrangement as Auto Parry: pill arms, hotkey runs
     Enabled = false,
@@ -8252,20 +8486,14 @@ local FS = {
     Windup = 0.36,
     Slash = 0.35,      -- animation time that still counts as the slash rather than the tail
     M1 = false, M1At = 0, Phase = "-", Hz = 0,
-    -- LEARNED SWING ANIMATIONS. The static id list below only ever contained the two Crossguard
-    -- AIR swings, so entering Crossguard (or any other stance) left every playing track unmatched
-    -- and Fast Swing silently did nothing at all. Rather than trying to enumerate every stance in
-    -- the game, anything that STARTS on your own animator while you are pressing M1 is treated as
-    -- a swing from then on. That covers Crossguard, the other stances, and weapons nobody listed.
-    -- Ambient = everything seen playing while you were NOT attacking, i.e. locomotion and stance
-    -- idles. Anything playing that is not in here is treated as an action animation and sped up,
-    -- which is what makes this work across every stance without naming a single one.
-    Ambient = {}, AmbientN = 0,
-    Learned = {}, LearnedN = 0,   -- ids actually sped, for the status readout
-    TP = {},                      -- [animId] = last TimePosition, the liveness signal
+    Ambient = {}, AmbientN = 0,   -- ids seen advancing while NOT attacking: a veto on learning
+    Learned = {}, LearnedN = 0,   -- ids learned from a swing signature
+    Len = {},                     -- [animId] = length, from plays that have ended
     Tracks = 0, Hits = 0,         -- last pass: tracks walked / tracks sped. Diagnostics.
+    Rate = 0,                     -- playback rate MEASURED on the last sped track: the proof it works
     UpAt = 0,                     -- when M1 was last released; ambient sampling waits on this
     HoldMode = false,             -- see the FS.HoldMode branch in fsApply
+    Layout = "not located yet",   -- why the animator layout is not usable yet, or nil when it is
 }
 GUI.FS = FS
 pcall(function() rawset(_G, "RQFS", FS) end)
@@ -8276,44 +8504,68 @@ local FS_SWINGS = {}
 for id in pairs(SWINGS) do FS_SWINGS[id] = true end
 for _, id in ipairs({ "112666168396669", "86140055867484", "124361532701064", "136621055776523",
                       "82666636655771", "75659520618730", "89635808450635" }) do FS_SWINGS[id] = true end
+-- Keyframe-gated animations: never raced, never learned.
+local FS_NEVER = { [ANIM_PARRY] = true }
+for id in pairs(STUNS) do FS_NEVER[id] = true end
 
--- Decide whether a track is one of YOUR action animations.
---
--- The original approach was an allowlist of animation ids, inherited from the parry detector. It
--- could never work across stances: only two Crossguard AIR swings were ever in it, so any other
--- stance left every track unmatched. The replacement I tried first -- learn ids that appear on an
--- M1 press -- could not work either, because it demanded a track be BOTH newly-present AND fully
--- blended in (weight > 0.5) on the SAME pass, and a track that has just appeared still has its
--- weight ramping up from zero. It was new for exactly one pass, failed the weight test on that
--- pass, and was never eligible again. Nothing was ever learned.
---
--- So this inverts the problem. Whatever plays while you are NOT attacking is by definition ambient:
--- idle, walk, run, stance idle. Record those. Anything playing that is NOT ambient is an action
--- animation, whichever stance or weapon it belongs to, with no ids to enumerate.
--- Which of your tracks may be sped up.
---
--- HISTORY, because two attempts failed here and the reasons matter:
---   v3.1 matched a hardcoded id list. Correct but blind to stances: it held only two Crossguard
---        AIR swings, so any other stance matched nothing.
---   v3.2 tried to learn ids, demanding a track be BOTH newly-present AND weight > 0.5 on the SAME
---        pass. A just-appeared track still has its weight ramping from zero, so it failed on its
---        one "new" pass and was never new again. Nothing was ever learned.
---   v3.3 required weight > 0.5 before speeding ANYTHING. The OW offset is annotated above as
---        "measured live on two ENEMIES" -- it was never validated on your own animator. For the
---        original ids that gate was the ONLY new blocker between v3.1 working and v3.3 not, which
---        is what killed the feature outright.
---
--- So weight is no longer trusted anywhere. Liveness comes from TimePosition ADVANCING between
--- passes, which the notes above already establish and which v3.1 depended on and proved out:
--- a playing track advances, a finished one sits frozen in the active list for 20+ seconds.
---
--- THE FLOOR: the ambient denylist is consulted only once it has actually recorded something. If
--- ambient sampling never works on some build, matching collapses to exactly the v3.1 id list --
--- never worse than the version that worked.
-local FS_QUIET = 1.2      -- M1 up this long before the tracks then playing count as ambient
-local FS_TPEPS = 0.0005   -- TimePosition delta above which a track counts as advancing
+local FS_QUIET = 1.5       -- M1 up this long before the tracks then advancing count as ambient
+local FS_TPEPS = 0.0005    -- TimePosition delta above which a track counts as advancing
+local FS_LEARNWIN = 0.30   -- a track appearing this soon after an M1 press is a swing
+local FS_SLASHFRAC = 0.45  -- once a length is known, this fraction of the animation is "slash"
+
+-- Per-track memory, keyed by the track pointer and dropped the pass a track leaves the list
+-- (pointers are pooled and reused): { id, tp, peak, pass, wrote, base, ra, rtp }
+local FS_T = {}
+local FS_PASS = 0
+local FS_A = nil           -- the animator FS_T belongs to
+-- Passes walked since FS_T was last emptied. On the first one EVERY track looks like it has just
+-- appeared, so nothing may be learned from "appeared" until there is a previous pass to compare to.
+local FS_RUN = 0
+
+-- Set a track's speed without fighting the game.
+--   * A speed that is not the one WE last wrote was put there by the game: 1 for a normal swing,
+--     something else if a stance scales it, 0 while it parks a held charge on its keyframe. That
+--     is remembered as the track's base.
+--   * base 0  -> hands off entirely until the game restarts it.
+--   * a speed-up never goes below the base (1.0 on the slider really means "unchanged").
+-- Returns false when the track was left alone.
+local function fsSetSpeed(t, r, want)
+    local cur = rflt(t + OS)
+    if not cur then return false end
+    if r.wrote == nil or math.abs(cur - r.wrote) > 0.001 then r.base = cur end
+    if r.base < 0.01 then r.wrote = nil; return false end
+    if want >= 1 and want < r.base then want = r.base end
+    if math.abs(cur - want) > 0.001 then pcall(memory_write, "float", t + OS, want) end
+    r.wrote = want
+    return true
+end
+
+-- Give every track we are still holding its own speed back. Runs when Fast Swing goes off and on
+-- unload, so nothing stays sped up behind a switch that says off.
+local function fsRelease()
+    if LAY.ok and FS_A then
+        for t, r in pairs(FS_T) do
+            if r.wrote and r.base and r.base >= 0.01 and rptr(t + OO) == FS_A then
+                local cur = rflt(t + OS)
+                if cur and math.abs(cur - r.wrote) <= 0.001 and math.abs(cur - r.base) > 0.001 then
+                    pcall(memory_write, "float", t + OS, r.base)
+                end
+            end
+        end
+    end
+    FS_T = {}
+    FS_RUN = 0
+end
+
+-- "Relearn Animations". Speeds are handed back FIRST: an id that has been forgotten is never
+-- written again, so anything still playing would otherwise keep the last speed it was given.
+function FS.Reset()
+    fsRelease()
+    FS.Ambient, FS.AmbientN, FS.Learned, FS.LearnedN, FS.Len = {}, 0, {}, 0, {}
+end
 
 local function fsApply(now)
+    if not LAY.ok then FS.Phase = "-"; FS.Tracks, FS.Hits = 0, 0; return end
     local ch = LP.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     local an = hum and hum:FindFirstChildOfClass("Animator")
@@ -8322,12 +8574,14 @@ local function fsApply(now)
     if not (okA and A) then return end
     local head = rptr(A + OA)
     if not head or head < 0x10000 then return end
+    if A ~= FS_A then FS_T = {}; FS_RUN = 0; FS_A = A end      -- respawned: a different animator
 
     -- Ambient is only sampled well clear of any attack: swings run ~0.85s and the recovery zoom
-    -- cuts that shorter, so 1.2s of M1 being up means whatever is still advancing is locomotion.
+    -- cuts that shorter, so 1.5s of M1 being up means whatever is still advancing is locomotion.
     local quiet = (not FS.M1) and (now - (FS.UpAt or 0)) > FS_QUIET
-    local tpNow = {}
+    local onClick = FS_RUN >= 1 and FS.M1 and (now - (FS.M1At or 0)) < FS_LEARNWIN
     local nTracks, nHits = 0, 0
+    FS_PASS = FS_PASS + 1
 
     local node, guard = rptr(head + ON), 0
     while node and node > 0x10000 and node ~= head and guard < 64 do
@@ -8335,57 +8589,162 @@ local function fsApply(now)
         local t = rptr(node + OT)
         if t and t > 0x10000 and rptr(t + OO) == A then
             local id = trackId(t)
-            if id then
+            if id and not FS_NEVER[id] then
                 nTracks = nTracks + 1
                 local tp = rflt(t + OP) or 0
-                tpNow[id] = tp
-                local prev = FS.TP[id]
-                local advancing = prev ~= nil and math.abs(tp - prev) > FS_TPEPS
+                local r = FS_T[t]
+                local fresh = (r == nil) or (r.id ~= id)
+                if fresh then
+                    -- not here last pass (or a recycled pointer now playing something else)
+                    if r and r.peak > (FS.Len[r.id] or 0) then FS.Len[r.id] = r.peak end
+                    r = { id = id, tp = tp, peak = tp }
+                    FS_T[t] = r
+                end
+                r.pass = FS_PASS
+                local adv = (not fresh) and math.abs(tp - r.tp) > FS_TPEPS
+                local since = now - (r.mv or now)   -- how long the playhead had been standing still
+                if adv then
+                    r.mv = now
+                    if tp < r.tp - 0.05 then
+                        -- It restarted, so the play that just ended shows how long this animation
+                        -- is. Only a FINISHED play counts: the running maximum during a play is
+                        -- just the playhead, and using it put the cut behind the playhead.
+                        if r.peak > (FS.Len[id] or 0) then FS.Len[id] = r.peak end
+                        r.peak = tp
+                        r.ra = nil
+                    elseif tp > r.peak then
+                        r.peak = tp
+                    end
+                elseif since > 0.25 and r.peak > (FS.Len[id] or 0) then
+                    -- Standing still: that play is over (or parked on a held charge). If the game
+                    -- makes a NEW track for every swing, a finished one never "restarts" and only
+                    -- leaves the list 20+ seconds later, which is how late the length was learned.
+                    -- Safe to take now: a length can only move the cut LATER, never earlier.
+                    FS.Len[id] = r.peak
+                end
+                r.tp = tp
 
-                if quiet and advancing and not FS_SWINGS[id] and not FS.Ambient[id] then
+                local known = FS_SWINGS[id] or FS.Learned[id]
+                -- Ambient is a VETO on learning, never a positive signal.
+                if quiet and adv and not known and not FS.Ambient[id] then
                     FS.Ambient[id] = true
-                    FS.AmbientN = (FS.AmbientN or 0) + 1
+                    FS.AmbientN = FS.AmbientN + 1
+                end
+                -- The swing signature: it APPEARED, at the start of its timeline, on a click.
+                if not known and not FS.Ambient[id] and fresh and onClick and tp < 0.10 then
+                    FS.Learned[id] = true
+                    FS.LearnedN = FS.LearnedN + 1
+                    known = true
                 end
 
-                -- Known swing ids always qualify. The denylist only widens the net, and only after
-                -- it has learned something -- see THE FLOOR above.
-                if FS_SWINGS[id] or ((FS.AmbientN or 0) > 0 and not FS.Ambient[id]) then
+                if known then
                     nHits = nHits + 1
-                    if not FS.Learned[id] then
-                        FS.Learned[id] = true
-                        FS.LearnedN = (FS.LearnedN or 0) + 1
-                    end
+                    local cut = FS.Slash
+                    local len = FS.Len[id]
+                    if len and len * FS_SLASHFRAC > cut then cut = len * FS_SLASHFRAC end
                     if FS.M1 and FS.HoldMode then
                         -- OPT-IN, off by default. Charging and chain-swinging both look exactly
                         -- like "M1 is down" and nothing in the animator separates them, so forcing
                         -- this on meant holding M1 to chain swings boosted only each windup and
                         -- then went hands-off, which read as the feature doing nothing.
                         if tp < FS.Windup then
-                            pcall(memory_write, "float", t + OS, FS.Swing)
+                            fsSetSpeed(t, r, FS.Swing)
                             FS.Phase = "charge boost"
                         else
                             FS.Phase = "held (hands off)"
                         end
-                    elseif tp < FS.Slash then
-                        pcall(memory_write, "float", t + OS, FS.Swing)
-                        FS.Phase = "slash"
+                    elseif tp < cut then
+                        FS.Phase = fsSetSpeed(t, r, FS.Swing) and "slash" or "charge held by game"
                     else
-                        pcall(memory_write, "float", t + OS, FS.Recovery)
-                        FS.Phase = "recovery zoom"
+                        FS.Phase = fsSetSpeed(t, r, FS.Recovery) and "recovery zoom" or "charge held by game"
+                    end
+                    -- Measure what the track is really doing: the readout that shows the write
+                    -- taking effect. Both ends of the window are instants the playhead MOVED, so
+                    -- the dead time after a swing ends is never counted (that read 0.5x on a 2x
+                    -- swing). Expect roughly the number asked for, not exactly it.
+                    -- A window also restarts whenever the speed we asked for changes, so it
+                    -- never straddles the slash and the tail; and it may close after 3 moves /
+                    -- 30ms, because an 8x tail is over in ~60ms and a 0.1s window never fit in it.
+                    if adv then
+                        if not r.ra or tp < r.rtp or r.rw ~= r.wrote or since > 0.1 then
+                            r.ra, r.rtp, r.rw, r.rn = now, tp, r.wrote, 0
+                        else
+                            r.rn = r.rn + 1
+                            if now - r.ra >= 0.1 or (r.rn >= 3 and now - r.ra >= 0.03) then
+                                FS.Rate = (tp - r.rtp) / (now - r.ra)
+                                r.ra, r.rtp, r.rn = now, tp, 0
+                            end
+                        end
                     end
                 end
             end
         end
         node = rptr(node + ON)
     end
-    FS.TP = tpNow
+    -- Forget tracks that left the list, keeping what their last play taught us.
+    for t, r in pairs(FS_T) do
+        if r.pass ~= FS_PASS then
+            if r.peak > (FS.Len[r.id] or 0) then FS.Len[r.id] = r.peak end
+            FS_T[t] = nil
+        end
+    end
+    FS_RUN = FS_RUN + 1
     FS.Tracks, FS.Hits = nTracks, nHits
 end
 
+-- LOCATING THE LAYOUT. Its own thread, because it has to look twice a quarter of a second apart
+-- and that wait must sit OUTSIDE any pcall. Runs only while a feature that needs it is armed,
+-- and stops for good once it has an answer.
 task.spawn(function()
-    local wasK, ready = false, false
+    local told = false
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
+        if not LAY.ok and (AP.Enabled or FS.Enabled) then
+            local A = nil
+            pcall(function()
+                local ch = LP.Character
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                local an = hum and hum:FindFirstChildOfClass("Animator")
+                A = an and tonumber(an.Address) or nil
+            end)
+            if not A then
+                LAY.why = "no character yet"
+            else
+                local okL, found = pcall(layLook, A)
+                if okL and found then
+                    local t0 = os.clock()
+                    task.wait(1 / 4)
+                    local okD, good, why = pcall(layDecide, A, found, os.clock() - t0)
+                    if okD and good then
+                        layAdopt()
+                    elseif okD then
+                        LAY.why = tostring(why)
+                    else
+                        LAY.why = "error: " .. tostring(good)
+                    end
+                elseif okL then
+                    LAY.why = "no track list on this animator"
+                else
+                    LAY.why = "error: " .. tostring(found)
+                end
+                LAY.tries = LAY.tries + 1
+                -- One message, and only after it has genuinely kept failing (~15s).
+                if not LAY.ok and LAY.tries >= 12 and not told then
+                    told = true
+                    pcall(function()
+                        uiNotify("Fast Swing / Auto Parry", "Cannot read animations on this Roblox build (" .. tostring(LAY.why) .. ")", 8)
+                    end)
+                end
+            end
+        end
+        FS.Layout = (not LAY.ok) and LAY.why or nil
+        task.wait(1)
+    end
+end)
+
+task.spawn(function()
+    local wasK, ready, wasLive = false, false, false
     local hzN, hzT = 0, os.clock()
-    while GUI.Running and AP.Gen == myGen do
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
         pcall(function()
             local now = os.clock()
             hzN = hzN + 1
@@ -8395,8 +8754,8 @@ task.spawn(function()
             -- and effectively free, so it costs nothing to sample it in the same loop.
             local m1 = false
             pcall(function() m1 = ismouse1pressed() and true or false end)
-            if m1 and not FS.M1 then FS.M1At = now end
-            if (not m1) and FS.M1 then FS.UpAt = now end   -- ambient sampling keys off this
+            if m1 and not FS.M1 then FS.M1At = now end      -- press edge: the learn window
+            if (not m1) and FS.M1 then FS.UpAt = now end    -- release edge: ambient sampling
             FS.M1 = m1
 
             -- hotkey, with the same release-arm guard the parry uses
@@ -8411,17 +8770,27 @@ task.spawn(function()
             end
             wasK = d
 
+            -- A heartbeat the standalone Fast swing.lua reads, so it can tell a live, armed menu
+            -- from a table a dead copy left in _G, and stand down instead of fighting over H.
+            FS.Beat = now
             local live = FS.Enabled and FS.On
-            if live then fsApply(now) else FS.Phase = "-" end
+            if live then
+                fsApply(now)
+            else
+                if wasLive then fsRelease() end
+                FS.Phase = "-"
+            end
+            wasLive = live
         end)
         task.wait((FS.Enabled and FS.On) and 1 / 200 or 1 / 30)
     end
+    pcall(fsRelease)
 end)
 
 task.spawn(function()
     local hzN, hzT = 0, os.clock()
     local wasToggle, toggleReady = false, false
-    while GUI.Running and AP.Gen == myGen do
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
         local ok, err = pcall(function()
             local now = os.clock()
             hzN = hzN + 1
@@ -8460,6 +8829,9 @@ task.spawn(function()
             AP.Active = false
             if not AP.Enabled then AP.Status = "disabled"; AP.Near = 0; return end
             if not AP.On then AP.Status = "off (hotkey)"; AP.Near = 0; return end
+            -- Nothing below can see an animation until the layout is located (see "animator
+            -- layout"): say so rather than sit at "armed" while blind.
+            if not LAY.ok then AP.Status = "reading animator layout (" .. tostring(LAY.why) .. ")"; AP.Near = 0; return end
 
             local ch = LP.Character
             local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -8777,7 +9149,7 @@ end)
 
 -- enemy parry-cooldown draw loop (own slow thread: text only needs ~15Hz)
 task.spawn(function()
-    while GUI.Running and AP.Gen == myGen do
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
         pcall(function()
             local used = 0
             if AP.Enabled and AP.On and AP.ESP then
@@ -10541,9 +10913,9 @@ end)()
             end)
             pcall(function()
                 secFS:Button("Relearn Animations", function()
-                    FS.Ambient, FS.AmbientN, FS.Learned, FS.LearnedN, FS.TP = {}, 0, {}, 0, {}
-                    pcall(function() uiNotify("Fast Swing", "animation sets cleared - stand still a moment to resample", 3) end)
-                end):Tooltip("clear the ambient set. Stand still without attacking for a second and it resamples your idle/run animations")
+                    if FS.Reset then FS.Reset() end
+                    pcall(function() uiNotify("Fast Swing", "learned swings cleared - they are picked up again as you swing", 3) end)
+                end):Tooltip("forget every learned swing, ambient animation and animation length. Use it if something that is not a swing ever gets sped up")
             end)
         end
 
@@ -10573,12 +10945,14 @@ end)()
                 if not FS then return "Fast Swing:  unavailable" end
                 if not FS.Enabled then return "Fast Swing:  disarmed" end
                 if not FS.On then return "Fast Swing:  OFF   (" .. toName(FS.Key) .. ")" end
+                -- The layout is located at runtime; until it is, nothing can be sped up.
+                if FS.Layout then return "Fast Swing:  ON   reading animations - " .. tostring(FS.Layout) end
                 -- tracks/hits are the first thing to read if it looks dead: tracks 0 means the
                 -- animator walk found nothing at all, hits 0 with tracks > 0 means it walked fine
-                -- but matched nothing.
-                return string.format("Fast Swing:  ON   %s   %s   tracks %d hits %d   sped %d amb %d",
-                    FS.M1 and "M1 HELD" or "idle", tostring(FS.Phase or "-"),
-                    FS.Tracks or 0, FS.Hits or 0, FS.LearnedN or 0, FS.AmbientN or 0)
+                -- but matched nothing. "real" is the playback rate MEASURED on the last sped
+                -- swing, so it shows the write actually taking effect.
+                return string.format("Fast Swing:  ON   %s   tracks %d hits %d   learned %d   real x%.1f",
+                    tostring(FS.Phase or "-"), FS.Tracks or 0, FS.Hits or 0, FS.LearnedN or 0, FS.Rate or 0)
             end)
         end)
         secInfo:Button("Reset Learned Values", function()
