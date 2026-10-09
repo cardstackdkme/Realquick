@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.3"
+GUI.Version = "v5.4"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4744,6 +4744,8 @@ UnloadScript = function()
     if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
     -- never leave the staff Editor hidden behind us (see the POWERDOUBLE block)
     if GUI.PowerDoubleCleanup then pcall(GUI.PowerDoubleCleanup) end
+    -- nor the game's speed number (see the HIDDENS block)
+    if GUI.HiddensCleanup then pcall(GUI.HiddensCleanup) end
     for _, data in pairs(GEAR.Objects) do
         pcall(function() data.label:Remove() end)
     end
@@ -7488,6 +7490,314 @@ task.spawn(function()
 end)
 end)()  -- /PowerDouble
 
+-- ============================ HIDDENS ============================
+-- Hide Velocity: stops the game's own speed number (PlayerGui.Velocity.Velocity.Speed) being DRAWN
+-- on your screen. It does not touch the talent that grants the readout, the label's text, or
+-- anything the server sees -- the Velocity Indicator reads that same text and keeps working.
+--
+-- MEASURED LIVE (2026-10-09) -- every rule below comes from these:
+--   * The Visible flag is no use here. The game rewrites this label's text whenever the speed
+--     changes, and a text change redraws the text without re-reading Visible (written on the
+--     Frame and on the label: the number stayed on screen both times).
+--   * What a text change DOES re-read is the label's "characters to draw" count
+--     (MaxVisibleGraphemes): -1 = all of them, 0 = none. Written to 0 the number is gone at the
+--     next speed change; written back to -1 it returns the same way. Seen both ways on screen.
+--   * Seven fields read -1 on every ordinary label, so -1 alone does not identify the count. The
+--     game's own typewriter labels do: they rest at 0 in exactly one of the seven. Exactly one
+--     offset may fit that or nothing is written.
+-- Wrapped in an IIFE for its own local budget. It talks to the menu only through GUI.HideVelocity
+-- (the toggle) and GUI.HiddensCleanup (unload).
+;(function()
+local HINT = 3796                     -- where the count sat on the build this was measured on
+local SCAN_LO, SCAN_HI = 2800, 4800   -- searched as well, so a Roblox update moving it is survivable
+local MAX_COUNT = 5000                -- a typewriter label mid-sentence holds a small positive count
+-- The game's typewriter labels (see above). Looked up by name because they are deep in the tree;
+-- if a game update moves them, every label in PlayerGui is asked instead (slow, once).
+local WITNESSES = {
+    { "Eyecatcher", "Eyecatcher", "Chronicle", "Content", "TextContainer", "Text" },
+    { "Eyecatcher", "Eyecatcher", "Chronicle", "Content", "TextContainer", "Ghost" },
+    { "Messages", "Messages", "Background", "Frame", "Frame", "Background", "Message" },
+}
+
+local function say(msg, secs)
+    pcall(function() uiNotify("Hiddens", msg, secs or 5) end)
+end
+
+-- Instance.Address is a hex string on some builds and a number on others.
+local function addrOf(inst)
+    local a = inst and inst.Address
+    if type(a) == "number" then return a end
+    if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+    return nil
+end
+
+local function readInt(a)
+    local ok, v = pcall(memory_read, "int", a)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+local function playerGui()
+    local lp = Players.LocalPlayer
+    return lp and lp:FindFirstChild("PlayerGui") or nil
+end
+
+-- Always a FRESH lookup: the label is rebuilt with its GUI, and no instance is kept across passes.
+local function speedAddr()
+    local a
+    pcall(function()
+        local pg = playerGui()
+        local root = pg and pg:FindFirstChild("Velocity")
+        local frame = root and root:FindFirstChild("Velocity")
+        a = addrOf(frame and frame:FindFirstChild("Speed"))
+    end)
+    return a
+end
+
+-- A few ordinary labels from each GUI, breadth-first and bounded. PlayerGui holds ~35,000
+-- instances and one ClassName read costs ~80us, so walking all of it stalls the menu for seconds.
+local function sampleLabels(pg)
+    local out, looked = {}, 0
+    for _, gui in ipairs(pg:GetChildren()) do
+        if #out >= 60 or looked >= 4000 then break end
+        local queue, qi, got, seen = { gui }, 1, 0, 0
+        while queue[qi] and got < 6 and seen < 80 do
+            local node = queue[qi]
+            qi = qi + 1
+            for _, c in ipairs(node:GetChildren()) do
+                -- checked per child: one node with thousands of children must not eat the budget
+                if got >= 6 or seen >= 80 then break end
+                seen = seen + 1
+                looked = looked + 1
+                if c.ClassName == "TextLabel" then
+                    local a = addrOf(c)
+                    if a then out[#out + 1] = a; got = got + 1 end
+                end
+                queue[#queue + 1] = c
+            end
+        end
+    end
+    return out
+end
+
+local function witnessAddrs(pg)
+    local out = {}
+    for _, path in ipairs(WITNESSES) do
+        local node = pg
+        for _, name in ipairs(path) do
+            node = node and node:FindFirstChild(name)
+        end
+        if node and node.ClassName == "TextLabel" then
+            local a = addrOf(node)
+            if a then out[#out + 1] = a end
+        end
+    end
+    return out
+end
+
+-- Every offset where the sample reads -1 almost everywhere and never anything but a count.
+local function candidates(sample)
+    local out = {}
+    local spare = math.floor(#sample * 0.15)   -- labels allowed to hold a count instead of -1
+    local function fits(off)
+        local counts = 0
+        for i = 1, #sample do
+            local v = readInt(sample[i] + off)
+            if v ~= -1 then
+                if v == nil or v < 0 or v > MAX_COUNT then return false end
+                counts = counts + 1
+                if counts > spare then return false end
+            end
+        end
+        return true
+    end
+    if fits(HINT) then out[1] = HINT end
+    for off = SCAN_LO, SCAN_HI, 4 do
+        if off ~= HINT and fits(off) then out[#out + 1] = off end
+    end
+    return out
+end
+
+-- One label's vote. An ordinary label reads -1 at every candidate. A witness reads a count at
+-- exactly ONE of them and -1 at the rest. Anything else (a label destroyed mid-scan, memory that
+-- would not read) is not evidence either way and is only counted as junk.
+local function vote(tally, cands, a)
+    local hit, hits = nil, 0
+    for i = 1, #cands do
+        local v = readInt(a + cands[i])
+        if v ~= -1 then
+            if v == nil or v < 0 or v > MAX_COUNT then tally.junk = tally.junk + 1; return end
+            hit = i
+            hits = hits + 1
+        end
+    end
+    if hits > 1 then tally.junk = tally.junk + 1; return end
+    tally.n = tally.n + 1
+    if hit then tally.wit[hit] = (tally.wit[hit] or 0) + 1 end
+end
+
+-- The single candidate that has a witness, or nil and the reason.
+local function verdict(tally, cands)
+    if tally.n < 20 then return nil, "notready" end
+    if tally.junk > tally.n * 0.05 then return nil, "labels did not read cleanly" end
+    local off, n = nil, 0
+    for i = 1, #cands do
+        local w = tally.wit[i]
+        if w then
+            -- a field most labels disagree on is not a "-1 unless typing" count
+            if w > tally.n * 0.15 then return nil, "labels did not read cleanly" end
+            off = cands[i]
+            n = n + 1
+        end
+    end
+    if n == 1 then return off end
+    if n == 0 then return nil, "nothing to tell the fields apart" end
+    return nil, n .. " possible spots"
+end
+
+-- Returns the offset, or nil and why. "nolabel" / "notready" mean try again later; anything else
+-- is final for this session. Called from the engine's own loop thread, so the slow path may yield.
+local function locate(alive)
+    local pg, cands, off, why
+    local ok, err = pcall(function()
+        pg = playerGui()
+        local speed = speedAddr()
+        if not (pg and speed) then why = "nolabel"; return end
+        local sample = sampleLabels(pg)
+        if #sample < 20 then why = "notready"; return end
+        cands = candidates(sample)
+        if #cands == 0 then why = "no field fits on this Roblox build"; return end
+        local tally = { n = 0, junk = 0, wit = {} }
+        for i = 1, #sample do vote(tally, cands, sample[i]) end
+        vote(tally, cands, speed)
+        local wits = witnessAddrs(pg)
+        for i = 1, #wits do vote(tally, cands, wits[i]) end
+        off, why = verdict(tally, cands)
+    end)
+    if not ok then return nil, "error: " .. tostring(err) end
+    if off or not cands or #cands == 0 or why == "notready" then return off, why end
+
+    -- Slow, at most once a session: every label in PlayerGui votes. Only reached when the named
+    -- typewriter labels did not settle it (a game update moved or renamed them).
+    say("Hide Velocity: locating (one-time, a few seconds)...", 5)
+    local tally = { n = 0, junk = 0, wit = {} }
+    local function voteInst(d)
+        if d.ClassName == "TextLabel" then
+            local a = addrOf(d)
+            if a then vote(tally, cands, a) end
+        end
+    end
+    local okG, guis = pcall(function() return pg:GetChildren() end)
+    if not okG or type(guis) ~= "table" then return nil, "error: PlayerGui went away" end
+    local looked = 0
+    for _, gui in ipairs(guis) do
+        local okD, list = pcall(function() return gui:GetDescendants() end)
+        if okD and type(list) == "table" then
+            for _, d in ipairs(list) do
+                pcall(voteInst, d)
+                looked = looked + 1
+                -- yield OUTSIDE the pcall, in small slices, so the menu keeps drawing
+                if looked % 150 == 0 then
+                    task.wait()
+                    if not alive() then return nil, "stopped" end
+                end
+            end
+        end
+    end
+    return verdict(tally, cands)
+end
+
+local OFF = nil          -- the located offset, kept for the session
+local failed = nil       -- why locating failed for good; cleared when the toggle goes off
+local told = nil
+local engaged = false    -- the number may be hidden by us and owed a restore
+local lastTry, notReady = 0, 0
+
+-- want: 0 = draw nothing, -1 = draw everything (Roblox's default). Only ever written over one of
+-- those two values: anything else means this is not the field that was measured, so leave it.
+local function setCount(want)
+    local a = speedAddr()
+    if not (a and OFF) then return false, "nolabel" end
+    local v = readInt(a + OFF)
+    if v ~= want then
+        if v ~= 0 and v ~= -1 then return false, "unexpected value " .. tostring(v) end
+        pcall(memory_write, "int", a + OFF, want)
+        if readInt(a + OFF) ~= want then return false, "write did not stick" end
+    end
+    -- the undo record for a later copy of the menu (see undoPrevious)
+    if want == 0 then _G.__RQ_HIDDENS_PREV = { off = OFF, addr = a } else _G.__RQ_HIDDENS_PREV = nil end
+    return true
+end
+
+-- Re-running the menu stops the previous copy's loop WITHOUT an unload, so the number can still
+-- be hidden while this copy's toggle starts off. That copy left the exact label and offset it
+-- wrote. Undo only if this is still that label, it still reads 0 there, AND that offset still
+-- behaves like the count on other labels (-1 on nearly all of them). The record lives in _G,
+-- which can outlast the game it was written in; a plain zero somewhere else must never be hit.
+local function undoPrevious()
+    local prev = _G.__RQ_HIDDENS_PREV
+    _G.__RQ_HIDDENS_PREV = nil
+    if type(prev) ~= "table" or type(prev.off) ~= "number" then return end
+    local a = speedAddr()
+    if not (a and a == prev.addr and readInt(a + prev.off) == 0) then return end
+    local pg = playerGui()
+    local sample = pg and sampleLabels(pg) or {}
+    local minusOne = 0
+    for i = 1, #sample do
+        if readInt(sample[i] + prev.off) == -1 then minusOne = minusOne + 1 end
+    end
+    if #sample >= 20 and minusOne >= #sample * 0.85 then
+        pcall(memory_write, "int", a + prev.off, -1)
+    end
+end
+
+-- Reached from UnloadScript, which is defined above this block.
+GUI.HiddensCleanup = function()
+    if engaged then pcall(setCount, -1); engaged = false end
+end
+
+task.spawn(function()
+    local gen = {}
+    _G.__RQ_HIDDENS = gen
+    local function alive() return GUI.Running and _G.__RQ_HIDDENS == gen end
+    pcall(undoPrevious)
+    while alive() do
+        local on = GUI.HideVelocity == true
+        if on then
+            if not OFF and not failed and os.clock() - lastTry >= 2 then
+                lastTry = os.clock()
+                local off, why = locate(alive)
+                if why == "notready" then
+                    -- a GUI still loading reads as "too few labels"; give it time before saying so
+                    notReady = notReady + 1
+                    if notReady >= 8 then why = "too few text labels to compare" end
+                end
+                if off then
+                    OFF = off
+                elseif why ~= "nolabel" and why ~= "notready" and why ~= "stopped" then
+                    failed = why
+                    say("Hide Velocity: could not find it safely (" .. tostring(why) .. "). Nothing was changed.", 7)
+                end
+            end
+            if OFF then
+                engaged = true
+                local ok, why = setCount(0)
+                if not ok and why ~= "nolabel" and told ~= why then
+                    told = why
+                    say("Hide Velocity: " .. tostring(why) .. " - left alone", 6)
+                end
+            end
+        else
+            failed = nil
+            told = nil
+            notReady = 0
+            if engaged then pcall(setCount, -1); engaged = false end
+        end
+        task.wait(on and 1 / 4 or 1 / 2)
+    end
+end)
+end)()  -- /Hiddens
+
 
 
 -- ============================================================
@@ -8789,9 +9099,10 @@ end)()
         local scGen = 0
         -- Live state, published so a failure is DIAGNOSABLE. This feature has now broken twice
         -- (once from a moved memory offset) and both times it failed completely silently: no
-        -- error, no log, just a spinner that never gets tapped. The label below and _G.RQSC make
-        -- the loop's actual view visible, so "it doesn't work" becomes one glance instead of a
-        -- guessing round-trip.
+        -- error, no log, just a spinner that never gets tapped. _G.RQSC keeps the loop's actual
+        -- view readable, so "it doesn't work" is one look instead of a guessing round-trip. (The
+        -- status lines that used to print it in this section were removed on request: the
+        -- section is the toggles and the slider, nothing else.)
         local SC = { off = nil, s = 0, t = 0, diff = 0, moving = false, presses = 0, seen = 0, state = "off" }
         pcall(function() rawset(_G, "RQSC", SC) end)
         secAuto:Toggle("Auto Skillcheck", false, function(on)
@@ -9173,38 +9484,6 @@ end)()
         secAuto:Slider("E Tap Interval", epInterval, 1 / 100, 1 / 20, 1 / 2, "s", function(v)
             epInterval = tonumber(v) or epInterval
         end):Tooltip("seconds between E taps while waiting for the next minigame. 0.10 = ten a second")
-        pcall(function()
-            secAuto:Label(function()
-                if EP.state == "off" then return "E loop:  off" end
-                return string.format("E loop:  %s   (E taps %d)", tostring(EP.state), EP.presses)
-            end)
-        end)
-
-        pcall(function()
-            secAuto:Label(function()
-                local S = _G.RQSC
-                if type(S) ~= "table" then return "Skillcheck:  not started" end
-                if S.state == "off" then return "Skillcheck:  off" end
-                return string.format("%s  |  off +%s of %s cand  taps %d",
-                    tostring(S.state), tostring(S.off or "learning"), tostring(S.cands or "?"), S.presses or 0)
-            end)
-        end)
-        pcall(function()
-            secAuto:Label(function()
-                local S = _G.RQSC
-                if type(S) ~= "table" or not S.off then return "" end
-                return string.format("spin %.0f   zone %.0f   diff %.0f   moving %s   %.0f Hz",
-                    S.s or 0, S.t or 0, S.diff or 0, S.moving and "yes" or "no", S.hz or 0)
-            end)
-        end)
-        -- Survives the check being over, which the live line above cannot.
-        pcall(function()
-            secAuto:Label(function()
-                local S = _G.RQSC
-                if type(S) ~= "table" then return "" end
-                return "last: " .. tostring(S.last or "(no skillcheck seen yet)")
-            end)
-        end)
 
         -- ---------- Admin: hide the staff Editor from your own screen ----------
         -- One switch for the whole POWERDOUBLE engine (its internal name): the Logs + Pings
@@ -9239,6 +9518,23 @@ end)()
                 local _, b = GUI.PDStatus()
                 return tostring(b or " ")
             end)
+        end)
+
+        -- ---------- Hiddens: stop the game's own readouts being drawn on your screen ----------
+        -- One switch per readout, each driven by the HIDDENS engine. Same label rule as the Admin
+        -- switch: it names what the switch does NEXT ("Hide Velocity" while the number shows,
+        -- "Show Velocity" while it is hidden), so it is never written to a saved config either
+        -- and always starts off.
+        local secHid = tab:Section("Hiddens", "Right", "Hide the game's own readouts")
+        GUI._uiHV = secHid:Toggle("Hide Velocity", GUI.HideVelocity == true, function(v)
+            GUI.HideVelocity = v == true
+            pcall(function()
+                GUI._uiHV:SetText(GUI.HideVelocity and "Show Velocity" or "Hide Velocity")
+            end)
+        end):Tooltip("Stops the game's own speed number (bottom of the screen) being drawn. Only your screen changes: the talent, the real speed and the Velocity Indicator are untouched. Takes effect the next time the number changes, so the moment you move. Off brings it back the same way.")
+        pcall(function() GUI._uiHV.item.noSave = true end)
+        pcall(function()
+            GUI._uiHV:SetText(GUI.HideVelocity == true and "Show Velocity" or "Hide Velocity")
         end)
     end)
 
