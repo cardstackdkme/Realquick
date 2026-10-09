@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.1"
+GUI.Version = "v5.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -9094,9 +9094,22 @@ end)()
         -- has no staff Editor. Created AFTER Skillcheck on purpose: sections stack in the order
         -- they are created, and this one belongs below it.
         local secPD = tab:Section("Admin", "Left", "Hide the staff Editor from your screen")
-        GUI._uiPD = secPD:Toggle("Hide admin Panel", GUI.PowerDouble == true, function(v)
+        -- The label names what the switch does NEXT: while it is on the panel is hidden, so it
+        -- reads "Show Admin Panel"; while off, "Hide Admin Panel". SetText is a fork method, hence
+        -- the pcall (the upstream fallback library has none and simply keeps the first label).
+        GUI._uiPD = secPD:Toggle("Hide Admin Panel", GUI.PowerDouble == true, function(v)
             GUI.PowerDouble = v == true
+            pcall(function()
+                GUI._uiPD:SetText(GUI.PowerDouble and "Show Admin Panel" or "Hide Admin Panel")
+            end)
         end):Tooltip("Staff accounts only. Open Logs and/or Pings from the Editor's top panel first, then turn this on. Hides those windows, the top panel and the ping pop-ups while they keep receiving rows. A hide lands when the next row arrives (or when you open / close a page), so wait for 'hidden' below before sharing your screen. Off brings everything back.")
+        -- Never written to a saved config: the library keys a saved value by the control's label,
+        -- and this label changes, so a saved "on" could not be found again anyway. It always
+        -- starts off, which is also the safe state for something that hides your own UI.
+        pcall(function() GUI._uiPD.item.noSave = true end)
+        pcall(function()
+            GUI._uiPD:SetText(GUI.PowerDouble == true and "Show Admin Panel" or "Hide Admin Panel")
+        end)
         pcall(function()
             secPD:Label(function()
                 local a = GUI.PDStatus and GUI.PDStatus()
