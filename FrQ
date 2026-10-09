@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.6"
+GUI.Version = "v4.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7069,9 +7069,7 @@ local function step(now)
     -- it is back on.
     local rootOn = readByte((addrOf(sp) or 0) + OFF) == 1
     if told.editor ~= rootOn then
-        if told.editor ~= nil or not rootOn then
-            say(rootOn and "Editor is back on" or "Editor is OFF - rows may have stopped until you turn it back on", 5)
-        end
+        if not rootOn then say("Editor is OFF - rows may have stopped until you turn it back on", 5) end
         told.editor = rootOn
     end
     local sel = selections(sp)
@@ -7097,10 +7095,7 @@ local function step(now)
                 end
             else
                 s.want, s.base = nil, nil
-                if told[name] ~= "closed" then
-                    told[name] = "closed"
-                    say(name .. " is CLOSED in the Editor - no rows are being received. Open it from the top panel.", 6)
-                end
+                told[name] = "closed"     -- no toast: the status line shows it
             end
         else
             anyOpen = true
@@ -7116,7 +7111,8 @@ local function step(now)
                 s.want = "hide"
                 s.base = base
                 told[name] = "pending"
-                say(name .. (reopened and " was re-opened: it is VISIBLE until the next row arrives" or ": hiding - it vanishes when the next row arrives"), 6)
+                -- Only the surprising case gets a toast; a normal hide shows in the status line.
+                if reopened then say(name .. " was re-opened: it is VISIBLE until the next row arrives", 6) end
             elseif res == "same" then
                 if s.want == nil then
                     -- Already hidden when we first looked (left so by an earlier run). We cannot
@@ -7129,7 +7125,6 @@ local function step(now)
                     if rowArrived(s.base, heads) then
                         s.base = nil     -- a row arrived after our write: the hide is on screen
                         told[name] = "hidden"
-                        say(name .. " hidden (confirmed) - still receiving rows", 4)
                     end
                 end
             else
@@ -7154,13 +7149,7 @@ local function step(now)
         tb.want = anyOpen and "hide" or nil
         tb.base = anyOpen and base or nil
         tb.sel = anyOpen and openSet(sel) or nil
-        if anyOpen then
-            told["@toolbar"] = "pending"
-            say("Top panel: hiding - it vanishes at the next row, or the moment you open or close a page", 6)
-        else
-            told["@toolbar"] = "showing"
-            say("Top panel: showing - if it does not appear, switch the Editor off and on", 7)
-        end
+        told["@toolbar"] = anyOpen and "pending" or "showing"
     elseif tres == "same" then
         if anyOpen and tb.want == nil then
             tb.want = "hide"
@@ -7174,7 +7163,6 @@ local function step(now)
             if rowArrived(tb.base, heads) or openSet(sel) ~= tb.sel then
                 tb.base, tb.sel = nil, nil
                 told["@toolbar"] = "hidden"
-                say("Top panel hidden (confirmed)", 4)
             end
         end
     else
@@ -7184,13 +7172,30 @@ local function step(now)
             say("Top panel: could not set the flag - treat it as VISIBLE", 6)
         end
     end
+    -- The only routine toasts: one when hiding starts, one when everything has actually landed.
+    -- Per-item progress is in the two status lines under the toggle.
     if not anyOpen then
+        told.on, told.all = nil, nil
         if told["@tbwait"] ~= true then
             told["@tbwait"] = true
-            say("Open Logs or Pings from the top panel - it stays visible until one is open", 6)
+            say("Open Logs or Pings from the top panel first", 5)
         end
     else
         told["@tbwait"] = nil
+        if told.on ~= true then
+            told.on = true
+            say("On - everything vanishes at the next row (status lines show when)", 5)
+        end
+        local allDone = (tb.want == "hide" and tb.base == nil)
+        for _, name in ipairs(WINDOWS) do
+            local s = st[name]
+            if s.open and not (s.want == "hide" and s.base == nil) then allDone = false end
+        end
+        if allDone then
+            if told.all ~= true then told.all = true; say("Everything hidden", 3) end
+        else
+            told.all = nil
+        end
     end
 
     -- ---- ping pop-ups ----
@@ -7203,7 +7208,6 @@ local function step(now)
         local pres = setFrame(cont, false)
         if pres == "written" then
             pp.want = "hide"
-            say("Ping pop-ups: hidden - new ones are not drawn (one already showing stays until it expires)", 6)
         elseif pres == "same" then
             pp.want = "hide"
         elseif told["@popups"] ~= "fail" then
