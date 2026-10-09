@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.9"
+GUI.Version = "v5.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6937,7 +6937,11 @@ local function findVisibleOffset(sp)
         return table.concat(t, " ")
     end
     local cands = {}
-    for off = 0x100, 0x900 do
+    -- Search only the region where a GUI object keeps its basic properties (Position is at +1280
+    -- on this build, Visible at +1437; in June they were +1304 / +1461). Further out there are
+    -- sizing markers that stay 0 on a window until it has been opened once: on a fresh session
+    -- they fit the evidence too (seen on another PC at +2173 and +2181), so they are out of range.
+    for off = 0x300, 0x700 do
         local v = readByte(spA + off)
         local tv = readByte(toolsA + off)
         local ok = (v == 0 or v == 1) and (tv == 0 or tv == 1)
