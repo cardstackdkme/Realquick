@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.0"
+GUI.Version = "v5.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -98,7 +98,7 @@ GUI.PLScrollDragLastY = 0
 GUI.PLCachedPlayers = {}    -- cached player data, fetched on open
 GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
-GUI.PowerDouble = false     -- Tools -> PowerDouble: hide the staff Editor (windows, top panel, ping pop-ups)
+GUI.PowerDouble = false     -- Tools -> Admin -> "Hide admin Panel": hide the staff Editor (windows, top panel, ping pop-ups)
 
 -- Personal gas bar (self only, from Tools toggle). Same widget as the health bar.
 GUI.GasBarVisible = false
@@ -6827,7 +6827,8 @@ end)()  -- /Requiem UI smooth engine
 -- ============================================================
 -- POWERDOUBLE  --  hide the staff Editor from your own screen
 -- ============================================================
--- For an account that has the staff Editor GUI. One toggle (Tools -> PowerDouble) hides, at once:
+-- For an account that has the staff Editor GUI. One toggle (Tools -> Admin -> "Hide admin Panel")
+-- hides, at once:
 --   * the Logs and Pings windows   * the Editor's top panel   * the ping pop-ups on the left
 -- while the game still considers the windows OPEN, so the server keeps sending their rows.
 --
@@ -6851,7 +6852,7 @@ end)()  -- /Requiem UI smooth engine
 local WINDOWS = { "Logs", "Pings" }   -- Editor windows that are kept open-but-hidden
 
 local function say(msg, secs)
-    pcall(function() uiNotify("PowerDouble", msg, secs or 4) end)
+    pcall(function() uiNotify("Admin", msg, secs or 4) end)
 end
 
 -- Instance.Address is a hex string on some builds and a number on others.
@@ -8621,26 +8622,6 @@ end)()
         end)
         secPL:Toggle("Auto Update", GUI.PLAutoUpdate, function(v) GUI.PLAutoUpdate = v end)
 
-        -- ---------- PowerDouble: hide the staff Editor from your own screen ----------
-        -- One switch for the whole POWERDOUBLE engine: the Logs + Pings windows, the Editor's top
-        -- panel and the ping pop-ups, all hidden while the game still treats the windows as open.
-        -- Off puts everything back. Does nothing on an account that has no staff Editor.
-        local secPD = tab:Section("PowerDouble", "Left", "Hide the staff Editor from your screen")
-        GUI._uiPD = secPD:Toggle("PowerDouble", GUI.PowerDouble == true, function(v)
-            GUI.PowerDouble = v == true
-        end):Tooltip("Staff accounts only. Open Logs and/or Pings from the Editor's top panel first, then turn this on. Hides those windows, the top panel and the ping pop-ups while they keep receiving rows. A hide lands when the next row arrives (or when you open / close a page), so wait for 'hidden' below before sharing your screen. Off brings everything back.")
-        pcall(function()
-            secPD:Label(function()
-                local a = GUI.PDStatus and GUI.PDStatus()
-                return tostring(a or "off")
-            end)
-            secPD:Label(function()
-                if not GUI.PDStatus then return " " end
-                local _, b = GUI.PDStatus()
-                return tostring(b or " ")
-            end)
-        end)
-
         local secPanels = tab:Section("Panels", "Right", "Floating windows")
         secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
             GUI.CounterVisible = v; BuildCounterPanel()
@@ -9103,6 +9084,28 @@ end)()
                 local S = _G.RQSC
                 if type(S) ~= "table" then return "" end
                 return "last: " .. tostring(S.last or "(no skillcheck seen yet)")
+            end)
+        end)
+
+        -- ---------- Admin: hide the staff Editor from your own screen ----------
+        -- One switch for the whole POWERDOUBLE engine (its internal name): the Logs + Pings
+        -- windows, the Editor's top panel and the ping pop-ups, all hidden while the game still
+        -- treats the windows as open. Off puts everything back. Does nothing on an account that
+        -- has no staff Editor. Created AFTER Skillcheck on purpose: sections stack in the order
+        -- they are created, and this one belongs below it.
+        local secPD = tab:Section("Admin", "Left", "Hide the staff Editor from your screen")
+        GUI._uiPD = secPD:Toggle("Hide admin Panel", GUI.PowerDouble == true, function(v)
+            GUI.PowerDouble = v == true
+        end):Tooltip("Staff accounts only. Open Logs and/or Pings from the Editor's top panel first, then turn this on. Hides those windows, the top panel and the ping pop-ups while they keep receiving rows. A hide lands when the next row arrives (or when you open / close a page), so wait for 'hidden' below before sharing your screen. Off brings everything back.")
+        pcall(function()
+            secPD:Label(function()
+                local a = GUI.PDStatus and GUI.PDStatus()
+                return tostring(a or "off")
+            end)
+            secPD:Label(function()
+                if not GUI.PDStatus then return " " end
+                local _, b = GUI.PDStatus()
+                return tostring(b or " ")
             end)
         end)
     end)
