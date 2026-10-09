@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.8"
+GUI.Version = "v4.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6931,7 +6931,12 @@ local function findVisibleOffset(sp)
     end
     if #shown < 5 then return nil, "Editor not ready" end
     if #closed < 3 then return nil, "close some Editor windows (need 3 closed, have " .. #closed .. ")" end
-    local found, count = nil, 0
+    local function spotList(c, p)
+        local t = {}
+        for i, off in ipairs(c) do t[#t + 1] = tostring(off) .. (p[i] and ("(" .. p[i] .. "%)") or "") end
+        return table.concat(t, " ")
+    end
+    local cands = {}
     for off = 0x100, 0x900 do
         local v = readByte(spA + off)
         local tv = readByte(toolsA + off)
@@ -6946,12 +6951,50 @@ local function findVisibleOffset(sp)
                 if readByte(closed[i] + off) ~= 0 then ok = false break end
             end
         end
-        if ok then found = off; count = count + 1 end
+        if ok then cands[#cands + 1] = off end
     end
+    -- TIE-BREAK. A byte that only means "this object is DRAWN right now" also reads 1 on the shown
+    -- frames and 0 on closed windows. What separates it from the declared Visible flag: the
+    -- children of a closed window are still DECLARED visible (the game hides only the window), but
+    -- they are not drawn. So the declared flag reads 1 on most of those children, a "drawn" byte
+    -- reads 0 on all of them. Keep a candidate only if it reads 1 on at least 60% of them.
+    local pcts = {}
+    if #cands > 1 then
+        local kids = {}
+        for _, ic in ipairs(sel:GetChildren()) do
+            local w = sp:FindFirstChild(ic.Name)
+            if w and w.ClassName == "Frame" and not logicallyOpen(sel, ic.Name) then
+                for _, ch in ipairs(w:GetChildren()) do
+                    local cn = ch.ClassName
+                    if cn == "Frame" or cn == "TextLabel" or cn == "TextButton" or cn == "ImageLabel"
+                        or cn == "ImageButton" or cn == "ScrollingFrame" or cn == "TextBox" then
+                        local a = addrOf(ch)
+                        if a then kids[#kids + 1] = a end
+                    end
+                end
+            end
+        end
+        -- Accept only a CLEAR split: exactly one candidate at 60% or more, every other one at 20%
+        -- or less. Anything murkier is refused, with the percentages shown for diagnosis.
+        if #kids >= 5 then
+            local strong, weak = {}, 0
+            for i, off in ipairs(cands) do
+                local ones = 0
+                for k = 1, #kids do
+                    if readByte(kids[k] + off) == 1 then ones = ones + 1 end
+                end
+                local pct = math.floor(ones * 100 / #kids + 1 / 2)
+                pcts[i] = pct
+                if pct >= 60 then strong[#strong + 1] = off elseif pct <= 20 then weak = weak + 1 end
+            end
+            if #strong == 1 and weak == #cands - 1 then cands = strong end
+        end
+    end
+    local found, count = cands[1], #cands
     -- The counts are in the message on purpose: they are the only clue when this fails on a PC
     -- we cannot look at (a different Roblox version moves or reshapes the flag).
     if count == 0 then return nil, "flag not found on this Roblox version (" .. #shown .. " shown, " .. #closed .. " closed)" end
-    if count > 1 then return nil, count .. " possible spots - not safe to guess" end
+    if count > 1 then return nil, count .. " possible spots: " .. spotList(cands, pcts) end
     return found
 end
 
