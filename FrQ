@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v4.7"
+GUI.Version = "v4.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6915,7 +6915,7 @@ local function findVisibleOffset(sp)
     local sel = selections(sp)
     local spA = addrOf(sp)
     local toolsA = addrOf(sp:FindFirstChild("Tools"))
-    if not sel or not spA or not toolsA then return nil, "Editor top panel not found" end
+    if not sel or not spA or not toolsA then return nil, "Editor top panel not found - turn the Editor on" end
     local shown, closed = {}, {}
     local sa = addrOf(sel)
     if sa then shown[#shown + 1] = sa end
@@ -6930,7 +6930,7 @@ local function findVisibleOffset(sp)
         end
     end
     if #shown < 5 then return nil, "Editor not ready" end
-    if #closed < 3 then return nil, "need at least 3 closed Editor windows to locate the flag safely" end
+    if #closed < 3 then return nil, "close some Editor windows (need 3 closed, have " .. #closed .. ")" end
     local found, count = nil, 0
     for off = 0x100, 0x900 do
         local v = readByte(spA + off)
@@ -6948,7 +6948,9 @@ local function findVisibleOffset(sp)
         end
         if ok then found = off; count = count + 1 end
     end
-    if count == 0 then return nil, "could not locate the flag on this Roblox version" end
+    -- The counts are in the message on purpose: they are the only clue when this fails on a PC
+    -- we cannot look at (a different Roblox version moves or reshapes the flag).
+    if count == 0 then return nil, "flag not found on this Roblox version (" .. #shown .. " shown, " .. #closed .. " closed)" end
     if count > 1 then return nil, count .. " possible spots - not safe to guess" end
     return found
 end
@@ -6991,6 +6993,7 @@ local function rowArrived(base, now)
 end
 
 local OFF = nil            -- the Visible flag's position, once found
+local findWhy = nil        -- why OFF could not be found yet (shown in the status line)
 local told = {}            -- last message per topic, so nothing is repeated every pass
 local nextFind = 0         -- the search for OFF is ~2000 reads: at most once a second
 local nextCheck = 0        -- "did a row arrive?" walks every list: at most twice a second
@@ -7057,12 +7060,26 @@ local function step(now)
     if not OFF then
         if now < nextFind then return end
         nextFind = now + 1
-        local off, why = findVisibleOffset(sp)
+        -- Can Matcha read game memory at all on this PC? Its "Unsafe LuaU" setting gates
+        -- memory_read, and without this check a blocked read just looks like "flag not found".
+        local off, why = nil, nil
+        local pa = addrOf(Players.LocalPlayer)
+        if type(memory_read) ~= "function" or type(memory_write) ~= "function" then
+            why = "memory access is off - enable Unsafe LuaU in Matcha"
+        elseif not pa then
+            why = "this Matcha build gives no instance addresses"
+        elseif readByte(pa) == nil then
+            why = "memory read failed - enable Unsafe LuaU in Matcha"
+        else
+            off, why = findVisibleOffset(sp)
+        end
         if not off then
-            if told.find ~= why then told.find = why; say("Waiting: " .. tostring(why), 5) end
+            findWhy = why
+            if told.find ~= why then told.find = why; say("Cannot start: " .. tostring(why), 7) end
             return
         end
         OFF = off
+        findWhy = nil
     end
     -- The Editor root is hidden as a whole when you switch the Editor off with its keybind. The
     -- game then tells the server so, and rows may stop: nothing pending can be confirmed until
@@ -7240,7 +7257,7 @@ local noEditor = false
 GUI.PDStatus = function()
     if GUI.PowerDouble ~= true then return "off", " " end
     if noEditor then return "no staff Editor on this account", " " end
-    if not OFF then return "locating... (turn the Editor on)", " " end
+    if not OFF then return "cannot start yet:", tostring(findWhy or "locating...") end
     local function win(name)
         local s = st[name]
         if s.open == false then return "closed" end
