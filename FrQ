@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.5"
+GUI.Version = "v5.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -140,7 +140,7 @@ GUI.EnchantsDragging = false
 GUI.EnchantsDragOX = 0
 GUI.EnchantsDragOY = 0
 GUI.EnchantsAllData = nil          -- { [name] = "Legendary" }  populated by Fetch
-GUI.EnchantsOwned = {}             -- { [name] = true }
+GUI.EnchantsOwned = {}             -- { [enchantKey(name)] = true }, see FetchOwnedEnchants
 GUI.EnchantsRarityFilter = "All"
 GUI.EnchantsShowUnowned = false
 GUI.EnchantsScrollOffset = 0
@@ -922,24 +922,97 @@ FetchEnchantData = function()
     GUI.EnchantsAllData = data
 end
 
--- Reads owned enchants from LocalPlayer.PlayerGui.Enchantments.Enchantments
--- (each Frame child is one owned enchant; Frame.Name == enchant module name)
+-- One spelling for both sides of the owned check. The game shows an owned enchant in capitals
+-- ("I CAN'T DIE LIKE THIS"); its module is named "I Can't Die Like This". Case, spaces and
+-- punctuation are dropped before the two are compared.
+local function enchantKey(s)
+    return (string.gsub(string.lower(tostring(s or "")), "[^%w]", ""))
+end
+
+-- Reads owned enchants from LocalPlayer.PlayerGui.Enchantments.Enchantments.
+--
+-- Each owned enchant is one Frame in that list. The frame's NAME used to be the enchant's name and
+-- that was all this read. The game now names the frames "Enchantment_<id>_<n>", and the enchant's
+-- name exists only as the text of a label inside (Frame.Group.Frame.Frame.textLabel), so every
+-- lookup missed and the whole panel read MISSING. Measured live: 284 such frames, every one of
+-- them matching a module under ReplicatedStorage once both are put through enchantKey.
+-- The same list also holds "Proficiency_..." frames. They are not enchants (one even shares its
+-- name with one), so when the id-style names are in use ONLY "Enchantment_" frames are counted.
+--
+-- GUI.EnchantsOwned is keyed by enchantKey(name). About 300 frames at ~1ms each, so this YIELDS
+-- as it goes: call it from a spawned thread, never straight from a UI callback.
 FetchOwnedEnchants = function()
-    local owned = {}
+    GUI.EnchantsOwnedGen = (GUI.EnchantsOwnedGen or 0) + 1
+    local gen = GUI.EnchantsOwnedGen
+    local owned, done = {}, false
+
+    -- The text of the label that names the enchant. Never throws: one frame that cannot be read
+    -- (destroyed mid-refresh by a reroll, say) must not cost the other 283.
+    local function labelText(frame)
+        local tx = nil
+        pcall(function()
+            local node = frame
+            for _, nm in ipairs({ "Group", "Frame", "Frame", "textLabel" }) do
+                node = node and node:FindFirstChild(nm)
+            end
+            if node then tx = node.Text end
+        end)
+        if type(tx) == "string" and tx ~= "" then return tx end
+        -- That path has moved before. If it moves again, take the first TextLabel that has text,
+        -- breadth-first and bounded, rather than reporting everything missing a second time.
+        local queue, qi = { frame }, 1
+        while queue[qi] and qi <= 40 do
+            local kids = nil
+            pcall(function() kids = queue[qi]:GetChildren() end)
+            qi = qi + 1
+            for _, k in ipairs(kids or {}) do
+                local cls, t2 = nil, nil
+                pcall(function() cls = k.ClassName end)
+                if cls == "TextLabel" then
+                    pcall(function() t2 = k.Text end)
+                    if type(t2) == "string" and t2 ~= "" then return t2 end
+                end
+                queue[#queue + 1] = k
+            end
+        end
+        return nil
+    end
+
     pcall(function()
         local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-        if not pgui then return end
-        local container = pgui:FindFirstChild("Enchantments")
-        if not container then return end
-        local list = container:FindFirstChild("Enchantments")
+        local container = pgui and pgui:FindFirstChild("Enchantments")
+        local list = container and container:FindFirstChild("Enchantments")
         if not list then return end
-        for _, frame in pairs(list:GetChildren()) do
+        local frames = list:GetChildren()
+        local names, idStyle = {}, false
+        for i, f in ipairs(frames) do
             local nm = nil
-            pcall(function() nm = frame.Name end)
-            if nm and nm ~= "" then owned[nm] = true end
+            pcall(function() nm = f.Name end)
+            names[i] = type(nm) == "string" and nm or ""
+            if string.sub(names[i], 1, 12) == "Enchantment_" then idStyle = true end
         end
+        for i, f in ipairs(frames) do
+            if gen ~= GUI.EnchantsOwnedGen then return end      -- a newer refresh took over
+            local nm = names[i]
+            if idStyle then
+                if string.sub(nm, 1, 12) == "Enchantment_" then
+                    local key = enchantKey(labelText(f))
+                    if key ~= "" then owned[key] = true end
+                end
+            elseif nm ~= "" then
+                -- The old layout, where the frame's name IS the enchant. Still read the label
+                -- as well, so a third naming scheme has a chance of working unpatched.
+                owned[enchantKey(nm)] = true
+                local key = enchantKey(labelText(f))
+                if key ~= "" then owned[key] = true end
+            end
+            if i % 30 == 0 then task.wait() end
+        end
+        done = true
     end)
-    GUI.EnchantsOwned = owned
+    -- Only a COMPLETE read replaces what is on screen: a list that is not there yet, an error
+    -- half way, or a refresh that was overtaken must not blank the panel.
+    if done and gen == GUI.EnchantsOwnedGen then GUI.EnchantsOwned = owned end
 end
 
 local function buildFilteredEnchantList()
@@ -951,11 +1024,12 @@ local function buildFilteredEnchantList()
     local list = {}
     for name, info in pairs(all) do
         local rarity = info.rarity
+        local has = owned[enchantKey(name)] == true
         local pass = true
         if filter ~= "All" and rarity ~= filter then pass = false end
         if pass and showUnowned then
             -- Only show rarities the player can actually obtain
-            if owned[name] or ENCHANT_RARITY_UNOBTAINABLE[rarity] then pass = false end
+            if has or ENCHANT_RARITY_UNOBTAINABLE[rarity] then pass = false end
         end
         if pass then
             table.insert(list, {
@@ -963,7 +1037,7 @@ local function buildFilteredEnchantList()
                 rarity = rarity,
                 description = info.description,  -- nil until lazily decompiled
                 module = info.module,
-                owned = owned[name] == true,
+                owned = has,
             })
         end
     end
@@ -9435,7 +9509,7 @@ end)()
                     BuildEnchantsPanel()
                     task.spawn(function() FetchEnchantData(); FetchOwnedEnchants(); BuildEnchantsPanel() end)
                 else
-                    FetchOwnedEnchants(); BuildEnchantsPanel()
+                    task.spawn(function() FetchOwnedEnchants(); BuildEnchantsPanel() end)
                 end
             else
                 GUI.EnchantsModal = nil
