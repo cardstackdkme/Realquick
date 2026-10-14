@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.8"
+GUI.Version = "v5.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -481,6 +481,9 @@ local DEATHLOG = {
     -- player deaths). Each webhook only ever sees its own category.
     Webhook       = "https://discord.com/api/webhooks/1508684139891785788/JXSQtIleTOSVf3xPnALpjf8W9F0TXEpHp0wr3AoDLH_jPv76krxStrfndqLhdzGFwCZr",
     ActorWebhook  = "https://discord.com/api/webhooks/1508839620064837732/9ryF6a4YA4V867TQ4pnAmvbMvPQBO4257aLFssxYPbae_AtJ4BxqljHpI_V7IcekxHoq",
+    -- The "Send Actors" button (Logs tab) posts its one-line list here, and only here: the
+    -- "Good logs but robotic" channel, separate from the actor-death feed above.
+    ActorListWebhook = "https://discord.com/api/webhooks/1560003021952254073/bplD6dP0vK0splfZmZbq67MfKjAFQgoYnoNUdxdqhFDtxCDL1L3Gw7A20TfTX2U1oCiU",
     Seen           = {},    -- [ragdollName] = true (already accounted for; cleared if body despawns before the perma threshold)
     Pending        = {},    -- [ragdollName] = { instance, firstSeenAt }
     Seeded         = false, -- becomes true after first scan completes; pre-existing ragdolls don't trigger
@@ -4986,9 +4989,10 @@ end
 -- `isActor`=true → post to the actor/lore webhook; otherwise the normal
 -- player-deaths webhook. Each webhook only ever sees its own category
 -- so neither channel gets cross-posted noise.
-local function deathSendWebhook(content, isActor)
+-- `url`, when given, overrides both: a caller with a channel of its own (Send Actors).
+local function deathSendWebhook(content, isActor, url)
     if type(content) ~= "string" or #content == 0 then return end
-    local url = isActor and DEATHLOG.ActorWebhook or DEATHLOG.Webhook
+    url = url or (isActor and DEATHLOG.ActorWebhook or DEATHLOG.Webhook)
     if type(url) ~= "string" or #url == 0 then return end
 
     -- Prefer HttpService:JSONEncode (proper escaping) with a minimal
@@ -5184,7 +5188,7 @@ DEATHLOG.ListActors = function()
     return names, total
 end
 
--- Post the list to the ACTOR channel as ONE line, exactly as asked:
+-- Post the list to DEATHLOG.ActorListWebhook as ONE line, exactly as asked:
 --     game.Workspace.karemkhald1 game.Workspace.EPTgabrie
 -- (each actor's character model in Workspace is named after their username). Nothing else goes
 -- in the message. One message, never one per actor: a webhook on this feed has been deleted for
@@ -5199,14 +5203,14 @@ DEATHLOG.SendActors = function()
     for _, nm in ipairs(names) do
         local item = "game.Workspace." .. nm
         if #line > 0 and #line + 1 + #item > 1900 then
-            deathSendWebhook(line, true)
+            deathSendWebhook(line, true, DEATHLOG.ActorListWebhook)
             parts = parts + 1
             if parts >= 3 then return names, total end
             line = ""
         end
         line = (#line > 0) and (line .. " " .. item) or item
     end
-    deathSendWebhook(line, true)
+    deathSendWebhook(line, true, DEATHLOG.ActorListWebhook)
     return names, total
 end
 
@@ -11126,7 +11130,7 @@ end)()
             end)
         end)
         pcall(function()
-            sendActors:Tooltip("Lists every player in this server with the Actor flag and posts their names to the actor webhook, as one message")
+            sendActors:Tooltip("Posts every player in this server with the Actor flag, as one line of game.Workspace.<name>, to the actor list webhook")
         end)
         pcall(function()
             sec:Label(function()
