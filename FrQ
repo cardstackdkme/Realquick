@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.6"
+GUI.Version = "v5.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5158,6 +5158,61 @@ deathFetchAllNow = function()
         end
     end
     return sent
+end
+
+-- "Send Actors" (Logs tab): who in THIS server has the Actor flag. It is an attribute on the
+-- PLAYER object. Measured 2026-10-14: one of 86 players had Player.Actor = true, nobody else
+-- carried the attribute at all, and it is on neither the character nor its Humanoid. The death
+-- log only ever reads it off ragdolls, which is why nothing here could list LIVING actors.
+-- Returns { "username - in-game name", ... } sorted, and how many players were looked at.
+-- A Player GetAttribute costs ~5ms, so a full server is ~0.4s: call it from a spawned thread.
+DEATHLOG.ListActors = function()
+    local names, total = {}, 0
+    local players = {}
+    pcall(function() players = Players:GetPlayers() end)
+    for _, p in ipairs(players) do
+        total = total + 1
+        local isActor = false
+        pcall(function() isActor = p:GetAttribute("Actor") == true end)
+        if isActor then
+            local nm, rp = nil, nil
+            pcall(function() nm = p.Name end)
+            pcall(function() rp = p:GetAttribute("Name") end)      -- the in-game character name
+            if type(nm) == "string" and nm ~= "" then
+                if type(rp) == "string" and rp ~= "" and rp ~= nm then nm = nm .. " - " .. rp end
+                names[#names + 1] = nm
+            end
+        end
+    end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    return names, total
+end
+
+-- Post the list to the ACTOR channel as ONE message (split only past Discord's 2000-character
+-- limit, three messages at most), never one per actor: a webhook on this feed has been deleted
+-- for spam before. Nothing is sent when there are no actors. Returns the names and the player
+-- count for the toast.
+DEATHLOG.SendActors = function()
+    local names, total = DEATHLOG.ListActors()
+    if #names == 0 then return names, total end
+    local jobId = nil
+    pcall(function() jobId = game.JobId end)
+    local msg = "**Actors in this server: " .. #names .. "** (of " .. total .. " players)"
+    if type(jobId) == "string" and jobId ~= "" then msg = msg .. "\nServer: `" .. jobId .. "`" end
+    -- a code block, so Discord cannot turn an underscore in a username into italics
+    msg = msg .. "\n```\n"
+    local parts = 0
+    for _, nm in ipairs(names) do
+        if #msg + #nm + 8 > 1900 then
+            deathSendWebhook(msg .. "```", true)
+            parts = parts + 1
+            if parts >= 3 then return names, total end
+            msg = "```\n"
+        end
+        msg = msg .. nm .. "\n"
+    end
+    deathSendWebhook(msg .. "```", true)
+    return names, total
 end
 
 -- ============================================================
@@ -11053,6 +11108,30 @@ end)()
         sec:Button("Fetch Current Ragdolls", function()
             local sentNow = deathFetchAllNow()
             uiNotify("Death Log", "Fetched " .. tostring(sentNow) .. " ragdoll(s) to webhook", 3)
+        end)
+        -- Everyone in this server with the Actor flag, to the ACTOR webhook as one message.
+        -- Works with the Death Log switched off, like the button above.
+        local sendActors = sec:Button("Send Actors", function()
+            -- A double click must not post twice to a channel that has been deleted for spam.
+            if (os.clock() - (DEATHLOG.ActorsSentAt or -10)) < 5 then
+                uiNotify("Actors", "Wait a few seconds before sending again", 3)
+                return
+            end
+            DEATHLOG.ActorsSentAt = os.clock()
+            -- ~5ms per player: off the UI thread
+            task.spawn(function()
+                local names, total = DEATHLOG.SendActors()
+                if #names == 0 then
+                    uiNotify("Actors", "No actors in this server (" .. tostring(total) .. " players). Nothing sent.", 4)
+                else
+                    local shown = table.concat(names, ", ")
+                    if #shown > 140 then shown = shown:sub(1, 137) .. "..." end
+                    uiNotify("Actors", tostring(#names) .. " sent to webhook: " .. shown, 6)
+                end
+            end)
+        end)
+        pcall(function()
+            sendActors:Tooltip("Lists every player in this server with the Actor flag and posts their names to the actor webhook, as one message")
         end)
         pcall(function()
             sec:Label(function()
