@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.1"
+GUI.Version = "v6.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5189,15 +5189,15 @@ DEATHLOG.ListActors = function()
 end
 
 -- Post the list to DEATHLOG.ActorListWebhook as a Discord EMBED:
---     | gold bar |  (mask) Actors in this server
+--     | red bar |   Actors in this server
 --                   3 actors  *  86 players
 --                   Server  `6d127440-544e-4692-9e28-dc2328691f00`
 --                   game.Workspace.A game.Workspace.B game.Workspace.C     <- one line, to copy
---                   Requiem  -  <time>
+--                   Requiem
 -- (each actor's character model in Workspace is named after their username). No per-actor list on
 -- top, as asked; the copy line is a code block, which copies exactly.
 -- The JSON is built by hand: Matcha's JSONEncode writes the colour as 15844367.0 and Discord rejects
--- a non-integer colour with a 400 that nobody sees. The mask and the bullet are sent as \u escapes,
+-- a non-integer colour with a 400 that nobody sees. The bullet is sent as a \u escape,
 -- so the body is plain ASCII. httppost BLOCKS the VM until Discord answers and hands back its
 -- reply, so a rejection is returned as the third value for the toast to show.
 -- One message, never one per actor (a webhook on this feed has been deleted for spam). Up to ~75
@@ -5228,13 +5228,10 @@ DEATHLOG.SendActors = function()
     if type(jobId) == "string" and jobId ~= "" then head = head .. "\nServer  `" .. jobId .. "`" end
     local function desc(text) return (rsJsonEscape(text):gsub("<<DOT>>", "\\u2022")) end
 
-    local stamp = nil
-    pcall(function() stamp = os.date("!%Y-%m-%dT%H:%M:%SZ") end)
-    if type(stamp) ~= "string" or not stamp:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$") then stamp = nil end
-    local tail = ',"footer":{"text":"Requiem"}' .. (stamp and (',"timestamp":"' .. stamp .. '"') or "")
-    local color = ',"color":' .. string.format("%d", 15844367)       -- 0xF1C40F, gold; an INTEGER
+    local tail = ',"footer":{"text":"Requiem"}'                       -- no timestamp, as asked
+    local color = ',"color":' .. string.format("%d", 15548997)       -- 0xED4245, Discord red; an INTEGER
     local embeds = {
-        '{"title":"\\ud83c\\udfad  Actors in this server"' .. color
+        '{"title":"Actors in this server"' .. color
             .. ',"description":' .. desc(head .. "\n```\n" .. chunks[1] .. "\n```")
             .. ((chunks[2] == nil) and tail or "") .. "}",
     }
