@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.2"
+GUI.Version = "v6.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5193,7 +5193,7 @@ end
 --                   3 actors  *  86 players
 --                   Server  `6d127440-544e-4692-9e28-dc2328691f00`
 --                   game.Workspace.A game.Workspace.B game.Workspace.C     <- one line, to copy
---                   Requiem
+-- No footer and no timestamp: the user removed both.
 -- (each actor's character model in Workspace is named after their username). No per-actor list on
 -- top, as asked; the copy line is a code block, which copies exactly.
 -- The JSON is built by hand: Matcha's JSONEncode writes the colour as 15844367.0 and Discord rejects
@@ -5228,7 +5228,7 @@ DEATHLOG.SendActors = function()
     if type(jobId) == "string" and jobId ~= "" then head = head .. "\nServer  `" .. jobId .. "`" end
     local function desc(text) return (rsJsonEscape(text):gsub("<<DOT>>", "\\u2022")) end
 
-    local tail = ',"footer":{"text":"Requiem"}'                       -- no timestamp, as asked
+    local tail = ""                                                   -- no footer, no timestamp
     local color = ',"color":' .. string.format("%d", 15548997)       -- 0xED4245, Discord red; an INTEGER
     local embeds = {
         '{"title":"Actors in this server"' .. color
