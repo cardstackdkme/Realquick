@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v5.9"
+GUI.Version = "v6.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5188,29 +5188,59 @@ DEATHLOG.ListActors = function()
     return names, total
 end
 
--- Post the list to DEATHLOG.ActorListWebhook as ONE line, exactly as asked:
---     game.Workspace.karemkhald1 game.Workspace.EPTgabrie
--- (each actor's character model in Workspace is named after their username). Nothing else goes
--- in the message. One message, never one per actor: a webhook on this feed has been deleted for
--- spam before. Only past Discord's 2000-character limit (~50 actors) does it continue in a second
--- message, still one line each, three at most. Nothing is sent when there are no actors.
--- Underscores need no escaping: a Roblox username cannot start or end with one, and one in the
--- middle of a word is never read as italics by Discord. Returns the names and the player count.
+-- Post the list to DEATHLOG.ActorListWebhook. The message is two code blocks:
+--     Actors in this server: 2 (of 86 players)      <- the card: count, server, one name a line
+--     Server: a09a073a-bf3f-4fa2-9c72-c11554b3753a
+--     EPTgabrie
+--     karemkhald1
+--     game.Workspace.EPTgabrie game.Workspace.karemkhald1     <- everyone on ONE line, to copy
+-- (each actor's character model in Workspace is named after their username). Code blocks render
+-- as the grey box and copy exactly, underscores and all.
+-- One message, never one per actor: a webhook on this feed has been deleted for spam before. It
+-- only spills over Discord's 2000-character limit past ~25 actors; then the card goes first and
+-- the line follows, a moment apart so they arrive in order (3 line messages at most). Nothing is
+-- sent when there are no actors. Returns the names and the player count.
 DEATHLOG.SendActors = function()
     local names, total = DEATHLOG.ListActors()
     if #names == 0 then return names, total end
-    local line, parts = "", 0
+    local url = DEATHLOG.ActorListWebhook
+    local jobId = nil
+    pcall(function() jobId = game.JobId end)
+
+    local card = "Actors in this server: " .. #names .. " (of " .. total .. " players)"
+    if type(jobId) == "string" and jobId ~= "" then card = card .. "\nServer: " .. jobId end
+    for i, nm in ipairs(names) do
+        if #card + #nm + 1 > 1000 then
+            card = card .. "\n... and " .. (#names - i + 1) .. " more"
+            break
+        end
+        card = card .. "\n" .. nm
+    end
+    card = "```\n" .. card .. "\n```"
+
+    local lines, line = {}, ""
     for _, nm in ipairs(names) do
         local item = "game.Workspace." .. nm
-        if #line > 0 and #line + 1 + #item > 1900 then
-            deathSendWebhook(line, true, DEATHLOG.ActorListWebhook)
-            parts = parts + 1
-            if parts >= 3 then return names, total end
+        if #line > 0 and #line + 1 + #item > 1800 then
+            lines[#lines + 1] = line
             line = ""
         end
         line = (#line > 0) and (line .. " " .. item) or item
     end
-    deathSendWebhook(line, true, DEATHLOG.ActorListWebhook)
+    lines[#lines + 1] = line
+
+    local both = card .. "\n```\n" .. lines[1] .. "\n```"
+    if #both <= 1990 then
+        deathSendWebhook(both, true, url)
+    else
+        deathSendWebhook(card, true, url)
+        task.wait(0.5)
+        deathSendWebhook("```\n" .. lines[1] .. "\n```", true, url)
+    end
+    for i = 2, math.min(#lines, 3) do
+        task.wait(0.5)
+        deathSendWebhook("```\n" .. lines[i] .. "\n```", true, url)
+    end
     return names, total
 end
 
@@ -11130,7 +11160,7 @@ end)()
             end)
         end)
         pcall(function()
-            sendActors:Tooltip("Posts every player in this server with the Actor flag, as one line of game.Workspace.<name>, to the actor list webhook")
+            sendActors:Tooltip("Posts every player in this server with the Actor flag to the actor list webhook: count, server and names, then all of them on one line of game.Workspace.<name>")
         end)
         pcall(function()
             sec:Label(function()
