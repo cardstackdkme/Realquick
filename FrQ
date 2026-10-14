@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.0"
+GUI.Version = "v6.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5188,58 +5188,74 @@ DEATHLOG.ListActors = function()
     return names, total
 end
 
--- Post the list to DEATHLOG.ActorListWebhook. The message is two code blocks:
---     Actors in this server: 2 (of 86 players)      <- the card: count, server, one name a line
---     Server: a09a073a-bf3f-4fa2-9c72-c11554b3753a
---     EPTgabrie
---     karemkhald1
---     game.Workspace.EPTgabrie game.Workspace.karemkhald1     <- everyone on ONE line, to copy
--- (each actor's character model in Workspace is named after their username). Code blocks render
--- as the grey box and copy exactly, underscores and all.
--- One message, never one per actor: a webhook on this feed has been deleted for spam before. It
--- only spills over Discord's 2000-character limit past ~25 actors; then the card goes first and
--- the line follows, a moment apart so they arrive in order (3 line messages at most). Nothing is
--- sent when there are no actors. Returns the names and the player count.
+-- Post the list to DEATHLOG.ActorListWebhook as a Discord EMBED:
+--     | gold bar |  (mask) Actors in this server
+--                   3 actors  *  86 players
+--                   Server  `6d127440-544e-4692-9e28-dc2328691f00`
+--                   game.Workspace.A game.Workspace.B game.Workspace.C     <- one line, to copy
+--                   Requiem  -  <time>
+-- (each actor's character model in Workspace is named after their username). No per-actor list on
+-- top, as asked; the copy line is a code block, which copies exactly.
+-- The JSON is built by hand: Matcha's JSONEncode writes the colour as 15844367.0 and Discord rejects
+-- a non-integer colour with a 400 that nobody sees. The mask and the bullet are sent as \u escapes,
+-- so the body is plain ASCII. httppost BLOCKS the VM until Discord answers and hands back its
+-- reply, so a rejection is returned as the third value for the toast to show.
+-- One message, never one per actor (a webhook on this feed has been deleted for spam). Up to ~75
+-- actors fit one embed; past that the line continues in a second embed of the SAME message.
+-- Nothing is sent when there are no actors.
 DEATHLOG.SendActors = function()
     local names, total = DEATHLOG.ListActors()
     if #names == 0 then return names, total end
     local url = DEATHLOG.ActorListWebhook
+    if type(url) ~= "string" or url == "" then return names, total, "no webhook set" end
     local jobId = nil
     pcall(function() jobId = game.JobId end)
 
-    local card = "Actors in this server: " .. #names .. " (of " .. total .. " players)"
-    if type(jobId) == "string" and jobId ~= "" then card = card .. "\nServer: " .. jobId end
-    for i, nm in ipairs(names) do
-        if #card + #nm + 1 > 1000 then
-            card = card .. "\n... and " .. (#names - i + 1) .. " more"
-            break
-        end
-        card = card .. "\n" .. nm
-    end
-    card = "```\n" .. card .. "\n```"
-
-    local lines, line = {}, ""
+    -- the copy line, in at most two pieces (two embeds stay under Discord's 6000-character total)
+    local chunks, line = {}, ""
     for _, nm in ipairs(names) do
         local item = "game.Workspace." .. nm
-        if #line > 0 and #line + 1 + #item > 1800 then
-            lines[#lines + 1] = line
+        if #line > 0 and #line + 1 + #item > 2800 then
+            chunks[#chunks + 1] = line
             line = ""
         end
         line = (#line > 0) and (line .. " " .. item) or item
     end
-    lines[#lines + 1] = line
+    chunks[#chunks + 1] = line
 
-    local both = card .. "\n```\n" .. lines[1] .. "\n```"
-    if #both <= 1990 then
-        deathSendWebhook(both, true, url)
-    else
-        deathSendWebhook(card, true, url)
-        task.wait(0.5)
-        deathSendWebhook("```\n" .. lines[1] .. "\n```", true, url)
+    local head = "**" .. #names .. "** " .. (#names == 1 and "actor" or "actors")
+        .. "  <<DOT>>  **" .. total .. "** players"
+    if type(jobId) == "string" and jobId ~= "" then head = head .. "\nServer  `" .. jobId .. "`" end
+    local function desc(text) return (rsJsonEscape(text):gsub("<<DOT>>", "\\u2022")) end
+
+    local stamp = nil
+    pcall(function() stamp = os.date("!%Y-%m-%dT%H:%M:%SZ") end)
+    if type(stamp) ~= "string" or not stamp:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$") then stamp = nil end
+    local tail = ',"footer":{"text":"Requiem"}' .. (stamp and (',"timestamp":"' .. stamp .. '"') or "")
+    local color = ',"color":' .. string.format("%d", 15844367)       -- 0xF1C40F, gold; an INTEGER
+    local embeds = {
+        '{"title":"\\ud83c\\udfad  Actors in this server"' .. color
+            .. ',"description":' .. desc(head .. "\n```\n" .. chunks[1] .. "\n```")
+            .. ((chunks[2] == nil) and tail or "") .. "}",
+    }
+    if chunks[2] then
+        embeds[2] = '{"description":' .. desc("```\n" .. chunks[2] .. "\n```") .. color .. tail .. "}"
     end
-    for i = 2, math.min(#lines, 3) do
-        task.wait(0.5)
-        deathSendWebhook("```\n" .. lines[i] .. "\n```", true, url)
+    local body = '{"embeds":[' .. table.concat(embeds, ",") .. ']}'
+
+    local reply = nil
+    local ok = pcall(function()
+        if type(httppost) == "function" then
+            reply = httppost(url, body, "application/json")
+        else
+            reply = game:HttpPost(url, body, "application/json")
+        end
+    end)
+    if not ok then return names, total, "the request failed" end
+    -- Discord answers a good post with nothing; a rejection is JSON carrying a "message".
+    if type(reply) == "string" then
+        local why = reply:match('"message"%s*:%s*"([^"]*)"')
+        if why then return names, total, why end
     end
     return names, total
 end
@@ -11149,9 +11165,11 @@ end)()
             DEATHLOG.ActorsSentAt = os.clock()
             -- ~5ms per player: off the UI thread
             task.spawn(function()
-                local names, total = DEATHLOG.SendActors()
+                local names, total, err = DEATHLOG.SendActors()
                 if #names == 0 then
                     uiNotify("Actors", "No actors in this server (" .. tostring(total) .. " players). Nothing sent.", 4)
+                elseif err then
+                    uiNotify("Actors", "Not posted - Discord says: " .. tostring(err), 8)
                 else
                     local shown = table.concat(names, ", ")
                     if #shown > 140 then shown = shown:sub(1, 137) .. "..." end
