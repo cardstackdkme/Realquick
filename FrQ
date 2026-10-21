@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.4"
+GUI.Version = "v6.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -10361,7 +10361,7 @@ end)()
         --   Grapple      | Velocity
         --   Dash         | Parry
         --   Firearm Auto | Firearm Manual
-        --   Spyglass     | Thunderspears
+        --                | Thunderspears
         -- Move a section by changing its "Left"/"Right" AND its position in this file.
         local secVe = tab:Section("Velocity", "Right", "ODM speed build-up")
         local veMax, veInc = CFG.GearMaxVelocityMultiplier.fb, CFG.GearVelocityIncreaseRate.fb
@@ -10451,6 +10451,13 @@ end)()
             applyMany("Dash",
                 { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" },
                 { 220, 0, 0, 350, 75 })
+        end)
+        -- Spyglass: its OWN button, sitting here only for placement. Apply Dash and Restore Default
+        -- never touch it, so anyone who does not want it simply never presses it. Fixed values, no
+        -- slider, as asked: both zoomed-camera distances to 200. Takes effect the next time you
+        -- zoom in. Rejoining puts the game's own values back.
+        secDash:Button("Apply Spyglass", function()
+            applyMany("Spyglass", { "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" }, { 200, 200 })
         end)
         secDash:Button("Restore Default", function()
             resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" })
@@ -10906,30 +10913,6 @@ end)()
         -- as a plain local, a script re-run kept the writes but lost the way back.
         local tsOrig = bbState.tsOrig or {}
         bbState.tsOrig = tsOrig
-        -- ---------- Spyglass (zoomed camera distances) ----------
-        -- Created HERE, Left and just before Thunderspears, so RowAlign opens a new row for it and
-        -- Thunderspears starts level with it. What the game does with the two values could not be
-        -- read: the decompiler returns "Invalid bytecodes" on this Roblox build. They only take
-        -- effect the next time you zoom in with the spyglass.
-        local secSpy = tab:Section("Spyglass", "Left", "Zoomed camera distance")
-        local spyMax = CFG.ZOOMED_CAMERA_MAX_DISTANCE.fb
-        local spyMin = CFG.ZOOMED_CAMERA_MIN_DISTANCE.fb
-        secSpy:Slider("Max Distance", spyMax, 10, 0, 5000, "",
-            function(v) spyMax = tonumber(v) or spyMax end,
-            "ZOOMED_CAMERA_MAX_DISTANCE. Stock 200.")
-        secSpy:Slider("Min Distance", spyMin, 10, 0, 5000, "",
-            function(v) spyMin = tonumber(v) or spyMin end,
-            "ZOOMED_CAMERA_MIN_DISTANCE. Stock 200. Never applied above Max Distance.")
-        secSpy:Button("Apply Spyglass", function()
-            -- never hand the game a minimum above its maximum
-            local mn = spyMin
-            if mn > spyMax then mn = spyMax end
-            applyMany("Spyglass", { "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" }, { spyMax, mn })
-        end)
-        secSpy:Button("Restore Default", function()
-            resetMany("Spyglass", { "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" })
-        end)
-
         local secTS = tab:Section("Thunderspears", "Right", "Spear accuracy")
         secTS:Slider("Spear Inaccuracy", tsInacc, 0.1, 0, 15, "",
             function(v) tsInacc = tonumber(v) or tsInacc end,
