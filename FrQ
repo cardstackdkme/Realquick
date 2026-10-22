@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.8"
+GUI.Version = "v6.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5394,6 +5394,78 @@ local function musicName(id)
     return name
 end
 
+
+-- ---- Song Helper hand-off (SongHelper\song-helper.js, a normal program on this PC) ----
+-- Matcha cannot read the Roblox cache or upload a file, so when the helper is running it sends
+-- the message instead, with the song attached. They talk through files in C:\matcha\workspace\RQ:
+--   songhelper_alive.txt     the helper writes the unix time every second
+--   songhelper_request.json  we write { reqId, id, name, webhook }, the helper deletes it
+--   songhelper_result.json   the helper answers { reqId, ok, audio, how, why, name }
+--   songhelper_now.json      we write { id, at } when the music changes, so the helper can learn
+--                            which cache file is which song from when it was downloaded
+-- No helper (another PC, or not started): the menu posts the embed itself, exactly as before.
+local HELPER_DIR = "RQ/"
+local function helperAlive()
+    local t = nil
+    pcall(function()
+        if type(isfile) == "function" and not isfile(HELPER_DIR .. "songhelper_alive.txt") then return end
+        t = tonumber(readfile(HELPER_DIR .. "songhelper_alive.txt"))
+    end)
+    local now = nil
+    pcall(function() now = os.time() end)
+    return t ~= nil and now ~= nil and math.abs(now - t) <= 5
+end
+
+-- Hand the song to the helper and wait for its answer (an upload with the song attached takes a
+-- few seconds). Returns err (or nil) and a short description of the audio for the popup.
+local function viaHelper(name, id, url)
+    local reqId = string.format("%d-%d", os.time(), math.random(1, 999999999))
+    local body = '{"reqId":"' .. reqId .. '","id":"' .. id .. '","webhook":' .. musicJson(url)
+        .. ',"name":' .. musicJson(name) .. "}"
+    pcall(function()
+        if type(isfolder) == "function" and type(makefolder) == "function" and not isfolder("RQ") then makefolder("RQ") end
+    end)
+    local okW = pcall(writefile, HELPER_DIR .. "songhelper_request.json", body)
+    if not okW then return "could not write the request for the helper" end
+    local t0 = os.clock()
+    while os.clock() - t0 < 60 do
+        task.wait(0.3)
+        local res = nil
+        pcall(function()
+            local txt = readfile(HELPER_DIR .. "songhelper_result.json")
+            local j = HttpService:JSONDecode(txt)
+            if type(j) == "table" and j.reqId == reqId then res = j end
+        end)
+        if res then
+            if not res.ok then return tostring(res.why or "the helper failed") end
+            if res.audio then return nil, "with the song attached" end
+            return nil, "no audio: " .. tostring(res.why or "not found")
+        end
+    end
+    return "the helper did not answer in 60s"
+end
+
+-- Report song changes to the helper while it is running (a read of one Sound every 3s).
+task.spawn(function()
+    local gen = {}
+    _G.__RQ_MUSIC = gen
+    local last = nil
+    while GUI.Running and _G.__RQ_MUSIC == gen do
+        if helperAlive() then
+            local snd = musicSound()
+            local id = snd and musicSoundId(snd) or nil
+            if id and id ~= last then
+                last = id
+                pcall(writefile, HELPER_DIR .. "songhelper_now.json",
+                    '{"id":"' .. id .. '","at":' .. string.format("%d", os.time()) .. "}")
+            end
+        else
+            last = nil
+        end
+        task.wait(3)
+    end
+end)
+
 -- Posts the embed: a blue bar, then a bold "Song Name" heading over the song's name, a blank line, and
 -- a bold "Song ID" heading over the id. Hand-built
 -- JSON (JSONEncode would write the colour as a float, which Discord rejects silently).
@@ -5406,6 +5478,10 @@ DEATHLOG.SendSong = function()
     local name = musicName(id) or "Unknown"
     local url = DEATHLOG.MusicWebhook
     if type(url) ~= "string" or url == "" then return name, id, "no webhook set" end
+    if helperAlive() then
+        local err, audio = viaHelper(name, id, url)
+        return name, id, err, audio
+    end
     local body = '{"embeds":[{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
         .. ',"description":' .. musicJson("**Song Name**\n" .. musicMd(name) .. "\n\n**Song ID**\n" .. id) .. "}]}"
     local reply = nil
@@ -11376,18 +11452,19 @@ end)()
             end
             DEATHLOG.SongSentAt = os.clock()
             task.spawn(function()
-                local name, id, err = DEATHLOG.SendSong()
+                local name, id, err, audio = DEATHLOG.SendSong()
                 if err and not id then
                     uiNotify("Music", "Nothing sent - " .. tostring(err), 5)
                 elseif err then
-                    uiNotify("Music", "Not posted - Discord says: " .. tostring(err), 8)
+                    uiNotify("Music", "Not posted - " .. tostring(err), 8)
                 else
-                    uiNotify("Music", "Sent: " .. tostring(name) .. "  (" .. tostring(id) .. ")", 5)
+                    uiNotify("Music", "Sent: " .. tostring(name) .. "  (" .. tostring(id) .. ")"
+                        .. (audio and ("  -  " .. audio) or ""), 6)
                 end
             end)
         end)
         pcall(function()
-            sendSong:Tooltip("Posts the song the game is playing right now - its name and id - to the songs webhook")
+            sendSong:Tooltip("Posts the song the game is playing right now - its name and id - to the songs webhook. With SongHelper running on this PC the song itself is attached as an mp3.")
         end)
     end)
 
