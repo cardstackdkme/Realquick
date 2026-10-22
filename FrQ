@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.3"
+GUI.Version = "v7.4"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11539,6 +11539,9 @@ end)()
                 return
             end
             DEATHLOG.SongSentAt = os.clock()
+            -- Straight away: the send takes 10-15s with the song attached, and the only popup
+            -- used to come at the very end, so a press looked like it did nothing.
+            uiNotify("Music", "Sending the current song... (progress shows in Discord)", 4)
             task.spawn(function()
                 local name, id, err, audio = DEATHLOG.SendSong()
                 if err and not id then
