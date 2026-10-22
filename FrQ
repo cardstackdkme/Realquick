@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.7"
+GUI.Version = "v6.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5394,7 +5394,7 @@ local function musicName(id)
     return name
 end
 
--- Posts the embed: a blue bar, then a bold "Name" heading over the song's name, a blank line, and
+-- Posts the embed: a blue bar, then a bold "Song Name" heading over the song's name, a blank line, and
 -- a bold "Song ID" heading over the id. Hand-built
 -- JSON (JSONEncode would write the colour as a float, which Discord rejects silently).
 -- Returns name, id, and an error message or nil.
@@ -5407,7 +5407,7 @@ DEATHLOG.SendSong = function()
     local url = DEATHLOG.MusicWebhook
     if type(url) ~= "string" or url == "" then return name, id, "no webhook set" end
     local body = '{"embeds":[{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
-        .. ',"description":' .. musicJson("**Name**\n" .. musicMd(name) .. "\n\n**Song ID**\n" .. id) .. "}]}"
+        .. ',"description":' .. musicJson("**Song Name**\n" .. musicMd(name) .. "\n\n**Song ID**\n" .. id) .. "}]}"
     local reply = nil
     local ok = pcall(function()
         if type(httppost) == "function" then
