@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.0"
+GUI.Version = "v7.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5435,49 +5435,36 @@ local function musicInfo(id)
     return info
 end
 
--- The embed, as a JSON OBJECT string (the menu posts it, or hands it to the helper verbatim):
---   blue bar; description "**Song Name**\n<name>\n\n**Song ID**\n<id>" (the user's layout); then
---   fields in two rows: By | Length, and Created | Updated (+ who updated it). Dates use Discord's
---   <t:unix:D> tag, so everyone sees them in their own time zone. Empty spacer fields keep each row
---   to two columns. Anything the catalogue did not return is simply left out.
+-- The embed, as a JSON OBJECT string (the menu posts it, or hands it to the helper verbatim).
+-- One column: a bold heading over each value, a blank line between every block, the same style
+-- as the original Song Name / Song ID. (v7.0 used side-by-side inline fields and the user found
+-- them cramped.) Dates use Discord's <t:unix:D> tag, so everyone sees their own date format and
+-- time zone. Anything the catalogue did not return is simply left out.
 local function musicEmbed(info, id)
-    local SPACER = '{"name":"\\u200b","value":"\\u200b","inline":true}'
-    local function field(name, value)
-        return '{"name":' .. musicJson(name) .. ',"value":' .. musicJson(value) .. ',"inline":true}'
-    end
-    local fields = {}
-    local row1, row2 = {}, {}
+    local blocks = {
+        "**Song Name**\n" .. musicMd(info.title or "Unknown"),
+        "**Song ID**\n" .. id,
+    }
     if info.creator then
-        local link = nil
-        if info.creatorId and info.creatorType == "Group" then
-            link = "https://www.roblox.com/communities/" .. info.creatorId
-        elseif info.creatorId and info.creatorType == "User" then
-            link = "https://www.roblox.com/users/" .. info.creatorId .. "/profile"
-        end
         local who = musicMd(info.creator)
-        if link then who = "[" .. who .. "](" .. link .. ")" end
-        if info.creatorType then who = who .. "\n" .. info.creatorType end
-        row1[#row1 + 1] = field("By", who)
+        if info.creatorId and info.creatorType == "Group" then
+            who = "[" .. who .. "](https://www.roblox.com/communities/" .. info.creatorId .. ")"
+        elseif info.creatorId and info.creatorType == "User" then
+            who = "[" .. who .. "](https://www.roblox.com/users/" .. info.creatorId .. "/profile)"
+        end
+        blocks[#blocks + 1] = "**By**\n" .. who
     end
     if info.duration then
-        row1[#row1 + 1] = field("Length", string.format("%d:%02d", math.floor(info.duration / 60), info.duration % 60))
+        blocks[#blocks + 1] = "**Length**\n" .. string.format("%d:%02d", math.floor(info.duration / 60), info.duration % 60)
     end
-    if info.created then row2[#row2 + 1] = field("Created", string.format("<t:%d:D>", info.created)) end
+    if info.created then blocks[#blocks + 1] = "**Created**\n" .. string.format("<t:%d:D>", info.created) end
     if info.updated then
         local v = string.format("<t:%d:D>", info.updated)
-        if info.updater then v = v .. "\nby @" .. musicMd(info.updater) end
-        row2[#row2 + 1] = field("Updated", v)
-    end
-    for _, row in ipairs({ row1, row2 }) do
-        if #row > 0 then
-            for _, f in ipairs(row) do fields[#fields + 1] = f end
-            for _ = #row + 1, 3 do fields[#fields + 1] = SPACER end
-        end
+        if info.updater then v = v .. " by @" .. musicMd(info.updater) end
+        blocks[#blocks + 1] = "**Updated**\n" .. v
     end
     return '{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
-        .. ',"description":' .. musicJson("**Song Name**\n" .. musicMd(info.title or "Unknown") .. "\n\n**Song ID**\n" .. id)
-        .. (#fields > 0 and (',"fields":[' .. table.concat(fields, ",") .. "]") or "")
-        .. "}"
+        .. ',"description":' .. musicJson(table.concat(blocks, "\n\n")) .. "}"
 end
 
 
