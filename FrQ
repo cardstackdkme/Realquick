@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.1"
+GUI.Version = "v7.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5436,10 +5436,12 @@ local function musicInfo(id)
 end
 
 -- The embed, as a JSON OBJECT string (the menu posts it, or hands it to the helper verbatim).
--- One column: a bold heading over each value, a blank line between every block, the same style
--- as the original Song Name / Song ID. (v7.0 used side-by-side inline fields and the user found
--- them cramped.) Dates use Discord's <t:unix:D> tag, so everyone sees their own date format and
--- time zone. Anything the catalogue did not return is simply left out.
+-- One column, a bold heading over each value and a blank line between blocks (the user found
+-- v7.0's three-across inline fields cramped) EXCEPT Created and Updated, which sit side by side
+-- as exactly TWO inline fields: with two, Discord gives each half the width, so there is a real
+-- gap between them (a third, empty spacer column is what squeezed v7.0). Dates use Discord's
+-- <t:unix:D> tag, so everyone sees their own date format and time zone. Anything the catalogue
+-- did not return is simply left out.
 local function musicEmbed(info, id)
     local blocks = {
         "**Song Name**\n" .. musicMd(info.title or "Unknown"),
@@ -5452,19 +5454,25 @@ local function musicEmbed(info, id)
         elseif info.creatorId and info.creatorType == "User" then
             who = "[" .. who .. "](https://www.roblox.com/users/" .. info.creatorId .. "/profile)"
         end
-        blocks[#blocks + 1] = "**By**\n" .. who
+        blocks[#blocks + 1] = "**Made By**\n" .. who
     end
     if info.duration then
         blocks[#blocks + 1] = "**Length**\n" .. string.format("%d:%02d", math.floor(info.duration / 60), info.duration % 60)
     end
-    if info.created then blocks[#blocks + 1] = "**Created**\n" .. string.format("<t:%d:D>", info.created) end
+    local fields = {}
+    local function field(name, value)
+        fields[#fields + 1] = '{"name":' .. musicJson(name) .. ',"value":' .. musicJson(value) .. ',"inline":true}'
+    end
+    if info.created then field("Created", string.format("<t:%d:D>", info.created)) end
     if info.updated then
         local v = string.format("<t:%d:D>", info.updated)
         if info.updater then v = v .. " by @" .. musicMd(info.updater) end
-        blocks[#blocks + 1] = "**Updated**\n" .. v
+        field("Updated", v)
     end
     return '{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
-        .. ',"description":' .. musicJson(table.concat(blocks, "\n\n")) .. "}"
+        .. ',"description":' .. musicJson(table.concat(blocks, "\n\n"))
+        .. (#fields > 0 and (',"fields":[' .. table.concat(fields, ",") .. "]") or "")
+        .. "}"
 end
 
 
