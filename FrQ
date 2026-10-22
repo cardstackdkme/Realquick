@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.2"
+GUI.Version = "v7.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5469,8 +5469,13 @@ local function musicEmbed(info, id)
         if info.updater then v = v .. " by @" .. musicMd(info.updater) end
         field("Updated", v)
     end
+    -- Discord trims blank lines off the END of a description, so the gap before Created/Updated
+    -- is a line holding only a zero-width space: it renders as one empty line, matching the gap
+    -- between every other block.
+    local desc = table.concat(blocks, "\n\n")
+    if #fields > 0 then desc = desc .. "\n\u{200B}" end
     return '{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
-        .. ',"description":' .. musicJson(table.concat(blocks, "\n\n"))
+        .. ',"description":' .. musicJson(desc)
         .. (#fields > 0 and (',"fields":[' .. table.concat(fields, ",") .. "]") or "")
         .. "}"
 end
