@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.5"
+GUI.Version = "v6.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -484,6 +484,8 @@ local DEATHLOG = {
     -- The "Send Actors" button (Logs tab) posts its one-line list here, and only here: the
     -- "Good logs but robotic" channel, separate from the actor-death feed above.
     ActorListWebhook = "https://discord.com/api/webhooks/1560003021952254073/bplD6dP0vK0splfZmZbq67MfKjAFQgoYnoNUdxdqhFDtxCDL1L3Gw7A20TfTX2U1oCiU",
+    -- Logs > Music "Send Current Song" posts here ("Good logs but for songs").
+    MusicWebhook = "https://discord.com/api/webhooks/1562821622367522856/dW5jXq-GIPIOY9kIayTCcESOMzeLpu7MGwn51vgbuNd_MOGU0A4znVYB7EL_DjHhz_3Z",
     Seen           = {},    -- [ragdollName] = true (already accounted for; cleared if body despawns before the perma threshold)
     Pending        = {},    -- [ragdollName] = { instance, firstSeenAt }
     Seeded         = false, -- becomes true after first scan completes; pre-existing ragdolls don't trigger
@@ -5256,6 +5258,166 @@ DEATHLOG.SendActors = function()
     end
     return names, total
 end
+
+-- "Send Current Song" (Logs tab > Music): the game's background music, its name and id, to
+-- DEATHLOG.MusicWebhook. Measured live 2026-10-22:
+--   * the music is Workspace.WorldMusicSoundEffect, attribute FadeState = "Playing". The game finds
+--     it by CollectionService tag, but GetTagged does not exist under Matcha, so it is found by name
+--     (a crossfade can briefly leave two; the one not fading out wins).
+--   * Sound.SoundId reads nil through the shim. It is a std::string in the Sound at +176 (the same
+--     on a second Sound, UnderwaterAmbience), read here word by word. Further strings sit at
+--     +688..+928 and are NOT the sound id, so if a Roblox update moves it the LOWEST offset holding
+--     an asset id is taken, and only when another Sound has one at that offset too.
+--   * the song's name is not in the game at all; Roblox's public asset API has it
+--     (economy.roblox.com/v2/assets/<id>/details -> "Name"), reachable with HttpGet (~1s).
+-- Wrapped in an IIFE: the main chunk is near Lua's 200-local limit, and this only exposes
+-- DEATHLOG.SendSong.
+;(function()
+local MUSIC_SOUNDID_HINT = 176
+local function musicPtr(a) local ok, v = pcall(memory_read, "uintptr", a) return ok and v or nil end
+local function musicStr(base)
+    local len, cap = musicPtr(base + 16), musicPtr(base + 24)
+    if not (len and cap) or len < 4 or len > 200 or cap < len or cap > 4096 then return nil end
+    local src = (cap < 16) and base or musicPtr(base)
+    if type(src) ~= "number" or src < 0x10000 then return nil end
+    local out, i = {}, 0
+    while i < len do
+        local okW, w = pcall(memory_read, "int32", src + i)
+        if not okW or type(w) ~= "number" then return nil end
+        for b = 0, 3 do
+            if i + b < len then
+                local ch = bit32.band(bit32.rshift(w, b * 8), 255)
+                if ch < 32 or ch > 126 then return nil end
+                out[#out + 1] = string.char(ch)
+            end
+        end
+        i = i + 4
+    end
+    return table.concat(out)
+end
+-- the numeric id in "rbxassetid://N" or "http://www.roblox.com/asset/?id=N"
+local function musicIdAt(addr, off)
+    local s = musicStr(addr + off)
+    if type(s) ~= "string" or not (s:find("rbxassetid://", 1, true) or s:find("asset/?id=", 1, true)) then return nil end
+    return s:match("(%d%d%d%d+)%s*$")
+end
+local function musicAddr(inst)
+    local a = nil
+    pcall(function() a = inst.Address end)
+    if type(a) == "string" then a = tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+    return type(a) == "number" and a or nil
+end
+
+-- The Sound playing the music right now, or nil.
+local function musicSound()
+    local best, bestRank = nil, 0
+    local kids = {}
+    pcall(function() kids = Workspace:GetChildren() end)
+    for _, c in ipairs(kids) do
+        local nm = nil
+        pcall(function() nm = c.Name end)
+        if nm == "WorldMusicSoundEffect" then
+            local fade = nil
+            pcall(function() fade = c:GetAttribute("FadeState") end)
+            local rank = (fade == "Playing" and 4) or (fade == "FadingIn" and 3) or (fade == nil and 2)
+                or (fade == "FadingOut" and 1) or 0
+            if rank > bestRank then best, bestRank = c, rank end
+        end
+    end
+    return best
+end
+
+-- The numeric sound id of `snd`, or nil and why.
+local function musicSoundId(snd)
+    local A = musicAddr(snd)
+    if not A then return nil, "could not read the sound" end
+    local id = musicIdAt(A, MUSIC_SOUNDID_HINT)
+    if id then return id end
+    -- moved: the lowest offset that holds an asset id here AND on another Sound
+    local other = nil
+    pcall(function()
+        for _, c in ipairs(Workspace:GetChildren()) do
+            if c.ClassName == "Sound" and c.Name ~= "WorldMusicSoundEffect" then
+                local b = musicAddr(c)
+                if b then other = b; break end
+            end
+        end
+    end)
+    for off = 0, 1024, 8 do
+        local hit = musicIdAt(A, off)
+        if hit then
+            if other and musicIdAt(other, off) then
+                MUSIC_SOUNDID_HINT = off
+                return hit
+            end
+            return nil, "sound id not found safely on this Roblox build"
+        end
+    end
+    return nil, "sound id not found on this Roblox build"
+end
+
+-- A JSON string with everything outside plain ASCII written as \u escapes (UTF-16 pairs above
+-- U+FFFF), so a song called "Café" or one with an emoji in it reaches Discord intact whatever
+-- happens to the bytes on the way. Invalid UTF-8 falls back to the plain escaper.
+local function musicJson(text)
+    local out = { '"' }
+    local ok = pcall(function()
+        for _, cp in utf8.codes(text) do
+            if cp == 34 then out[#out + 1] = '\\"'
+            elseif cp == 92 then out[#out + 1] = '\\\\'
+            elseif cp >= 32 and cp < 127 then out[#out + 1] = string.char(cp)
+            elseif cp < 0x10000 then out[#out + 1] = string.format("\\u%04x", cp)
+            else
+                local v = cp - 0x10000
+                out[#out + 1] = string.format("\\u%04x\\u%04x", 0xD800 + math.floor(v / 1024), 0xDC00 + v % 1024)
+            end
+        end
+    end)
+    if not ok then return rsJsonEscape(text) end
+    out[#out + 1] = '"'
+    return table.concat(out)
+end
+
+-- Song name from Roblox's public asset API. Blocks for about a second.
+local function musicName(id)
+    local name = nil
+    pcall(function()
+        local body = game:HttpGet("https://economy.roblox.com/v2/assets/" .. id .. "/details")
+        local ok, j = pcall(function() return HttpService:JSONDecode(body) end)
+        if ok and type(j) == "table" and type(j.Name) == "string" and j.Name ~= "" then name = j.Name end
+    end)
+    return name
+end
+
+-- Posts the embed: a blue bar and exactly two lines, "Name : <song>" and "ID : <id>". Hand-built
+-- JSON (JSONEncode would write the colour as a float, which Discord rejects silently).
+-- Returns name, id, and an error message or nil.
+DEATHLOG.SendSong = function()
+    local snd = musicSound()
+    if not snd then return nil, nil, "no music is playing" end
+    local id, why = musicSoundId(snd)
+    if not id then return nil, nil, why end
+    local name = musicName(id) or "Unknown"
+    local url = DEATHLOG.MusicWebhook
+    if type(url) ~= "string" or url == "" then return name, id, "no webhook set" end
+    local body = '{"embeds":[{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
+        .. ',"description":' .. musicJson("Name : " .. name .. "\nID : " .. id) .. "}]}"
+    local reply = nil
+    local ok = pcall(function()
+        if type(httppost) == "function" then
+            reply = httppost(url, body, "application/json")
+        else
+            reply = game:HttpPost(url, body, "application/json")
+        end
+    end)
+    if not ok then return name, id, "the request failed" end
+    if type(reply) == "string" then
+        local err = reply:match('"message"%s*:%s*"([^"]*)"')
+        if err then return name, id, err end
+    end
+    return name, id
+end
+end)()  -- /Music
 
 -- ============================================================
 -- ACTOR ESP ENGINE
@@ -11196,6 +11358,30 @@ end)()
                 if DEATHLOG.Seeded then return "Status:  Active   (sent " .. tostring(DEATHLOG.SentCount) .. ")" end
                 return "Status:  Seeding existing ragdolls..."
             end)
+        end)
+
+        -- The game's current background music: its name and id, as a blue embed, to the songs
+        -- webhook. Off the UI thread: the name lookup and the post each block for about a second.
+        local secMusic = tab:Section("Music", "Right", "Current song to Discord")
+        local sendSong = secMusic:Button("Send Current Song", function()
+            if (os.clock() - (DEATHLOG.SongSentAt or -10)) < 5 then
+                uiNotify("Music", "Wait a few seconds before sending again", 3)
+                return
+            end
+            DEATHLOG.SongSentAt = os.clock()
+            task.spawn(function()
+                local name, id, err = DEATHLOG.SendSong()
+                if err and not id then
+                    uiNotify("Music", "Nothing sent - " .. tostring(err), 5)
+                elseif err then
+                    uiNotify("Music", "Not posted - Discord says: " .. tostring(err), 8)
+                else
+                    uiNotify("Music", "Sent: " .. tostring(name) .. "  (" .. tostring(id) .. ")", 5)
+                end
+            end)
+        end)
+        pcall(function()
+            sendSong:Tooltip("Posts the song the game is playing right now - its name and id - to the songs webhook")
         end)
     end)
 
