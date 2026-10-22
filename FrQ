@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.4"
+GUI.Version = "v7.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5425,11 +5425,24 @@ local function musicInfo(id)
             end
         end
     end)
-    if not info.title then
+    -- Not every song is in that catalogue: it only lists Creator Store items, and a song uploaded
+    -- for the game but never listed (e.g. "BP", 140127299664875) is a 404 there. The older economy
+    -- endpoint still knows it - name, creator, created and updated - but NOT its length or who last
+    -- updated it, and no public endpoint does (the rest need a login). So those two are left out.
+    if not info.title or not info.creator then
         pcall(function()
             local body = game:HttpGet("https://economy.roblox.com/v2/assets/" .. id .. "/details")
             local ok, j = pcall(function() return HttpService:JSONDecode(body) end)
-            if ok and type(j) == "table" and type(j.Name) == "string" and j.Name ~= "" then info.title = j.Name end
+            if not (ok and type(j) == "table") then return end
+            if not info.title and type(j.Name) == "string" and j.Name ~= "" then info.title = j.Name end
+            local c = j.Creator
+            if not info.creator and type(c) == "table" and type(c.Name) == "string" and c.Name ~= "" then
+                info.creator = c.Name
+                if type(c.CreatorTargetId) == "number" then info.creatorId = string.format("%d", c.CreatorTargetId) end
+                info.creatorType = (c.CreatorType == "Group" or c.CreatorType == "User") and c.CreatorType or nil
+            end
+            info.created = info.created or isoUnix(j.Created)
+            info.updated = info.updated or isoUnix(j.Updated)
         end)
     end
     return info
