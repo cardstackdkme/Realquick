@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v6.9"
+GUI.Version = "v7.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -5383,15 +5383,101 @@ local function musicMd(text)
     return (text:gsub("([%*_~`|\\])", "\\%1"))
 end
 
--- Song name from Roblox's public asset API. Blocks for about a second.
-local function musicName(id)
-    local name = nil
+-- ISO time ("2026-05-06T10:26:24.43Z", always UTC from Roblox) -> unix seconds. Plain arithmetic
+-- (days-from-civil), because os.time() on a table would read it as LOCAL time.
+local function isoUnix(s)
+    local y, mo, d, h, mi, se = tostring(s or ""):match("^(%d+)%-(%d+)%-(%d+)T(%d+):(%d+):(%d+)")
+    if not y then return nil end
+    y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
+    if mo <= 2 then y = y - 1 end
+    local era = math.floor(y / 400)
+    local yoe = y - era * 400
+    local doy = math.floor((153 * ((mo + 9) % 12) + 2) / 5) + d - 1
+    local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+    return (era * 146097 + doe - 719468) * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(se)
+end
+
+-- Everything the embed shows, from ONE call to Roblox's public catalogue (~0.2s):
+--   { title, duration (whole seconds), created, updated (unix), creator, creatorId, creatorType
+--     ("Group"/"User"), updater (the group member who last updated it) }
+-- Falls back to the older economy endpoint for just the name if the catalogue does not answer.
+local function musicInfo(id)
+    local info = {}
     pcall(function()
-        local body = game:HttpGet("https://economy.roblox.com/v2/assets/" .. id .. "/details")
+        local body = game:HttpGet("https://apis.roblox.com/toolbox-service/v1/items/details?assetIds=" .. id)
         local ok, j = pcall(function() return HttpService:JSONDecode(body) end)
-        if ok and type(j) == "table" and type(j.Name) == "string" and j.Name ~= "" then name = j.Name end
+        local row = ok and type(j) == "table" and type(j.data) == "table" and j.data[1]
+        local a = type(row) == "table" and row.asset
+        local c = type(row) == "table" and row.creator
+        if type(a) == "table" then
+            local t = (type(a.audioDetails) == "table" and a.audioDetails.title) or a.name
+            if type(t) == "string" and t ~= "" then info.title = t end
+            if type(a.duration) == "number" and a.duration > 0 then info.duration = math.floor(a.duration + 0.5) end
+            info.created = isoUnix(a.createdUtc)
+            info.updated = isoUnix(a.updatedUtc)
+        end
+        if type(c) == "table" then
+            if type(c.name) == "string" and c.name ~= "" then info.creator = c.name end
+            if type(c.id) == "number" then info.creatorId = string.format("%d", c.id) end
+            info.creatorType = (c.type == 2 and "Group") or (c.type == 1 and "User") or nil
+            if type(c.latestGroupUpdaterUserName) == "string" and c.latestGroupUpdaterUserName ~= "" then
+                info.updater = c.latestGroupUpdaterUserName
+            end
+        end
     end)
-    return name
+    if not info.title then
+        pcall(function()
+            local body = game:HttpGet("https://economy.roblox.com/v2/assets/" .. id .. "/details")
+            local ok, j = pcall(function() return HttpService:JSONDecode(body) end)
+            if ok and type(j) == "table" and type(j.Name) == "string" and j.Name ~= "" then info.title = j.Name end
+        end)
+    end
+    return info
+end
+
+-- The embed, as a JSON OBJECT string (the menu posts it, or hands it to the helper verbatim):
+--   blue bar; description "**Song Name**\n<name>\n\n**Song ID**\n<id>" (the user's layout); then
+--   fields in two rows: By | Length, and Created | Updated (+ who updated it). Dates use Discord's
+--   <t:unix:D> tag, so everyone sees them in their own time zone. Empty spacer fields keep each row
+--   to two columns. Anything the catalogue did not return is simply left out.
+local function musicEmbed(info, id)
+    local SPACER = '{"name":"\\u200b","value":"\\u200b","inline":true}'
+    local function field(name, value)
+        return '{"name":' .. musicJson(name) .. ',"value":' .. musicJson(value) .. ',"inline":true}'
+    end
+    local fields = {}
+    local row1, row2 = {}, {}
+    if info.creator then
+        local link = nil
+        if info.creatorId and info.creatorType == "Group" then
+            link = "https://www.roblox.com/communities/" .. info.creatorId
+        elseif info.creatorId and info.creatorType == "User" then
+            link = "https://www.roblox.com/users/" .. info.creatorId .. "/profile"
+        end
+        local who = musicMd(info.creator)
+        if link then who = "[" .. who .. "](" .. link .. ")" end
+        if info.creatorType then who = who .. "\n" .. info.creatorType end
+        row1[#row1 + 1] = field("By", who)
+    end
+    if info.duration then
+        row1[#row1 + 1] = field("Length", string.format("%d:%02d", math.floor(info.duration / 60), info.duration % 60))
+    end
+    if info.created then row2[#row2 + 1] = field("Created", string.format("<t:%d:D>", info.created)) end
+    if info.updated then
+        local v = string.format("<t:%d:D>", info.updated)
+        if info.updater then v = v .. "\nby @" .. musicMd(info.updater) end
+        row2[#row2 + 1] = field("Updated", v)
+    end
+    for _, row in ipairs({ row1, row2 }) do
+        if #row > 0 then
+            for _, f in ipairs(row) do fields[#fields + 1] = f end
+            for _ = #row + 1, 3 do fields[#fields + 1] = SPACER end
+        end
+    end
+    return '{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
+        .. ',"description":' .. musicJson("**Song Name**\n" .. musicMd(info.title or "Unknown") .. "\n\n**Song ID**\n" .. id)
+        .. (#fields > 0 and (',"fields":[' .. table.concat(fields, ",") .. "]") or "")
+        .. "}"
 end
 
 
@@ -5399,7 +5485,7 @@ end
 -- Matcha cannot read the Roblox cache or upload a file, so when the helper is running it sends
 -- the message instead, with the song attached. They talk through files in C:\matcha\workspace\RQ:
 --   songhelper_alive.txt     the helper writes the unix time every second
---   songhelper_request.json  we write { reqId, id, name, webhook }, the helper deletes it
+--   songhelper_request.json  we write { reqId, id, name, webhook, embed }, the helper deletes it
 --   songhelper_result.json   the helper answers { reqId, ok, audio, how, why, name }
 --   songhelper_now.json      we write { id, at } when the music changes, so the helper can learn
 --                            which cache file is which song from when it was downloaded
@@ -5418,10 +5504,10 @@ end
 
 -- Hand the song to the helper and wait for its answer (an upload with the song attached takes a
 -- few seconds). Returns err (or nil) and a short description of the audio for the popup.
-local function viaHelper(name, id, url)
+local function viaHelper(name, id, url, embed)
     local reqId = string.format("%d-%d", os.time(), math.random(1, 999999999))
     local body = '{"reqId":"' .. reqId .. '","id":"' .. id .. '","webhook":' .. musicJson(url)
-        .. ',"name":' .. musicJson(name) .. "}"
+        .. ',"name":' .. musicJson(name) .. ',"embed":' .. embed .. "}"
     pcall(function()
         if type(isfolder) == "function" and type(makefolder) == "function" and not isfolder("RQ") then makefolder("RQ") end
     end)
@@ -5466,24 +5552,26 @@ task.spawn(function()
     end
 end)
 
--- Posts the embed: a blue bar, then a bold "Song Name" heading over the song's name, a blank line, and
--- a bold "Song ID" heading over the id. Hand-built
--- JSON (JSONEncode would write the colour as a float, which Discord rejects silently).
--- Returns name, id, and an error message or nil.
+-- Posts the embed built by musicEmbed (hand-built JSON: JSONEncode would write the colour as a
+-- float, which Discord rejects silently). With the helper running, it posts the same embed and
+-- then the song as a second message, so the mp3 sits BELOW the embed (Discord always draws a
+-- message's attachments above its embeds, so one message cannot do it).
+-- Returns name, id, an error message or nil, and a note about the audio.
 DEATHLOG.SendSong = function()
     local snd = musicSound()
     if not snd then return nil, nil, "no music is playing" end
     local id, why = musicSoundId(snd)
     if not id then return nil, nil, why end
-    local name = musicName(id) or "Unknown"
+    local info = musicInfo(id)
+    local name = info.title or "Unknown"
     local url = DEATHLOG.MusicWebhook
     if type(url) ~= "string" or url == "" then return name, id, "no webhook set" end
+    local embed = musicEmbed(info, id)
     if helperAlive() then
-        local err, audio = viaHelper(name, id, url)
+        local err, audio = viaHelper(name, id, url, embed)
         return name, id, err, audio
     end
-    local body = '{"embeds":[{"color":' .. string.format("%d", 3447003)       -- 0x3498DB, blue
-        .. ',"description":' .. musicJson("**Song Name**\n" .. musicMd(name) .. "\n\n**Song ID**\n" .. id) .. "}]}"
+    local body = '{"embeds":[' .. embed .. ']}'
     local reply = nil
     local ok = pcall(function()
         if type(httppost) == "function" then
