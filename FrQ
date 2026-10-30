@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.6"
+GUI.Version = "v7.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -9717,8 +9717,13 @@ end)
 -- both rely on that). What it cannot see is a wall in between: the game's own ray decides, and
 -- then the hook lands on the wall.
 --   Mode "Toggle": armed whenever the switch is on.  Mode "Hold": armed only while HoldKey is down.
--- The hook is held while armed AND the cursor stays on that player (Grace covers a moment off);
--- it lets go the instant either stops. Left of screen centre hooks with Q, right with E.
+-- Once a hook is fired it is HELD for as long as the trigger lasts, wherever the cursor goes:
+--   Hold   - until the hold key is released.
+--   Toggle - there is no key to let go with, so looking well away from them (Grace seconds) lets
+--            go. The hook pulls you, so you and the camera swing around: v7.6 demanded the cursor
+--            stay ON the body and dropped the hook mid-pull, which read as "grapples once".
+-- Either way it lets go when the target leaves the server, or when it pauses (below).
+-- Left of screen centre hooks with Q, right with E.
 -- The game refuses more than 5 hooks in 2 seconds, so a new hook waits MinGap after the last.
 -- Real keyboard input, like Auto Parry's F: never while Roblox is in the background (it would type
 -- into whatever has focus), while the menu is open, or while the Player List search is focused.
@@ -9729,7 +9734,8 @@ local AG = {
     KeyLeft = 0x51,        -- Q, left hook
     KeyRight = 0x45,       -- E, right hook
     BodyR = 1.3,           -- studs: half-width of a body for the cursor test
-    Grace = 0.3,           -- seconds the cursor may slip off the target before letting go
+    Grace = 1.0,           -- Toggle: seconds spent looking well away from them before letting go
+    AwayFrac = 0.35,       -- Toggle: "well away" = this fraction of the screen height from them
     MinGap = 0.45,         -- seconds between hooks (the game's cap is 5 per 2s)
     MaxDist = 3000,        -- studs; only skips the absurd, range itself is the Character tab's
     -- runtime
@@ -9913,13 +9919,30 @@ task.spawn(function()
             pcall(function() mx, my = Mouse.X, Mouse.Y end)
             if not (mx and my) then return end
 
-            -- holding: keep it while the cursor stays on that player
+            -- holding: the hook stays on for as long as the trigger lasts (see the header)
             if AG.Held then
                 local e = AG.Target and cache[AG.Target]
-                if e and e.hrp and agTest(e, mx, my, ppK, cx, cy, cz) then AG.OnAt = now end
                 -- e.at stops moving once they are off the player list (left the server): a body
                 -- remembered from before must not keep the key held
-                if not e or (now - (e.at or 0)) > 2.5 or (now - AG.OnAt) > AG.Grace then
+                local gone = (not e) or (now - (e.at or 0)) > 2.5
+                if not gone and AG.Mode ~= "Hold" then
+                    -- Toggle: still roughly looking at them? (their centre, freshly projected)
+                    local near = false
+                    if e.hrp then
+                        local pos = nil
+                        pcall(function() pos = e.hrp.Position end)
+                        if pos then
+                            local v, on = WorldToScreen(pos)
+                            if v and on then
+                                local lim = vp.Y * AG.AwayFrac
+                                near = (mx - v.X) ^ 2 + (my - v.Y) ^ 2 <= lim * lim
+                            end
+                        end
+                    end
+                    if near then AG.OnAt = now end
+                    if (now - AG.OnAt) > AG.Grace then gone = true end
+                end
+                if gone then
                     agRelease()
                     AG.Status = "armed"
                 else
