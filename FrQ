@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.5"
+GUI.Version = "v7.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -9701,6 +9701,260 @@ task.spawn(function()
     for _, d in ipairs(ESPPool) do pcall(function() d:Remove() end) end
 end)
 
+-- ============================================================
+-- AUTO GRAPPLE  —  hook the player under your cursor, and HOLD the hook
+-- ============================================================
+-- How the game fires a hook (Client.User.Equipment.Gear.Components, decompiled): pressing the
+-- grapple key casts a ray from the camera at LocalPlayer:GetMouse().Hit, i.e. at whatever is
+-- under the CURSOR, and releasing the key lets go. Characters are fair game for that ray. So
+-- nothing here aims: it only decides WHEN to press Q / E, and keeps the key down so the hook
+-- stays on (a tap would hook and drop in the same instant). Range is the Character tab's job.
+--
+-- "Is the cursor on a player?" is answered ON SCREEN, because Matcha has no raycast: each body
+-- is a capsule along the HumanoidRootPart's up axis (head top to feet), both ends projected with
+-- WorldToScreen, and the cursor has to be within the body's on-screen half-width of that line.
+-- Mouse.X/Y and WorldToScreen share the Drawing coordinate space (the menu's own UI and the ESP
+-- both rely on that). What it cannot see is a wall in between: the game's own ray decides, and
+-- then the hook lands on the wall.
+--   Mode "Toggle": armed whenever the switch is on.  Mode "Hold": armed only while HoldKey is down.
+-- The hook is held while armed AND the cursor stays on that player (Grace covers a moment off);
+-- it lets go the instant either stops. Left of screen centre hooks with Q, right with E.
+-- The game refuses more than 5 hooks in 2 seconds, so a new hook waits MinGap after the last.
+-- Real keyboard input, like Auto Parry's F: never while Roblox is in the background (it would type
+-- into whatever has focus), while the menu is open, or while the Player List search is focused.
+local AG = {
+    Enabled = false,
+    Mode = "Toggle",       -- "Toggle" | "Hold"
+    HoldKey = 0x30,        -- 0  (note: 0 is also the game's hotbar slot 0)
+    KeyLeft = 0x51,        -- Q, left hook
+    KeyRight = 0x45,       -- E, right hook
+    BodyR = 1.3,           -- studs: half-width of a body for the cursor test
+    Grace = 0.3,           -- seconds the cursor may slip off the target before letting go
+    MinGap = 0.45,         -- seconds between hooks (the game's cap is 5 per 2s)
+    MaxDist = 3000,        -- studs; only skips the absurd, range itself is the Character tab's
+    -- runtime
+    Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off",
+}
+GUI.AG = AG
+pcall(function() rawset(_G, "RQAG", AG) end)
+
+local function agKeyName(vk)
+    if GUI.VKToName then
+        local ok, n = pcall(GUI.VKToName, vk)
+        if ok and n then return string.upper(tostring(n)) end
+    end
+    return tostring(vk)
+end
+
+local function agPress(vk, now)
+    GUI._injVK, GUI._injAt = vk, now     -- so the Player List search does not type it
+    pcall(keypress, vk)
+    AG.Held, AG.PressedAt = vk, now
+end
+
+local function agRelease()
+    if AG.Held then pcall(keyrelease, AG.Held) end
+    AG.Held, AG.Target = nil, nil
+end
+
+-- Is the menu on screen? The fork rebuilds _G.RQGeo every frame it renders, so a table that
+-- stopped changing is a minimised menu (same test the E loop uses).
+local agGeoRef, agGeoAt = nil, 0
+local function agMenuOpen(now)
+    local g = _G.RQGeo
+    if g ~= agGeoRef then agGeoRef, agGeoAt = g, now end
+    return type(g) == "table" and g.open == true and (now - agGeoAt) <= 0.25
+end
+
+-- distance from point P to segment AB, on screen
+local function agSegDist(px, py, ax, ay, bx, by)
+    local vx, vy = bx - ax, by - ay
+    local t = 0
+    local vv = vx * vx + vy * vy
+    if vv > 0.0001 then
+        t = ((px - ax) * vx + (py - ay) * vy) / vv
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    end
+    local qx, qy = ax + vx * t - px, ay + vy * t - py
+    return math.sqrt(qx * qx + qy * qy)
+end
+
+-- The cursor test for one player. Returns their distance and on-screen X when the cursor is on
+-- their body, else nil.
+local function agTest(e, mx, my, ppK, cx, cy, cz)
+    local cf = nil
+    pcall(function() cf = e.hrp.CFrame end)
+    if not cf then return nil end
+    local p, up = nil, nil
+    pcall(function() p = cf.Position; up = cf.UpVector end)
+    if not (p and up) then return nil end
+    local px, py, pz = p.X, p.Y, p.Z
+    local dx, dy, dz = px - cx, py - cy, pz - cz
+    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if dist < 2 or dist > AG.MaxDist then return nil end
+    local c, onC = WorldToScreen(Vector3.new(px, py, pz))
+    if not (c and onC) then return nil end
+    local s = ppK / dist                         -- pixels per stud at their distance
+    local ux, uy, uz = up.X, up.Y, up.Z
+    local a = WorldToScreen(Vector3.new(px + ux * 2.1, py + uy * 2.1, pz + uz * 2.1))
+    local b = WorldToScreen(Vector3.new(px - ux * 2.9, py - uy * 2.9, pz - uz * 2.9))
+    -- An end can only be about its own length from the centre on screen. Further than that it is
+    -- a point behind the camera projected through it (you are right on top of them): use the centre.
+    local ax, ay, bx, by = c.X, c.Y, c.X, c.Y
+    if a then
+        local lim = 2.1 * s * 1.6 + 6
+        if (a.X - c.X) ^ 2 + (a.Y - c.Y) ^ 2 <= lim * lim then ax, ay = a.X, a.Y end
+    end
+    if b then
+        local lim = 2.9 * s * 1.6 + 6
+        if (b.X - c.X) ^ 2 + (b.Y - c.Y) ^ 2 <= lim * lim then bx, by = b.X, b.Y end
+    end
+    if agSegDist(mx, my, ax, ay, bx, by) <= AG.BodyR * s then return dist, c.X end
+    return nil
+end
+
+task.spawn(function()
+    local holdReady = false        -- release-arm guard: a key that reads stuck-down never arms
+    local myName = nil
+    pcall(function() myName = LP.Name end)
+    -- Players, refreshed a few per tick so no single frame pays for the whole server. Kept warm
+    -- while the switch is on (Hold mode included), so pressing the hold key acts at once.
+    -- [name] = { hrp, resolvedAt, vis, sx, sy, rpx, at }
+    local cache, plist, pidx, plistAt, pruneAt = {}, {}, 1, -10, 0
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
+        pcall(function()
+            local now = os.clock()
+            if not AG.Enabled then
+                if AG.Held then agRelease() end
+                AG.Status = "off"
+                holdReady = false          -- re-arm the guard for the next time it is switched on
+                return
+            end
+
+            local cam = Workspace.CurrentCamera
+            local camPos, fov, vp = nil, nil, nil
+            pcall(function() camPos = cam.Position; fov = cam.FieldOfView; vp = cam.ViewportSize end)
+            if not (camPos and fov and vp) then return end
+            local cx, cy, cz = camPos.X, camPos.Y, camPos.Z
+            local ppK = (vp.Y / 2) / math.tan(math.rad(fov) / 2)
+
+            -- roster upkeep: up to 8 players a tick
+            if now - plistAt > 2 then
+                plistAt = now
+                local l = nil
+                pcall(function() l = Players:GetPlayers() end)
+                if type(l) == "table" then plist = l end
+            end
+            local n = #plist
+            for _ = 1, math.min(8, n) do
+                if pidx > n then pidx = 1 end
+                local p = plist[pidx]
+                pidx = pidx + 1
+                local nm = nil
+                pcall(function() nm = p.Name end)
+                if type(nm) == "string" and nm ~= myName then
+                    local e = cache[nm]
+                    if not e then e = { resolvedAt = -10 }; cache[nm] = e end
+                    if not e.hrp or now - e.resolvedAt > 3 then
+                        e.resolvedAt = now
+                        e.hrp = nil
+                        pcall(function()
+                            local ch = p.Character
+                            e.hrp = ch and ch:FindFirstChild("HumanoidRootPart") or nil
+                        end)
+                    end
+                    e.at = now
+                    e.vis = false
+                    if e.hrp then
+                        local pos = nil
+                        pcall(function() pos = e.hrp.Position end)
+                        if pos then
+                            local dx, dy, dz = pos.X - cx, pos.Y - cy, pos.Z - cz
+                            local d2 = dx * dx + dy * dy + dz * dz
+                            if d2 <= AG.MaxDist * AG.MaxDist and d2 > 1 then
+                                local v, on = WorldToScreen(pos)
+                                if v and on then
+                                    e.vis, e.sx, e.sy = true, v.X, v.Y
+                                    e.rpx = 3 * ppK / math.sqrt(d2)
+                                end
+                            end
+                        else
+                            e.hrp = nil              -- a destroyed part: resolve again next round
+                        end
+                    end
+                end
+            end
+            if now - pruneAt > 3 then
+                pruneAt = now
+                for nm, e in pairs(cache) do
+                    if now - (e.at or 0) > 6 then cache[nm] = nil end
+                end
+            end
+
+            -- armed? (Hold mode: only while the hold key is down)
+            local hk = false
+            pcall(function() hk = iskeypressed(AG.HoldKey) and true or false end)
+            if not hk then holdReady = true end
+            local armed = AG.Mode ~= "Hold" or (holdReady and hk)
+            local blocked = nil
+            if armed then
+                local focused = true
+                pcall(function() focused = isrbxactive() and true or false end)
+                if not focused then blocked = "paused - Roblox not focused"
+                elseif agMenuOpen(now) then blocked = "paused - menu open"
+                elseif GUI.PLSearchFocused then blocked = "paused - typing" end
+            end
+            if not armed or blocked then
+                if AG.Held then agRelease() end
+                AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
+                return
+            end
+            local mx, my = nil, nil
+            pcall(function() mx, my = Mouse.X, Mouse.Y end)
+            if not (mx and my) then return end
+
+            -- holding: keep it while the cursor stays on that player
+            if AG.Held then
+                local e = AG.Target and cache[AG.Target]
+                if e and e.hrp and agTest(e, mx, my, ppK, cx, cy, cz) then AG.OnAt = now end
+                -- e.at stops moving once they are off the player list (left the server): a body
+                -- remembered from before must not keep the key held
+                if not e or (now - (e.at or 0)) > 2.5 or (now - AG.OnAt) > AG.Grace then
+                    agRelease()
+                    AG.Status = "armed"
+                else
+                    AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. tostring(AG.Target)
+                end
+                return
+            end
+
+            AG.Status = "armed"
+            if now - AG.PressedAt < AG.MinGap then return end
+            -- the nearest player whose body is under the cursor; the cheap screen check from the
+            -- roster pass (up to ~0.2s old, hence the wide margin) decides who gets the real test
+            local best, bestD, bestX = nil, math.huge, nil
+            local margin = vp.Y * 0.25
+            for nm, e in pairs(cache) do
+                if e.vis and e.hrp and e.sx then
+                    local lim = (e.rpx or 0) + margin
+                    if (mx - e.sx) ^ 2 + (my - e.sy) ^ 2 <= lim * lim then
+                        local d, sx = agTest(e, mx, my, ppK, cx, cy, cz)
+                        if d and d < bestD then best, bestD, bestX = nm, d, sx end
+                    end
+                end
+            end
+            if best then
+                agPress((bestX < vp.X / 2) and AG.KeyLeft or AG.KeyRight, now)
+                AG.Target, AG.OnAt = best, now
+                AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. best
+            end
+        end)
+        task.wait(AG.Enabled and (1 / 60) or (1 / 15))
+    end
+    agRelease()
+end)
+-- /AUTO GRAPPLE
+
 end)()
 -- ============================================================
 -- INS-ui FRONT-END  (Verfall-style menu; replaces the old Drawing UI)
@@ -9803,6 +10057,22 @@ end)()
     -- collision). Then re-assert for ~12s so the lib's async config-autoload can't restore a
     -- stale (Verfall) logo over ours. Must be the /Png/ thumbnail (WebP bytes would be rejected).
     local REQUIEM_LOGO = "https://tr.rbxcdn.com/180DAY-feffde8d73bda422f53dd31fc43d4ae3/150/150/Image/Png/noFilter"
+    -- The "Auto Parry" tab is now "Combat" (v7.6). The library keys every saved control by
+    -- "<Tab>.<Section>.<Label>", so without this the saved Auto Parry / Fast Swing settings would
+    -- silently fall back to defaults. Rewrite those keys in the saved config files once, BEFORE
+    -- the window exists (its config autoload reads them). A file that already has "Combat." keys
+    -- is left alone, so this can never create duplicate keys.
+    pcall(function()
+        if type(listfiles) ~= "function" or type(readfile) ~= "function" or type(writefile) ~= "function" then return end
+        for _, f in ipairs(listfiles("INSui_Requiem")) do
+            if tostring(f):match("%.json$") then
+                local ok, raw = pcall(readfile, f)
+                if ok and type(raw) == "string" and raw:find('"Auto Parry.', 1, true) and not raw:find('"Combat.', 1, true) then
+                    pcall(writefile, f, (raw:gsub('"Auto Parry%.', '"Combat.')))
+                end
+            end
+        end
+    end)
     local window = Lib:CreateWindow({
         title     = "Requiem",
         subtitle  = "Bro you don't go 290 velo",
@@ -11367,9 +11637,9 @@ end)()
         end)
     end)
 
-    -- ===== Tab: Auto Parry =====
+    -- ===== Tab: Combat (Auto Parry, Fast Swing, Auto Grapple) =====
     tabBuild(function()
-        local tab = window:Tab("Auto Parry", "shield")
+        local tab = window:Tab("Combat", "shield")
         local AP = GUI.AP
         local FS = GUI.FS
         if not AP then return end
@@ -11448,6 +11718,26 @@ end)()
             end)
         end
 
+        -- ---------- Auto Grapple: hook the player under your cursor ----------
+        local AG = GUI.AG
+        if AG then
+            local secAG = tab:Section("Auto Grapple", "Right", "Hooks players under your cursor")
+            secAG:Toggle("Auto Grapple", AG.Enabled, function(v) AG.Enabled = v == true end)
+                :Tooltip("When your cursor is on a player's body it presses Q (left of centre) or E (right) and HOLDS it, so the hook stays on. Lets go when your cursor leaves them. Never while the menu is open or Roblox is in the background.")
+            pcall(function()
+                secAG:Dropdown("Mode", AG.Mode, { "Toggle", "Hold" }, false, function(v)
+                    local m = type(v) == "table" and v[1] or v
+                    if m == "Toggle" or m == "Hold" then AG.Mode = m end
+                end)
+            end)
+            pcall(function()
+                secAG:Keybind("Hold Key", toName(AG.HoldKey), function(k)
+                    local vk = toVK(k)
+                    if vk then AG.HoldKey = vk end
+                end, "Hold mode: Auto Grapple only works while this key is held")
+            end)
+        end
+
         local secInfo = tab:Section("Status", "Right", "Live")
         pcall(function()
             -- The pill no longer moves with the hotkey, so this line is the only indication of the
@@ -11482,6 +11772,13 @@ end)()
                 -- swing, so it shows the write actually taking effect.
                 return string.format("Fast Swing:  ON   %s   tracks %d hits %d   learned %d   real x%.1f",
                     tostring(FS.Phase or "-"), FS.Tracks or 0, FS.Hits or 0, FS.LearnedN or 0, FS.Rate or 0)
+            end)
+        end)
+        pcall(function()
+            secInfo:Label(function()
+                local AG = GUI.AG
+                if not AG then return "Auto Grapple:  unavailable" end
+                return "Auto Grapple:  " .. tostring(AG.Status or "off") .. ((AG.Enabled and AG.Mode == "Hold") and "   (Hold)" or "")
             end)
         end)
         secInfo:Button("Reset Learned Values", function()
