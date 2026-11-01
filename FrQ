@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.9"
+GUI.Version = "v8.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -9966,6 +9966,18 @@ local function tbIsActor(e, now)
     return e.actor
 end
 
+-- Has the bot used up this aim? While true it stops clicking until you lower and re-aim, or a
+-- reload finishes (both reset `fired` to 0). Matters because a click on an EMPTY gun starts a
+-- reload, which lowers your aim and locks you in the reload animation.
+--   prof.rounds = magazine size (TB_GUNS); fired = clicks the bot sent since the last reset.
+--   Careful: `fired` counts CLICKS, not shots. On a Kar98k the bot clicks every 0.15 s and the game
+--   ignores clicks while the bolt cycles, so 5 clicks can be only 1 real shot.
+local function tbOutOfShots(prof, fired)
+    -- Only 1- and 2-round guns stop; magazine guns keep clicking and reload themselves when
+    -- empty, like a human would.
+    return prof.rounds <= 2 and fired >= prof.rounds
+end
+
 -- The gun in your hands: its name and rules, or nil. A known name wins; otherwise any model with
 -- a muzzle ("Exit", which is what the game itself fires from), remembered per name.
 local tbHasExit = {}
@@ -10302,7 +10314,7 @@ task.spawn(function()
                 elseif not aiming then TB.Status = "aim your " .. gunName
                 elseif TB.Holding then TB.Status = "firing at " .. tostring(TB.Target)
                 elseif m1 then TB.Status = "you are clicking"
-                elseif prof.rounds <= 2 and TB.Fired >= prof.rounds then
+                elseif tbOutOfShots(prof, TB.Fired) then
                     TB.Status = "fired - reload or aim again"
                 elseif aimSince and now - aimSince < (prof.settle or 0.05) then
                     TB.Status = "aiming " .. gunName
@@ -11111,18 +11123,29 @@ end)()
             -- numeric entry (25); the other two same-name entries are strings, excluded by type.
             VELOCITY_GAIN_ADDITION              = { lo = 0, hi = 1000,   fb = 25  },
             NON_SUCCESSFUL_PARRY_WINDOW_SECONDS = { lo = 0, hi = 60,     fb = 5   },
-            -- Firearm no-spread / no-recoil (Musket + Flintlock; getgc hits ALL guns by name).
-            -- Real numerics: inaccuracy 2.5/7.5/8.5/15, recoil 2/4; every other same-name GC entry
-            -- is a string decoy (excluded by type, not by range). Restore is per-entry.
+            -- Gun spread + recoil (v8.0). Since the CharacterFirearmHandler rewrite every shot does
+            --   offset = random(+-inaccuracy) * (1 - FirearmAccuracyMultiplier)
+            --   kick   = recoilImpulse * FirearmRecoilMultiplier
+            -- and both multipliers are plain entries in ClientAttributesHandler's stat table
+            -- (name -> value, the same table the Grapple/Velocity pins write). So two writes cover
+            -- every gun, from the next shot, gun in hand included. Live 2026-11-01: accuracy 0,
+            -- recoil 1. The name->hash cache holds the same names with int16 hashes (e.g. 50934);
+            -- these windows plus faEntry's address check keep those out.
+            FirearmAccuracyMultiplier           = { lo = -1, hi = 1,     fb = 0   },
+            FirearmRecoilMultiplier             = { lo = 0, hi = 5,      fb = 1   },
+            -- LEGACY (pre-v8.0 builds wrote these; kept only so Restore can undo such a write in
+            -- the same server). BASE_INACCURACY_OFFSET is still the Thunderspear key. For guns both
+            -- are now just fallbacks: each gun's own baseInaccuracyOffset / recoilImpulse wins,
+            -- which is why writing them stopped affecting guns.
             -- lo is 0, NOT 1: once a value has been zeroed, a lo=1 window makes keep() reject it AND
             -- makes the _G cache revalidator drop the key -> the re-scan finds nothing and Restore
-            -- silently no-ops. Live scan confirms there are no numeric decoys for these two keys.
+            -- silently no-ops.
             BASE_INACCURACY_OFFSET              = { lo = 0, hi = 20,     fb = 0   },
             BASE_RECOIL_IMPULSE                 = { lo = 0, hi = 20,     fb = 0   },
-            -- BlunderBuss live-tuning (test section below). PELLET_COUNT + SPREAD_REFERENCE_DISTANCE
-            -- are the write-NEVER fingerprint that picks the BlunderBuss's own config table out of
-            -- the 7 firearm configs (Trench shotgun is 9 / 60, BlunderBuss is 10 / 45); they are
-            -- scanned here only so the ONE Load Values sweep covers them too -- no second freeze.
+            -- BlunderBuss pellet cone (Firearm Manual). pelletCount + spreadReferenceDistance are
+            -- the write-NEVER fingerprint that picks the BlunderBuss's own config out of the gun
+            -- templates (TrenchShotgun is 9 / 60, BlunderBuss is 10 / 45); they are scanned here
+            -- only so the ONE Load Values sweep covers them too -- no second freeze.
             -- Thunderspear aim lever. MUST be listed here or entriesFor() bails at its
             -- `if not cfg then return {} end` guard and every write silently no-ops. Exactly two
             -- numeric entries exist in the whole game (both 100, both spears), so the accept
@@ -11140,9 +11163,10 @@ end)()
             -- is still NaN, so a zeroed Amplitude does NOT save it. The NaN lands in
             -- Camera.CFrame. Listed only so the restore path can REPAIR it back to stock.
             FIRE_SHAKE_FREQUENCY                = { lo = 0, hi = 30,     fb = 12/100 },
-            PELLET_SPREAD_OFFSET                = { lo = 0, hi = 40,     fb = 835/100 },
-            PELLET_COUNT                        = { lo = 5, hi = 40,     fb = 10  },
-            SPREAD_REFERENCE_DISTANCE           = { lo = 10, hi = 200,   fb = 45  },
+            -- lowercase since the handler rewrite (the old UPPER_CASE keys no longer exist)
+            pelletSpreadOffset                  = { lo = 0, hi = 40,     fb = 835/100 },
+            pelletCount                         = { lo = 2, hi = 40,     fb = 10  },
+            spreadReferenceDistance             = { lo = 10, hi = 500,   fb = 45  },
             -- Spyglass (Client.User.Equipment.Tools.Exploration.Spyglass). Live getgc 2026-10-21:
             -- exactly TWO numeric entries per key (the config is loaded twice), both 200; every
             -- other entry under these names is a string or a function, excluded by type. lo=0 so
@@ -11467,30 +11491,24 @@ end)()
             resetMany("Parry", { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" })
         end)
 
-        -- ---------- Firearms (EVERY gun): zero inaccuracy + recoil ----------
-        -- Sets BASE_INACCURACY_OFFSET (7.5) + BASE_RECOIL_IMPULSE (2) -> 0. Both are client-read
-        -- (spread in getProjectilePhysics, recoil in the AddVelocity kick), so 0 = dead-center,
-        -- no kick. getgc matches the key across EVERY firearm config (defaults differ: inaccuracy
-        -- 2.5/7.5/8.5, recoil 2/4) so "Zero" writes 0 to all guns; "Restore" writes each gun's OWN
-        -- captured original back PER-ENTRY (applygc on a 1-entry list = that one address only), so
-        -- the 2.5/8.5/4 guns are never flattened to a single value.
-        -- This INCLUDES the BlunderBuss. It EXCLUDES thunderspears — those own their two constants
-        -- outright in their own panel, so the two can never fight over the same addresses.
+        -- ---------- Firearms (EVERY gun): spread + recoil ----------
+        -- v8.0: written through your two firearm STATS, not the gun configs (see the CFG note on
+        -- FirearmAccuracyMultiplier). The old way wrote BASE_INACCURACY_OFFSET / BASE_RECOIL_IMPULSE,
+        -- which the new handler only uses for a gun that has no value of its own. Every gun now
+        -- has its own baseInaccuracyOffset / recoilImpulse, so those writes changed nothing.
+        -- Per-gun values were the other option and were rejected: they live in each gun module's
+        -- table TEMPLATE (copied on every equip, so a write only lands on the next draw), getgc
+        -- misses some of their fields, and it also returns look-alike entries from the modules'
+        -- constant lists where each name sits on the PREVIOUS field's value. Writing one of those
+        -- rewrites gun code, e.g. M1911 fireDelay. The stat route has none of that.
         local secFire = tab:Section("Firearm Auto", "Left", "One press: no spread / no recoil")
-        secFire:Label(function() return "Inaccuracy 0 | Recoil 0   (guns only, not spears)" end)
+        secFire:Label(function() return "Spread 0 | Recoil 0   (every gun, next shot)" end)
+        -- LEGACY: what pre-v8.0 builds wrote, so Restore can still undo it in the same server.
         local FIRE_KEYS = { "BASE_INACCURACY_OFFSET", "BASE_RECOIL_IMPULSE" }
-        -- key -> { [addr] = original }, captured before the FIRST write. Lives in the per-JobId _G
-        -- table so a script RE-RUN in the same server can still Restore — as a plain local it was
-        -- lost on reload while the writes stayed applied, leaving no way back to stock.
         local fireOrig = bbState.fireOrig or {}
         bbState.fireOrig = fireOrig
-        -- Shared by the zero button AND the Weapons Manual sliders below, so whichever you use,
-        -- Restore still puts the PER-GUN originals back. That matters because the stock values
-        -- differ (inaccuracy 2.5 / 7.5 / 8.5 / 15, recoil 2 / 4) and any single written number
-        -- flattens them all — without this snapshot the differences would be gone for good.
-        -- Thunderspears share BASE_INACCURACY_OFFSET with all 12 gun entries, so the guns panel
-        -- and the spear panel must be told apart by ADDRESS or whichever you pressed last would
-        -- silently clobber the other.
+        -- Thunderspears share BASE_INACCURACY_OFFSET with the gun handler's fallback, so the
+        -- spear panel must find its own entries by ADDRESS.
         --
         -- Identify them by ANCHOR, not by value. The obvious test — "the entry whose value is 15"
         -- — is self-erasing: the moment the spear panel writes 3, it can never be found again.
@@ -11545,47 +11563,8 @@ end)()
             end
             return done == #list, done
         end
-        -- Every gun EXCEPT thunderspears. FAILS CLOSED: if the partition can't be resolved we
-        -- refuse rather than fall through and write the spear config too.
-        local function fireWrite(key, value)
-            local safe = entriesFor(key)
-            if #safe == 0 then return false, "no entries - equip a firearm once" end
-            local ts, why
-            if key == "BASE_INACCURACY_OFFSET" then
-                ts, why = tsResolve()
-                if not ts then return false, why end
-            end
-            fireOrig[key] = fireOrig[key] or {}
-            local list, skipped = {}, 0
-            for _, e in ipairs(safe) do
-                local a = gcKey(e)
-                if a and ts and ts[a] then
-                    skipped = skipped + 1
-                elseif a then
-                    list[#list + 1] = e
-                    if fireOrig[key][a] == nil then fireOrig[key][a] = gcNum(e.value) end
-                end
-            end
-            if ts and skipped == 0 then return false, "partition failed - refused to touch spears" end
-            if #list == 0 then return false, "nothing to write" end
-            -- NEVER RAISE a gun above its own stock. One slider sends one number to every gun, but
-            -- the stocks differ (inaccuracy 2.5 / 7.5 / 8.5, recoil 2 / 4), so an unclamped write at
-            -- the 7.5 default made the ACCURATE guns worse: the Kar98k is 2.5 stock and got flattened
-            -- to three times its spread. Clamping per entry against the captured original keeps
-            -- "lower is better" true for every gun, and 0 still zeroes all of them.
-            -- Written one entry at a time because the clamped value differs per gun, and a 1-entry
-            -- applygc list is the documented safe write anyway.
-            local done = 0
-            for _, e in ipairs(list) do
-                local a = gcKey(e)
-                local orig = a and fireOrig[key][a]
-                local v = value
-                if type(orig) == "number" and orig < v then v = orig end
-                if writeEntries(key, { e }, v) then done = done + 1 end
-            end
-            if done ~= #list then return false, string.format("%d/%d writes landed", done, #list) end
-            return true
-        end
+        -- LEGACY undo: puts back anything a pre-v8.0 build wrote to the two fallback keys, per
+        -- address (1-entry applygc = that one address only).
         local function fireRestore()
             local n = 0
             for _, key in ipairs(FIRE_KEYS) do
@@ -11593,83 +11572,199 @@ end)()
                 if orig then
                     for _, e in ipairs(entriesFor(key)) do
                         local o = orig[gcKey(e)]
-                        -- 1-entry applygc = that one address only, so each gun gets ITS own value
                         if o ~= nil then
                             pcall(function() applygc({ e }, key, o) end)
                             n = n + 1
                         end
                     end
+                    fireOrig[key] = nil
                 end
             end
             return n
         end
+
+        -- ---- the two firearm stats ----
+        -- `fa` rides on the per-JobId _G table, so a script re-run in the same server still knows
+        -- your own values and can Restore them.
+        --   nat[key]    = your own value (talents, buffs), re-read whenever the GAME changes it
+        --   last[key]   = what we last wrote; a live value that differs means the game moved it
+        --   keyptr[key] = the key-string pointer stored right after the value, checked every write
+        --   pct         = { spread, recoil } share KEPT while an override is on; nil when off
+        local FA_ACC, FA_REC = "FirearmAccuracyMultiplier", "FirearmRecoilMultiplier"
+        local FA_EPS = 1/10000
+        -- Live: the stat slots sit 1.5-11 KB from GearMaxVelocityMultiplier (same table); the
+        -- name->hash cache with the same names sits ~118 KB away.
+        local ATTR_WINDOW = 32768
+        local fa = bbState.fa or {}
+        bbState.fa = fa
+        fa.nat, fa.last, fa.keyptr = fa.nat or {}, fa.last or {}, fa.keyptr or {}
+        fa.gen = fa.gen or 0
+
+        -- The ONE stat slot for `key`: inside the stat table, i.e. near the GearMaxVelocityMultiplier
+        -- entry the Velocity pin already writes. Anything but exactly one candidate refuses -- the
+        -- wrong slot would be some other table's number.
+        local function faEntry(key)
+            local anchor = entriesFor("GearMaxVelocityMultiplier")[1]
+            local aa = anchor and gcAddr(anchor)
+            local hits = {}
+            for _, e in ipairs(entriesFor(key)) do
+                local a = gcAddr(e)
+                if a and (aa == nil or math.abs(a - aa) <= ATTR_WINDOW) then hits[#hits + 1] = e end
+            end
+            if #hits ~= 1 then
+                return nil, string.format("%s: %d candidates - rejoin and Load Values again", key, #hits)
+            end
+            return hits[1]
+        end
+        -- A table slot is [value 16 bytes][key 16 bytes]. If the key pointer after our value ever
+        -- changes, the table was rebuilt and the address is stale: refuse instead of writing into
+        -- memory that belongs to something else now.
+        local function faKeyOK(key, e)
+            local a = gcAddr(e)
+            if not a or type(memory_read) ~= "function" then return false end
+            local ok, p = pcall(memory_read, "uint64", a + 16)
+            if not ok or type(p) ~= "number" or p == 0 then return false end
+            if fa.keyptr[key] == nil then fa.keyptr[key] = p end
+            return p == fa.keyptr[key]
+        end
+        local function faRead(e)
+            local ok, v = pcall(memory_read, "double", gcAddr(e))
+            return ok and gcNum(v) or nil
+        end
+
+        -- What to write, from your own value and the share of spread/recoil to KEEP (pct 0 = none,
+        -- 1 = unchanged). The game multiplies spread by (1 - accuracy), so accuracy 1 = dead
+        -- centre; recoil is a plain multiplier, so 0 = no kick. Relative to your own value, so a
+        -- talent you already have is never undone and 100% is exactly stock.
+        local function faTarget(key, natural, pct)
+            if key == FA_ACC then return 1 - pct * (1 - natural) end
+            return natural * pct
+        end
+
+        local function faWrite(key, pct)
+            local e, why = faEntry(key)
+            if not e then return false, why end
+            if not faKeyOK(key, e) then return false, key .. " slot moved - rejoin" end
+            local cur = faRead(e)
+            if cur == nil then return false, key .. " unreadable" end
+            -- A live value that isn't our last write is the game's (first use, or a buff/talent
+            -- changed it since): that becomes the value we scale from.
+            if fa.last[key] == nil or math.abs(cur - fa.last[key]) > FA_EPS then fa.nat[key] = cur end
+            local v = faTarget(key, fa.nat[key], pct)
+            if math.abs(cur - v) > FA_EPS and not writeEntries(key, { e }, v) then
+                return false, key .. " write did not land"
+            end
+            fa.last[key] = v
+            return true
+        end
+
+        -- Keeper. The game rewrites a stat only when the SERVER sends a new value for it (a buff,
+        -- a talent). Once a second, re-apply on top of whatever it sent: two memory reads a tick,
+        -- never a scan.
+        local function faKeep()
+            fa.gen = fa.gen + 1
+            local my = fa.gen
+            task.spawn(function()
+                while fa.gen == my and fa.pct and GUI.Running do
+                    task.wait(1)
+                    if fa.gen ~= my or not fa.pct or not GUI.Running then break end
+                    for _, key in ipairs({ FA_ACC, FA_REC }) do
+                        local ok, why = faWrite(key, key == FA_ACC and fa.pct.spread or fa.pct.recoil)
+                        if not ok then
+                            fa.pct = nil
+                            notif("Firearms", "Stopped - " .. tostring(why), 5)
+                            break
+                        end
+                    end
+                end
+            end)
+        end
+
+        local function faApply(spread, recoil)
+            local ok1, w1 = faWrite(FA_ACC, spread)
+            local ok2, w2 = faWrite(FA_REC, recoil)
+            if not (ok1 and ok2) then return false, w1 or w2 end
+            fa.pct = { spread = spread, recoil = recoil }
+            faKeep()
+            return true
+        end
+
+        -- Undo only our own write: if the game changed the stat since, it is already yours.
+        local function faRestore()
+            fa.pct = nil
+            fa.gen = fa.gen + 1          -- ends the keeper
+            local n = 0
+            for _, key in ipairs({ FA_ACC, FA_REC }) do
+                local e = faEntry(key)
+                local cur = e and faKeyOK(key, e) and faRead(e)
+                if cur and fa.last[key] and fa.nat[key] and math.abs(cur - fa.last[key]) <= FA_EPS then
+                    if math.abs(cur - fa.nat[key]) <= FA_EPS or writeEntries(key, { e }, fa.nat[key]) then
+                        n = n + 1
+                    end
+                end
+                fa.last[key] = nil
+            end
+            return n
+        end
+        -- A re-run in the same server picks the keeper back up. Only when the values are already
+        -- loaded: otherwise its first lookup would start the big scan without being asked.
+        if fa.pct and warmed then faKeep() end
+
         secFire:Button("Apply Firearms", function()
             if not gateOK() then return end
             task.spawn(function()
-                local okAll, why = true, nil
-                for _, key in ipairs(FIRE_KEYS) do
-                    local ok, reason = fireWrite(key, 0)
-                    if not ok then okAll = false; why = why or reason end
-                end
-                -- surface the resolver's own reason: "equip a firearm first" was previously
-                -- printed for a partition failure too, which is a completely different problem
-                notif("Firearms", okAll and "Guns zeroed (spears untouched)" or ("Failed - " .. tostring(why)), 4)
+                local ok, why = faApply(0, 0)
+                notif("Firearms", ok and "Every gun: no spread, no recoil (from your next shot)"
+                    or ("Failed - " .. tostring(why)), ok and 4 or 5)
             end)
-        end)
+        end):Tooltip("Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half; see Firearm Manual). Restore Default puts your own values back.")
         secFire:Button("Restore Default", function()
             if not gateOK() then return end
             task.spawn(function()
-                local n = fireRestore()
-                notif("Firearms", n > 0 and ("Restored " .. n .. " gun values") or "Nothing to restore - no writes recorded", 3)
+                local n = faRestore() + fireRestore()
+                notif("Firearms", n > 0 and ("Restored " .. n .. " value(s)") or "Nothing to restore - no writes recorded", 3)
             end)
         end)
 
-        -- ---------- Blunderbuss (TEST): live-tune pellet spread ----------
-        -- Inaccuracy and recoil moved OUT of this panel and into the Firearms button above (which
-        -- zeroes them on every gun, BlunderBuss included). What's left here is PELLET_SPREAD_OFFSET
-        -- — the pellet CONE, which only the two pellet guns have and which nothing else touches.
+        -- ---------- Blunderbuss: pellet cone ----------
+        -- Spread and recoil live in the Firearms stats above. What's left here is pelletSpreadOffset,
+        -- the pellet CONE, which only the two pellet guns have. The game scales it by
+        -- max(pelletPrecisionFloor, 1 - accuracy), so even with Apply Firearms the BlunderBuss keeps
+        -- half its cone (floor 0.5) until this slider shrinks it.
         --
-        -- The fingerprint below no longer stock-checks inaccuracy/recoil, and that removal is
-        -- REQUIRED, not a shortcut: the Firearms button zeroes those exact slots, so a
-        -- "must still be at stock" test on them would abort this panel forever the moment you used
-        -- it. Identity is still pinned by the anchor pair plus a unique, at-stock spread slot.
+        -- Since the CharacterFirearmHandler rewrite the gun numbers are lowercase fields of each gun
+        -- module's table TEMPLATE, copied into a fresh table every time you draw the gun. So a write
+        -- here lands the NEXT time you equip the BlunderBuss, and then sticks for the whole server.
         --
-        -- WHY THIS ISN'T JUST "getgc the key and write it": the BlunderBuss SHARES
-        -- BASE_INACCURACY_OFFSET 7.5 with the Musket and the Flintlock, and BASE_RECOIL_IMPULSE 2
-        -- with FOUR other guns. Writing by name (or by value) retunes every one of them.
+        -- WHY THIS ISN'T JUST "getgc the key and write it": pelletSpreadOffset is shared with the
+        -- TrenchShotgun, AND getgc also returns look-alike entries from the gun modules' constant
+        -- lists, where each name sits on the PREVIOUS field's value (live 2026-11-01: a BlunderBuss
+        -- look-alike reads pelletCount 3000 and spreadReferenceDistance 8.35). Writing one of those
+        -- rewrites gun code. So we FINGERPRINT the real template: pelletCount 10 with
+        -- spreadReferenceDistance 45 within BB_WINDOW bytes (the TrenchShotgun is 9 / 60, the
+        -- look-alikes fail both), and the spread slot must be the ONLY one of its key in that window.
+        -- The anchor keys are never written, so our own edits can't destroy the fingerprint.
         --
-        -- So we FINGERPRINT the BlunderBuss's own config table instead: one weapon's constants live
-        -- in ONE Lua table, so their GC value-slots sit a few hundred bytes apart. Live scan
-        -- (2026-07-15) -- SPREAD_REFERENCE_DISTANCE 45 / MAX_PRECISION_SCALING 0.5 / inaccuracy 7.5 /
-        -- recoil 2 / spread 8.35 / PELLET_COUNT 10 all landed in ONE ~900-byte window, while the
-        -- nearest competing same-key entry was 5,000+ bytes out (a 30-80x margin).
-        --
-        -- Nearest-address ALONE is not safe: one gun's table can lack a key entirely, so an
-        -- unbounded "closest" would silently pick a DIFFERENT weapon. The candidate must therefore
-        -- (a) sit within BB_WINDOW of the anchor AND (b) currently hold its stock value, and any
-        -- 0-or->1 match ABORTS without writing.
-        --
-        -- The anchor uses only keys this section never writes (PELLET_COUNT 10 +
-        -- SPREAD_REFERENCE_DISTANCE 45 -- which are also exactly what separates the BlunderBuss from
-        -- the TrenchShotgun's 9 / 60), so our own edits can't destroy the fingerprint.
-        --
-        -- Writes go through applygc on a ONE-entry list = that single address only (bridge.lua /
-        -- reference §28: applygc writes the entries you hand it; setgc matches by name across the
-        -- whole heap and is the documented corruption path). Each write is compare-and-swap'd first
-        -- and read back after, so a stale address reports instead of scribbling somewhere random.
-        -- PELLET_COUNT is deliberately NOT tunable here.
+        -- Writes go through applygc on a ONE-entry list = that single address only, range-checked
+        -- first and read back after, so a stale address reports instead of writing somewhere random.
+        -- pelletCount is deliberately NOT tunable here.
         local BB_STOCK  = { spread = 835/100 }   -- integer fraction: Matcha's parser has choked on
                                                  -- some decimal literals
-        local BB_KEY    = { spread = "PELLET_SPREAD_OFFSET" }
+        local BB_KEY    = { spread = "pelletSpreadOffset" }
         local BB_ORDER  = { "spread" }
         local BB_LABEL  = { spread = "Spread" }
-        local BB_SCAN   = { "PELLET_COUNT", "SPREAD_REFERENCE_DISTANCE", "PELLET_SPREAD_OFFSET" }
-        local BB_WINDOW = 2048        -- max bytes from the anchor. Live: our own slots are 64-800 out
-                                      -- and the nearest OTHER gun's slot is 4936 -> 2.4x headroom.
+        local BB_SCAN   = { "pelletCount", "spreadReferenceDistance", "pelletSpreadOffset" }
+        local BB_WINDOW = 2048        -- max bytes from the anchor. Live 2026-11-01: the template's own
+                                      -- slots are within ~1 KB; the TrenchShotgun's is ~22 KB away.
         local BB_EPS    = 1/1000000   -- NOT 1e-6: sci-notation literals can trip Matcha's parser
                                       -- ("Malformed number"), which would kill the whole chunk
         local BB_STEP   = 5/100       -- 0.05: the lib derives display precision from step MAGNITUDE,
                                       -- so 0.05 is exact but 0.25 would render as 0.3
+        if bbState.ver ~= 2 then
+            -- pre-v8.0 resolutions point at the removed UPPER_CASE keys; start clean
+            bbState.ok, bbState.slots, bbState.live, bbState.lastScan = nil, nil, nil, nil
+            bbState.ver = 2
+        end
         local bbStatus  = bbState.ok and "Slot resolved - press Apply" or "Idle - press Apply"
         -- Last value written, persisted per-server so a script RE-RUN seeds the slider from what is
         -- actually in memory instead of snapping the UI back to stock while the tune is still live.
@@ -11706,7 +11801,7 @@ end)()
                     end
                 end
             end
-            if #snap.PELLET_COUNT > 0 and #snap.PELLET_SPREAD_OFFSET > 0 then return snap end
+            if #snap.pelletCount > 0 and #snap.pelletSpreadOffset > 0 then return snap end
             local now = os.clock()
             if bbState.lastScan and (now - bbState.lastScan) < 20 then return snap end
             bbState.lastScan = now
@@ -11723,20 +11818,18 @@ end)()
             return fresh
         end
 
-        -- Anchor = a PELLET_COUNT==10 slot with a SPREAD_REFERENCE_DISTANCE==45 slot beside it
+        -- Anchor = a pelletCount==10 slot with a spreadReferenceDistance==45 slot beside it
         -- (the TrenchShotgun, the only other pellet gun, is 9 / 60).
         --
-        -- THERE ARE ALWAYS TWO. The weapon module is instantiated twice, so two identical
-        -- BlunderBuss config tables exist (measured ~763 MB apart). The old code treated the
-        -- second one as ambiguity and aborted — which means this panel never wrote a single byte
-        -- since it was added. Return every anchor and write them all; leaving one stale makes the
-        -- result depend on which copy the game happens to read.
+        -- There can be more than one. Old builds had two identical BlunderBuss configs (~763 MB
+        -- apart); live 2026-11-01 there is one template. Return every anchor and write them all;
+        -- leaving one stale would make the result depend on which copy the game happens to read.
         local function bbAnchors(snap)
             local seen, hits = {}, {}
-            for _, pc in ipairs(snap.PELLET_COUNT) do
+            for _, pc in ipairs(snap.pelletCount) do
                 if bbNear(bbNum(pc.value), 10) then
                     local pa = bbAddr(pc)
-                    for _, sr in ipairs(snap.SPREAD_REFERENCE_DISTANCE) do
+                    for _, sr in ipairs(snap.spreadReferenceDistance) do
                         local sa = bbAddr(sr)
                         if bbNear(bbNum(sr.value), 45) and pa and sa and math.abs(pa - sa) <= BB_WINDOW then
                             local k = string.format("%.0f", pa)   -- %.0f, not tostring: big addresses
@@ -11846,45 +11939,42 @@ end)()
         end
 
         -- ---------- Firearm Manual: tune by hand instead of going all-zero ----------
-        -- Three scopes live in this one section, and the differences are not cosmetic:
-        --   Inaccuracy    -> every gun EXCEPT thunderspears (their addresses are excluded by
-        --                    tsResolve(), so this panel and the spear panel never fight)
-        --   Recoil        -> every gun; thunderspears have no recoil constant at all
-        --   Pellet Spread -> BlunderBuss ONLY, via the address fingerprint above, because
-        --                    PELLET_SPREAD_OFFSET is shared with the other pellet gun
-        -- Guns have different stock values, so one slider flattens them to a single number;
-        -- Restore puts each gun's own value back from the pre-write snapshot.
-        local wmInacc, wmRecoil = 7.5, 2   -- musket/flintlock stock, the most common of each
+        --   Spread Kept / Recoil Kept -> every gun, through the two stats (faApply above), as a
+        --                                share of YOUR value: 100% = unchanged, 0% = none
+        --   Pellet Spread             -> BlunderBuss ONLY, via the template fingerprint above
+        -- New slider labels on purpose: the lib saves values by label, and the old "Inaccuracy" /
+        -- "Recoil" sliders saved stud values (0-8.5 / 0-4) that would load as nonsense percentages.
+        local wmSpread = fa.pct and math.floor(fa.pct.spread * 100 + 0.5) or 100
+        local wmRecoil = fa.pct and math.floor(fa.pct.recoil * 100 + 0.5) or 100
         local secBB = tab:Section("Firearm Manual", "Right", "Hand-tune instead of zeroing")
         secBB:Label(function() return bbStatus end)
-        -- Ranges are capped at the WORST stock value in the game (inaccuracy 8.5, recoil 4) — there
-        -- is no reason to offer a setting that shoots straighter guns crooked.
-        secBB:Slider("Inaccuracy", wmInacc, 0.1, 0, 8.5, "",
-            function(v) wmInacc = tonumber(v) or wmInacc end,
-            "Aim-point scatter, for every gun EXCEPT thunderspears. Stock is 2.5 (Kar98k, scoped Kar98k) / 7.5 (musket, flintlock) / 8.5. This only ever LOWERS a gun - a gun already tighter than the slider keeps its own value, so you cannot accidentally make the Kar98k worse. 0 = dead centre.")
-        secBB:Slider("Recoil", wmRecoil, BB_STEP, 0, 4, "",
+        secBB:Slider("Spread Kept", wmSpread, 5, 0, 100, "%",
+            function(v) wmSpread = tonumber(v) or wmSpread end,
+            "How much of your normal aim scatter every gun keeps. 100% = stock, 0% = dead centre. Applies from your next shot, gun in hand included.")
+        secBB:Slider("Recoil Kept", wmRecoil, 5, 0, 100, "%",
             function(v) wmRecoil = tonumber(v) or wmRecoil end,
-            "Camera kick, for every gun. Stock 2 on most, 4 on one. Only ever LOWERS a gun. 0 = no kick. Thunderspears have no recoil constant at all - they kick via a separate camera shake.")
+            "How much camera kick every gun keeps. 100% = stock, 0% = none. Applies from your next shot.")
         secBB:Slider("Pellet Spread", bbVal.spread, BB_STEP, 0, BB_STOCK.spread, "",
             function(v) bbVal.spread = tonumber(v) or bbVal.spread end,
-            "BlunderBuss ONLY - pellet cone radius (x max(0.5, accuracy)). 0 = all 10 pellets dead centre. Stock 8.35")
+            "BlunderBuss ONLY - pellet cone radius. 0 = all 10 pellets dead centre. Stock 8.35. Takes effect the next time you equip the BlunderBuss.")
         secBB:Button("Apply Weapons", function()
             if not gateOK() then return end
             task.spawn(function()
-                local okAll = fireWrite("BASE_INACCURACY_OFFSET", wmInacc)
-                if not fireWrite("BASE_RECOIL_IMPULSE", wmRecoil) then okAll = false end
-                notif("Weapons", okAll and string.format("All guns: inacc %.2f | recoil %.2f", wmInacc, wmRecoil)
-                    or "Inaccuracy/recoil failed - equip a firearm first", 3)
-                bbApply(bbVal, "Applied")   -- BlunderBuss pellet cone, reported via the status label
+                local ok, why = faApply(wmSpread / 100, wmRecoil / 100)
+                notif("Weapons", ok and string.format("Every gun: spread %d%% | recoil %d%%", wmSpread, wmRecoil)
+                    or ("Spread/recoil failed - " .. tostring(why)), ok and 3 or 5)
+                -- BlunderBuss pellet cone, reported via the status label
+                bbApply(bbVal, "Set (re-equip the BlunderBuss)")
             end)
         end)
         secBB:Button("Restore Default", function()
             if not gateOK() then return end
             -- Put the sliders back too, so the panel shows what is actually in memory.
-            wmInacc, wmRecoil = 7.5, 2
+            wmSpread, wmRecoil = 100, 100
             bbVal.spread = BB_STOCK.spread
             task.spawn(function()
-                fireRestore()               -- per-gun originals, NOT one flattened number
+                faRestore()
+                fireRestore()
                 bbApply(BB_STOCK, "Restored")
                 notif("Weapons", "Restored stock spread, recoil and pellet cone", 3)
             end)
