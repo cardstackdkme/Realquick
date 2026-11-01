@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v7.7"
+GUI.Version = "v7.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -9702,47 +9702,71 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- AUTO GRAPPLE  —  hook the player under your cursor, and HOLD the hook
+-- AUTO GRAPPLE + TRIGGER BOT  —  act on the player under your cursor
 -- ============================================================
--- How the game fires a hook (Client.User.Equipment.Gear.Components, decompiled): pressing the
--- grapple key casts a ray from the camera at LocalPlayer:GetMouse().Hit, i.e. at whatever is
--- under the CURSOR, and releasing the key lets go. Characters are fair game for that ray. So
--- nothing here aims: it only decides WHEN to press Q / E, and keeps the key down so the hook
--- stays on (a tap would hook and drop in the same instant). Range is the Character tab's job.
+-- The GAME does the aiming for both (decompiled): a grapple key casts a ray from the camera at
+-- LocalPlayer:GetMouse().Hit, and a gun's left click casts one from the muzzle at Mouse.Hit. So
+-- nothing here moves the mouse. It only decides WHEN to press: Q / E for a hook, a click for a shot.
 --
--- "Is the cursor on a player?" is answered ON SCREEN, because Matcha has no raycast: each body
--- is a capsule along the HumanoidRootPart's up axis (head top to feet), both ends projected with
--- WorldToScreen, and the cursor has to be within the body's on-screen half-width of that line.
--- Mouse.X/Y and WorldToScreen share the Drawing coordinate space (the menu's own UI and the ESP
--- both rely on that). What it cannot see is a wall in between: the game's own ray decides, and
--- then the hook lands on the wall.
---   Mode "Toggle": armed whenever the switch is on.  Mode "Hold": armed only while HoldKey is down.
--- Once a hook is fired it is HELD for as long as the trigger lasts, wherever the cursor goes:
---   Hold   - until the hold key is released.
---   Toggle - there is no key to let go with, so looking well away from them (Grace seconds) lets
---            go. The hook pulls you, so you and the camera swing around: v7.6 demanded the cursor
---            stay ON the body and dropped the hook mid-pull, which read as "grapples once".
--- Either way it lets go when the target leaves the server, or when it pauses (below).
--- Left of screen centre hooks with Q, right with E.
--- The game refuses more than 5 hooks in 2 seconds, so a new hook waits MinGap after the last.
--- Real keyboard input, like Auto Parry's F: never while Roblox is in the background (it would type
--- into whatever has focus), while the menu is open, or while the Player List search is focused.
+-- "Is the cursor on a player?" is answered ON SCREEN, because Matcha has no raycast. A body is a
+-- capsule along the HumanoidRootPart's up axis (head top to feet), a head is a circle around the
+-- Head part, all projected with WorldToScreen into the same space as Mouse.X/Y. A wall in between
+-- cannot be seen this way; the game's own ray decides, and then the hook or shot hits the wall.
+--
+-- ACCURACY (v7.8). The game reads the cursor a frame or two AFTER the press is decided, so a press
+-- made while the mouse sweeps across someone lands beside them. A press now needs the cursor
+-- inside the CORE of the body (or the head) both now AND where it will be when the game reads it
+-- (cursor and target velocity, measured on screen), for AIM.Dwell running. Checked at 120 Hz,
+-- with a fresh read of whoever is near the cursor every tick.
+--
+-- GRAPPLE. Left of screen centre hooks with Q, right with E, and the key is HELD (key up = let go).
+--   Hold   - armed only while HoldKey is down; the hook stays on until it is released.
+--   Toggle - armed while the switch is on; the hook stays on while you keep looking at them and
+--            lets go Grace seconds after you look away (or at once if you settle on someone else).
+--   Both let go when the target leaves the server. The game refuses more than 5 hooks in 2s, so
+--   hooks are MinGap apart.
+-- TRIGGER BOT. Clicks once when the cursor is on a player, only while a gun is equipped AND the
+--   server says you are aiming (the character's "Aiming" attribute): a click on a lowered gun
+--   raises or lowers it, and with no gun it swings your blades. Never during a reload, never while
+--   you hold the button yourself. A 1-shot gun fires once per aim (a second click would start a
+--   reload, which lowers it); a 5-round gun waits TB.Gap between shots. Options: actors only (the
+--   Player's "Actor" attribute), headshots only.
+-- Both are real input, so neither acts while Roblox is in the background (it would go to whatever
+-- has focus), the menu is open, or the Player List search is focused.
 local AG = {
     Enabled = false,
     Mode = "Toggle",       -- "Toggle" | "Hold"
     HoldKey = 0x30,        -- 0  (note: 0 is also the game's hotbar slot 0)
     KeyLeft = 0x51,        -- Q, left hook
     KeyRight = 0x45,       -- E, right hook
-    BodyR = 1.3,           -- studs: half-width of a body for the cursor test
-    Grace = 1.0,           -- Toggle: seconds spent looking well away from them before letting go
-    AwayFrac = 0.35,       -- Toggle: "well away" = this fraction of the screen height from them
-    MinGap = 0.45,         -- seconds between hooks (the game's cap is 5 per 2s)
-    MaxDist = 3000,        -- studs; only skips the absurd, range itself is the Character tab's
+    AwayFrac = 0.18,       -- Toggle: looking further than this x screen height from them...
+    Grace = 0.45,          -- ...for this long lets go
+    MinGap = 0.45,         -- seconds between hooks
     -- runtime
     Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off",
 }
-GUI.AG = AG
-pcall(function() rawset(_G, "RQAG", AG) end)
+local TB = {
+    Enabled = false,
+    ActorsOnly = false,    -- only players whose Player has Actor = true
+    HeadOnly = false,      -- only when the cursor is on the head
+    Gap = 0.9,             -- seconds between shots of a 5-round gun
+    -- runtime
+    Status = "off", Shots = 0, LastAt = -10, Spent = false, Gun = nil,
+}
+local AIM = {
+    BodyR = 1.25,          -- studs: half-width of a body (the "still on them" test)
+    CoreR = 0.85,          -- studs: the inner body a press needs
+    HeadR = 0.6,           -- studs: head radius
+    Lead = 0.045,          -- seconds from deciding to the game reading the cursor
+    Dwell = 0.035,         -- seconds the press gate must already have held
+    MaxDist = 3000,        -- studs; range itself is the Character tab's job
+}
+GUI.AG, GUI.TB = AG, TB
+pcall(function() rawset(_G, "RQAG", AG); rawset(_G, "RQTB", TB) end)
+
+-- Guns, by the name of their model under your character, and the shots each holds
+-- (Client.User.Equipment.Tools.Firearms.*).
+local TB_GUNS = { Flintlock = 1, Musket = 1, BlunderBuss = 1, Kar98k = 5, ScopedKar98k = 5, TrenchShotgun = 5 }
 
 local function agKeyName(vk)
     if GUI.VKToName then
@@ -9785,57 +9809,129 @@ local function agSegDist(px, py, ax, ay, bx, by)
     return math.sqrt(qx * qx + qy * qy)
 end
 
--- The cursor test for one player. Returns their distance and on-screen X when the cursor is on
--- their body, else nil.
-local function agTest(e, mx, my, ppK, cx, cy, cz)
-    local cf = nil
-    pcall(function() cf = e.hrp.CFrame end)
-    if not cf then return nil end
-    local p, up = nil, nil
-    pcall(function() p = cf.Position; up = cf.UpVector end)
-    if not (p and up) then return nil end
-    local px, py, pz = p.X, p.Y, p.Z
-    local dx, dy, dz = px - cx, py - cy, pz - cz
-    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if dist < 2 or dist > AG.MaxDist then return nil end
-    local c, onC = WorldToScreen(Vector3.new(px, py, pz))
-    if not (c and onC) then return nil end
-    local s = ppK / dist                         -- pixels per stud at their distance
-    local ux, uy, uz = up.X, up.Y, up.Z
-    local a = WorldToScreen(Vector3.new(px + ux * 2.1, py + uy * 2.1, pz + uz * 2.1))
-    local b = WorldToScreen(Vector3.new(px - ux * 2.9, py - uy * 2.9, pz - uz * 2.9))
-    -- An end can only be about its own length from the centre on screen. Further than that it is
-    -- a point behind the camera projected through it (you are right on top of them): use the centre.
-    local ax, ay, bx, by = c.X, c.Y, c.X, c.Y
-    if a then
-        local lim = 2.1 * s * 1.6 + 6
-        if (a.X - c.X) ^ 2 + (a.Y - c.Y) ^ 2 <= lim * lim then ax, ay = a.X, a.Y end
+-- This tick's on-screen picture of one player, read ONCE per tick however many tests use it:
+-- { d = distance, s = pixels per stud, cx/cy centre, ax/ay..bx/by the body line, hx/hy/hs head }.
+-- Also keeps the on-screen velocity of their centre (tvx/tvy), for the lead. nil = not visible.
+local function agFresh(e, tickN, now, ppK, cx, cy, cz, wantHead)
+    if e.fTick ~= tickN then
+        e.fTick, e.f, e.fHead = tickN, nil, false
+        local p, up = nil, nil
+        pcall(function()
+            local cf = e.hrp.CFrame
+            p = cf.Position
+            up = cf.UpVector
+        end)
+        if p and up then
+            local dx, dy, dz = p.X - cx, p.Y - cy, p.Z - cz
+            local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist >= 2 and dist <= AIM.MaxDist then
+                local c, onC = WorldToScreen(p)
+                if c and onC then
+                    local s = ppK / dist
+                    local ux, uy, uz = up.X, up.Y, up.Z
+                    local a = WorldToScreen(Vector3.new(p.X + ux * 2.1, p.Y + uy * 2.1, p.Z + uz * 2.1))
+                    local b = WorldToScreen(Vector3.new(p.X - ux * 2.9, p.Y - uy * 2.9, p.Z - uz * 2.9))
+                    -- An end can only be about its own length from the centre on screen. Further than
+                    -- that it is a point behind the camera projected through it: use the centre.
+                    local ax, ay, bx, by = c.X, c.Y, c.X, c.Y
+                    if a then
+                        local lim = 2.1 * s * 1.6 + 6
+                        if (a.X - c.X) ^ 2 + (a.Y - c.Y) ^ 2 <= lim * lim then ax, ay = a.X, a.Y end
+                    end
+                    if b then
+                        local lim = 2.9 * s * 1.6 + 6
+                        if (b.X - c.X) ^ 2 + (b.Y - c.Y) ^ 2 <= lim * lim then bx, by = b.X, b.Y end
+                    end
+                    local gap = e.lcT and (now - e.lcT) or 1
+                    if gap > 0.001 and gap < 0.2 then
+                        e.tvx = (e.tvx or 0) + ((c.X - e.lcX) / gap - (e.tvx or 0)) * 0.5
+                        e.tvy = (e.tvy or 0) + ((c.Y - e.lcY) / gap - (e.tvy or 0)) * 0.5
+                    elseif gap >= 0.2 then
+                        e.tvx, e.tvy = 0, 0
+                    end
+                    e.lcX, e.lcY, e.lcT = c.X, c.Y, now
+                    e.f = { d = dist, s = s, cx = c.X, cy = c.Y, ax = ax, ay = ay, bx = bx, by = by }
+                end
+            end
+        end
     end
-    if b then
-        local lim = 2.9 * s * 1.6 + 6
-        if (b.X - c.X) ^ 2 + (b.Y - c.Y) ^ 2 <= lim * lim then bx, by = b.X, b.Y end
+    local f = e.f
+    if f and wantHead and not e.fHead then
+        e.fHead = true
+        local hp = nil
+        pcall(function() hp = e.head.Position end)
+        if hp then
+            local h, onH = WorldToScreen(hp)
+            if h and onH then
+                local hdx, hdy, hdz = hp.X - cx, hp.Y - cy, hp.Z - cz
+                local hd = math.sqrt(hdx * hdx + hdy * hdy + hdz * hdz)
+                if hd > 1 then f.hx, f.hy, f.hs = h.X, h.Y, ppK / hd end
+            end
+        end
     end
-    if agSegDist(mx, my, ax, ay, bx, by) <= AG.BodyR * s then return dist, c.X end
-    return nil
+    return f
+end
+
+-- Is screen point (px, py) on this zone of them?  zone: "body" | "core" | "head"
+local function agOn(f, zone, px, py)
+    if zone == "head" then
+        if not f.hx then return false end
+        local r = AIM.HeadR * f.hs
+        return (px - f.hx) ^ 2 + (py - f.hy) ^ 2 <= r * r
+    end
+    local r = (zone == "core" and AIM.CoreR or AIM.BodyR) * f.s
+    return agSegDist(px, py, f.ax, f.ay, f.bx, f.by) <= r
+end
+
+-- The press gate. On the zone now AND where the cursor will be relative to them when the game
+-- reads it, every tick for AIM.Dwell. A tick on which they were not looked at breaks the run.
+-- Judged once per player per zone per tick: the grapple and the trigger both ask, and a second
+-- judgement in the same tick would read as "missed a tick" and restart the run.
+local function agSteady(e, f, zone, mx, my, cvx, cvy, now, tickN)
+    e.since = e.since or {}
+    e.sTick = e.sTick or {}
+    e.sOk = e.sOk or {}
+    if e.sTick[zone] == tickN then return e.sOk[zone] end
+    if e.sTick[zone] ~= tickN - 1 then e.since[zone] = nil end
+    e.sTick[zone] = tickN
+    local rvx, rvy = cvx - (e.tvx or 0), cvy - (e.tvy or 0)
+    local ok = false
+    if agOn(f, zone, mx, my) and agOn(f, zone, mx + rvx * AIM.Lead, my + rvy * AIM.Lead) then
+        if not e.since[zone] then e.since[zone] = now end
+        ok = now - e.since[zone] >= AIM.Dwell
+    else
+        e.since[zone] = nil
+    end
+    e.sOk[zone] = ok
+    return ok
+end
+
+-- Actor flag, cached: a Player GetAttribute costs ~5ms.
+local function tbIsActor(e, now)
+    if e.actorAt and now - e.actorAt < 20 then return e.actor end
+    local v = nil
+    pcall(function() v = e.p:GetAttribute("Actor") end)
+    e.actor, e.actorAt = (v == true), now
+    return e.actor
 end
 
 task.spawn(function()
     local holdReady = false        -- release-arm guard: a key that reads stuck-down never arms
     local myName = nil
     pcall(function() myName = LP.Name end)
-    -- Players, refreshed a few per tick so no single frame pays for the whole server. Kept warm
-    -- while the switch is on (Hold mode included), so pressing the hold key acts at once.
-    -- [name] = { hrp, resolvedAt, vis, sx, sy, rpx, at }
+    -- [name] = { p, hrp, head, resolvedAt, at, vis, sx, sy, rpx, ... }; refreshed a few per tick
     local cache, plist, pidx, plistAt, pruneAt = {}, {}, 1, -10, 0
+    local tickN = 0
+    local pmx, pmy, pmT, cvx, cvy = nil, nil, nil, 0, 0
+    local gunAt, gunName, gunRounds, flagAt, aiming, reloading = -10, nil, 0, -10, false, false
     while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
         pcall(function()
             local now = os.clock()
-            if not AG.Enabled then
-                if AG.Held then agRelease() end
-                AG.Status = "off"
-                holdReady = false          -- re-arm the guard for the next time it is switched on
-                return
-            end
+            tickN = tickN + 1
+            if not AG.Enabled and AG.Held then agRelease() end
+            if not AG.Enabled then AG.Status = "off"; holdReady = false end
+            if not TB.Enabled then TB.Status = "off" end
+            if not (AG.Enabled or TB.Enabled) then return end
 
             local cam = Workspace.CurrentCamera
             local camPos, fov, vp = nil, nil, nil
@@ -9844,7 +9940,7 @@ task.spawn(function()
             local cx, cy, cz = camPos.X, camPos.Y, camPos.Z
             local ppK = (vp.Y / 2) / math.tan(math.rad(fov) / 2)
 
-            -- roster upkeep: up to 8 players a tick
+            -- roster upkeep: up to 4 players a tick (~480 a second)
             if now - plistAt > 2 then
                 plistAt = now
                 local l = nil
@@ -9852,7 +9948,7 @@ task.spawn(function()
                 if type(l) == "table" then plist = l end
             end
             local n = #plist
-            for _ = 1, math.min(8, n) do
+            for _ = 1, math.min(4, n) do
                 if pidx > n then pidx = 1 end
                 local p = plist[pidx]
                 pidx = pidx + 1
@@ -9861,12 +9957,16 @@ task.spawn(function()
                 if type(nm) == "string" and nm ~= myName then
                     local e = cache[nm]
                     if not e then e = { resolvedAt = -10 }; cache[nm] = e end
+                    e.p = p
                     if not e.hrp or now - e.resolvedAt > 3 then
                         e.resolvedAt = now
-                        e.hrp = nil
+                        e.hrp, e.head = nil, nil
                         pcall(function()
                             local ch = p.Character
-                            e.hrp = ch and ch:FindFirstChild("HumanoidRootPart") or nil
+                            if ch then
+                                e.hrp = ch:FindFirstChild("HumanoidRootPart")
+                                e.head = ch:FindFirstChild("Head")
+                            end
                         end)
                     end
                     e.at = now
@@ -9877,7 +9977,7 @@ task.spawn(function()
                         if pos then
                             local dx, dy, dz = pos.X - cx, pos.Y - cy, pos.Z - cz
                             local d2 = dx * dx + dy * dy + dz * dz
-                            if d2 <= AG.MaxDist * AG.MaxDist and d2 > 1 then
+                            if d2 <= AIM.MaxDist * AIM.MaxDist and d2 > 1 then
                                 local v, on = WorldToScreen(pos)
                                 if v and on then
                                     e.vis, e.sx, e.sy = true, v.X, v.Y
@@ -9897,82 +9997,153 @@ task.spawn(function()
                 end
             end
 
-            -- armed? (Hold mode: only while the hold key is down)
-            local hk = false
-            pcall(function() hk = iskeypressed(AG.HoldKey) and true or false end)
-            if not hk then holdReady = true end
-            local armed = AG.Mode ~= "Hold" or (holdReady and hk)
+            -- things that pause both
+            local focused = true
+            pcall(function() focused = isrbxactive() and true or false end)
             local blocked = nil
-            if armed then
-                local focused = true
-                pcall(function() focused = isrbxactive() and true or false end)
-                if not focused then blocked = "paused - Roblox not focused"
-                elseif agMenuOpen(now) then blocked = "paused - menu open"
-                elseif GUI.PLSearchFocused then blocked = "paused - typing" end
-            end
-            if not armed or blocked then
-                if AG.Held then agRelease() end
-                AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
-                return
-            end
+            if not focused then blocked = "paused - Roblox not focused"
+            elseif agMenuOpen(now) then blocked = "paused - menu open"
+            elseif GUI.PLSearchFocused then blocked = "paused - typing" end
+
+            -- cursor and its velocity
             local mx, my = nil, nil
             pcall(function() mx, my = Mouse.X, Mouse.Y end)
             if not (mx and my) then return end
-
-            -- holding: the hook stays on for as long as the trigger lasts (see the header)
-            if AG.Held then
-                local e = AG.Target and cache[AG.Target]
-                -- e.at stops moving once they are off the player list (left the server): a body
-                -- remembered from before must not keep the key held
-                local gone = (not e) or (now - (e.at or 0)) > 2.5
-                if not gone and AG.Mode ~= "Hold" then
-                    -- Toggle: still roughly looking at them? (their centre, freshly projected)
-                    local near = false
-                    if e.hrp then
-                        local pos = nil
-                        pcall(function() pos = e.hrp.Position end)
-                        if pos then
-                            local v, on = WorldToScreen(pos)
-                            if v and on then
-                                local lim = vp.Y * AG.AwayFrac
-                                near = (mx - v.X) ^ 2 + (my - v.Y) ^ 2 <= lim * lim
-                            end
-                        end
-                    end
-                    if near then AG.OnAt = now end
-                    if (now - AG.OnAt) > AG.Grace then gone = true end
-                end
-                if gone then
-                    agRelease()
-                    AG.Status = "armed"
-                else
-                    AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. tostring(AG.Target)
-                end
-                return
+            if pmT and now - pmT > 0.0005 and now - pmT < 0.1 then
+                cvx = cvx + ((mx - pmx) / (now - pmT) - cvx) * 0.6
+                cvy = cvy + ((my - pmy) / (now - pmT) - cvy) * 0.6
+            elseif not pmT or now - pmT >= 0.1 then
+                cvx, cvy = 0, 0
             end
+            pmx, pmy, pmT = mx, my, now
 
-            AG.Status = "armed"
-            if now - AG.PressedAt < AG.MinGap then return end
-            -- the nearest player whose body is under the cursor; the cheap screen check from the
-            -- roster pass (up to ~0.2s old, hence the wide margin) decides who gets the real test
-            local best, bestD, bestX = nil, math.huge, nil
-            local margin = vp.Y * 0.25
+            -- players near the cursor (last known position), nearest first
+            local near = {}
+            local margin = vp.Y * 0.12
             for nm, e in pairs(cache) do
                 if e.vis and e.hrp and e.sx then
                     local lim = (e.rpx or 0) + margin
-                    if (mx - e.sx) ^ 2 + (my - e.sy) ^ 2 <= lim * lim then
-                        local d, sx = agTest(e, mx, my, ppK, cx, cy, cz)
-                        if d and d < bestD then best, bestD, bestX = nm, d, sx end
+                    local d2 = (mx - e.sx) ^ 2 + (my - e.sy) ^ 2
+                    if d2 <= lim * lim then near[#near + 1] = { e = e, nm = nm, d2 = d2 } end
+                end
+            end
+            table.sort(near, function(a, b) return a.d2 < b.d2 end)
+            -- the steadiest target under the cursor for this zone (nearest in the world wins);
+            -- `want` filters (actors only)
+            local function pick(zone, want)
+                local best, bestD, bestF = nil, math.huge, nil
+                for i = 1, math.min(3, #near) do
+                    local c = near[i]
+                    local f = agFresh(c.e, tickN, now, ppK, cx, cy, cz, zone == "head")
+                    if f and agSteady(c.e, f, zone, mx, my, cvx, cvy, now, tickN)
+                        and f.d < bestD and (not want or want(c.e)) then
+                        best, bestD, bestF = c.nm, f.d, f
+                    end
+                end
+                return best, bestF
+            end
+
+            -- ================= grapple =================
+            if AG.Enabled then
+                local hk = false
+                pcall(function() hk = iskeypressed(AG.HoldKey) and true or false end)
+                if not hk then holdReady = true end
+                local armed = AG.Mode ~= "Hold" or (holdReady and hk)
+                if not armed or blocked then
+                    if AG.Held then agRelease() end
+                    AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
+                elseif AG.Held then
+                    local e = AG.Target and cache[AG.Target]
+                    -- e.at stops moving once they are off the player list (left the server)
+                    local gone = (not e) or (now - (e.at or 0)) > 2.5
+                    if not gone and AG.Mode ~= "Hold" then
+                        -- Toggle: still looking at them?
+                        local f = agFresh(e, tickN, now, ppK, cx, cy, cz, false)
+                        local lookAt = false
+                        if f then
+                            local lim = math.max(vp.Y * AG.AwayFrac, 2.5 * AIM.BodyR * f.s)
+                            lookAt = (mx - f.cx) ^ 2 + (my - f.cy) ^ 2 <= lim * lim
+                        end
+                        if lookAt then
+                            AG.OnAt = now
+                        else
+                            -- settled on someone else: switch now rather than after the grace
+                            local other = pick("core")
+                            if other and other ~= AG.Target then gone = true end
+                        end
+                        if (now - AG.OnAt) > AG.Grace then gone = true end
+                    end
+                    if gone then
+                        agRelease()
+                        AG.Status = "armed"
+                    else
+                        AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. tostring(AG.Target)
+                    end
+                else
+                    AG.Status = "armed"
+                    if now - AG.PressedAt >= AG.MinGap then
+                        local best, f = pick("core")
+                        if best then
+                            agPress((f.cx < vp.X / 2) and AG.KeyLeft or AG.KeyRight, now)
+                            AG.Target, AG.OnAt = best, now
+                            AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. best
+                        end
                     end
                 end
             end
-            if best then
-                agPress((bestX < vp.X / 2) and AG.KeyLeft or AG.KeyRight, now)
-                AG.Target, AG.OnAt = best, now
-                AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. best
+
+            -- ================= trigger bot =================
+            if TB.Enabled then
+                if now - gunAt > 0.25 then
+                    gunAt = now
+                    gunName, gunRounds = nil, 0
+                    pcall(function()
+                        local ch = LP.Character
+                        if ch then
+                            for nm, rounds in pairs(TB_GUNS) do
+                                if ch:FindFirstChild(nm) then gunName, gunRounds = nm, rounds break end
+                            end
+                        end
+                    end)
+                    TB.Gun = gunName
+                end
+                if gunName and now - flagAt > 0.1 then
+                    flagAt = now
+                    local a, rl = nil, nil
+                    pcall(function()
+                        local ch = LP.Character
+                        a = ch:GetAttribute("Aiming")
+                        rl = ch:GetAttribute("FirearmReloading")
+                    end)
+                    aiming, reloading = (a == true), (rl == true)
+                end
+                if not gunName then aiming, reloading = false, false end
+                if not aiming then TB.Spent = false end      -- lowered: the next aim may shoot again
+                local m1 = false
+                pcall(function() m1 = ismouse1pressed() and true or false end)
+                if blocked then TB.Status = blocked
+                elseif not gunName then TB.Status = "no gun equipped"
+                elseif reloading then TB.Status = "reloading " .. gunName
+                elseif not aiming then TB.Status = "aim your " .. gunName
+                elseif TB.Spent then TB.Status = "fired - aim again after reloading"
+                elseif m1 then TB.Status = "you are clicking"
+                else
+                    TB.Status = "armed (" .. gunName .. ")"
+                    if now - TB.LastAt >= TB.Gap then
+                        local want = nil
+                        if TB.ActorsOnly then want = function(e) return tbIsActor(e, now) end end
+                        local best = pick(TB.HeadOnly and "head" or "core", want)
+                        if best then
+                            pcall(mouse1click)
+                            TB.LastAt, TB.Shots = now, TB.Shots + 1
+                            if gunRounds <= 1 then TB.Spent = true end
+                            TB.Status = "shot " .. best
+                        end
+                    end
+                end
             end
         end)
-        task.wait(AG.Enabled and (1 / 60) or (1 / 15))
+        task.wait((AG.Enabled or TB.Enabled) and (1 / 120) or (1 / 15))
     end
     agRelease()
 end)
@@ -11761,6 +11932,18 @@ end)()
             end)
         end
 
+        -- ---------- Trigger Bot: shoot the player under your cursor ----------
+        local TB = GUI.TB
+        if TB then
+            local secTB = tab:Section("Trigger Bot", "Right", "Shoots players under your cursor")
+            secTB:Toggle("Trigger Bot", TB.Enabled, function(v) TB.Enabled = v == true end)
+                :Tooltip("While your gun is AIMED and your cursor is steady on a player, it clicks for you. Flintlock / Musket / BlunderBuss fire once per aim; Kar98k / ScopedKar98k / TrenchShotgun every 0.9s. Never while you hold the button, while reloading, or with the menu open.")
+            secTB:Toggle("Actors only", TB.ActorsOnly, function(v) TB.ActorsOnly = v == true end)
+                :Tooltip("only shoot players whose Actor flag is set")
+            secTB:Toggle("Headshots only", TB.HeadOnly, function(v) TB.HeadOnly = v == true end)
+                :Tooltip("only shoot when your cursor is on the head")
+        end
+
         local secInfo = tab:Section("Status", "Right", "Live")
         pcall(function()
             -- The pill no longer moves with the hotkey, so this line is the only indication of the
@@ -11802,6 +11985,13 @@ end)()
                 local AG = GUI.AG
                 if not AG then return "Auto Grapple:  unavailable" end
                 return "Auto Grapple:  " .. tostring(AG.Status or "off") .. ((AG.Enabled and AG.Mode == "Hold") and "   (Hold)" or "")
+            end)
+        end)
+        pcall(function()
+            secInfo:Label(function()
+                local TB = GUI.TB
+                if not TB then return "Trigger Bot:  unavailable" end
+                return "Trigger Bot:  " .. tostring(TB.Status or "off") .. ((TB.Shots or 0) > 0 and ("   shots " .. TB.Shots) or "")
             end)
         end)
         secInfo:Button("Reset Learned Values", function()
