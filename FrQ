@@ -430,7 +430,7 @@ local ACTOR_ESP = {
     NearbyOnly  = false,
     ScanRadius  = 500,
     MaxLabels   = 25,
-    MaxDistance = 5000,
+    MaxDistance = 100000,
     TextSize    = 17,
     FontIndex   = 3,
     Objects     = {},
@@ -6639,6 +6639,7 @@ saveConfig = function()
             actorNearby  = ACTOR_ESP.NearbyOnly,
             actorRadius  = ACTOR_ESP.ScanRadius,
             actorLabels  = ACTOR_ESP.MaxLabels,
+            actorRange   = ACTOR_ESP.MaxDistance,
             agKeyBox     = GUI.AGKeyBox ~= false,
             agKeyX       = GUI.AGKeyX,
             agKeyY       = GUI.AGKeyY,
@@ -6730,6 +6731,7 @@ loadConfig = function()
         if type(f.actorNearby)  == "boolean" then ACTOR_ESP.NearbyOnly     = f.actorNearby  end
         if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
         if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
+        if type(f.actorRange)   == "number"  then ACTOR_ESP.MaxDistance    = math.max(100, math.floor(f.actorRange)) end
         if type(f.agKeyBox)     == "boolean" then GUI.AGKeyBox             = f.agKeyBox     end
         if type(f.agKeyX)       == "number" and type(f.agKeyY) == "number" then
             GUI.AGKeyX, GUI.AGKeyY = f.agKeyX, f.agKeyY
@@ -11156,6 +11158,9 @@ end)()
         secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
             ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
         end):Tooltip("studs from the camera that Nearby Only covers")
+        secEnt:Slider("Actor Range", ACTOR_ESP.MaxDistance, 100, 100, 100000, "", function(v)
+            ACTOR_ESP.MaxDistance = math.max(100, math.floor(tonumber(v) or ACTOR_ESP.MaxDistance))
+        end):Tooltip("studs from the camera that actor/staff labels are drawn to (Nearby Only overrides it with Scan Radius). Click the number to type one")
         secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 1, 0, 1000, "", function(v)
             ACTOR_ESP.MaxLabels = math.max(0, math.floor(tonumber(v) or ACTOR_ESP.MaxLabels))
         end):Tooltip("most actor/staff labels drawn at once - the nearest win. 0 hides all labels (detection keeps running). Click the number to type one")
