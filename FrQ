@@ -5615,7 +5615,9 @@ end)()  -- /Music
 --   hidden player - a character in Workspace with no Player object
 --                   (staff hid them from the leaderboard). Ignored when
 --                   hidden characters outnumber visible players, since
---                   staff can hide the whole server at once.
+--                   staff can hide the whole server at once. Anyone already
+--                   tagged before being hidden keeps their tag while their
+--                   character stays in the world.
 -- A player with StaffState but no flag is staff (pink, Show Staff on).
 --
 -- Measured Matcha costs: GetAttribute ~1.5ms, Workspace:FindFirstChild
@@ -5648,6 +5650,7 @@ end)()  -- /Music
     local checkedRagdolls, ragdollsSeen = {}, {}
     local notCharacter = {}     -- [modelName] = true, top-level models that aren't characters
     local hidden, hiddenSeen = {}, {}
+    local remembered = {}       -- [name] = { role, flags } kept when their Player object is hidden
     local dirty = true
     local reported = {}
 
@@ -5799,10 +5802,17 @@ end)()  -- /Music
                 set[nm] = true
                 local c = cache[nm]
                 if c then c.player = p else cache[nm] = { name = nm, player = p } end
+                remembered[nm] = nil
             end
         end
+        -- Gone from the player list: staff hid them (or they left). Keep what they were tagged
+        -- as; it is used while their character is still in the world.
         for nm in pairs(cache) do
-            if not set[nm] then cache[nm] = nil end
+            if not set[nm] then
+                local e = ACTOR_ESP.Objects[nm]
+                if e and e.role then remembered[nm] = { role = e.role, flags = e.flags or "" } end
+                cache[nm] = nil
+            end
         end
         roster, rosterSet = names, set
         if cursor > #roster then cursor = 0 end
@@ -5905,6 +5915,10 @@ end)()  -- /Music
                 if not hiddenSeen[nm] then changed = true end
             end
             hidden = hiddenSeen
+            -- their character is gone too: they left, so a later rejoin starts clean
+            for nm in pairs(remembered) do
+                if not hiddenSeen[nm] and not rosterSet[nm] then remembered[nm] = nil end
+            end
         end
         return changed
     end
@@ -5947,11 +5961,28 @@ end)()  -- /Music
         local hidingIsTell = hiddenCount < visibleOthers
         ACTOR_ESP.hiddenMode = hidingIsTell and "partial" or (hiddenCount > 0 and "whole server" or "none")
         for name, m in pairs(hidden) do
-            if not want[name] and (hidingIsTell or actorNames[name]) then
+            if not want[name] then
+                local mem = remembered[name]
                 local flags = {}
-                if hidingIsTell then flags[#flags + 1] = "hidden player" end
-                if actorNames[name] then flags[#flags + 1] = "died as actor" end
-                want[name] = { role = "actor", flags = table.concat(flags, ", "), char = m }
+                local actor = false
+                if mem and mem.role == "actor" then
+                    actor = true
+                    flags[#flags + 1] = "remembered: " .. (mem.flags ~= "" and mem.flags or "actor")
+                end
+                if hidingIsTell then actor = true; flags[#flags + 1] = "hidden player" end
+                if actorNames[name] then actor = true; flags[#flags + 1] = "died as actor" end
+                if actor then
+                    want[name] = { role = "actor", flags = table.concat(flags, ", "), char = m }
+                elseif mem and mem.role == "staff" then
+                    want[name] = { role = "staff", flags = "remembered: staff", char = m }
+                end
+            end
+        end
+        -- just hidden, not yet found by the world sweep: keep their current label meanwhile
+        for name in pairs(remembered) do
+            local e = ACTOR_ESP.Objects[name]
+            if not want[name] and e and e.char then
+                want[name] = { role = e.role, flags = e.flags, char = e.char, part = e.part }
             end
         end
 
