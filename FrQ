@@ -5612,7 +5612,9 @@ end)()  -- /Music
 --   Player name   - Name or DisplayName attribute has the word "Player"
 --   died as actor - an Actor=true <name>_ragdoll was seen for their slot
 --   hidden player - a character in Workspace with no Player object
---                   (staff hid them from the leaderboard)
+--                   (staff hid them from the leaderboard). Ignored when
+--                   hidden characters outnumber visible players, since
+--                   staff can hide the whole server at once.
 -- A player with StaffState but no flag is staff (pink, Show Staff on).
 --
 -- Measured Matcha costs: GetAttribute ~1.5ms, Workspace:FindFirstChild
@@ -5932,13 +5934,19 @@ do
                 want[name] = { role = role, flags = table.concat(flags, ", "), char = c.char, part = c.part }
             end
         end
+        -- Staff can hide the whole server, which strips every Player object;
+        -- being hidden only means something when most players are visible.
+        local hiddenCount = 0
+        for _ in pairs(hidden) do hiddenCount = hiddenCount + 1 end
+        local visibleOthers = #roster - 1
+        local hidingIsTell = hiddenCount < visibleOthers
+        ACTOR_ESP.hiddenMode = hidingIsTell and "partial" or (hiddenCount > 0 and "whole server" or "none")
         for name, m in pairs(hidden) do
-            if not want[name] then
-                want[name] = {
-                    role = "actor",
-                    flags = actorNames[name] and "hidden player, died as actor" or "hidden player",
-                    char = m,
-                }
+            if not want[name] and (hidingIsTell or actorNames[name]) then
+                local flags = {}
+                if hidingIsTell then flags[#flags + 1] = "hidden player" end
+                if actorNames[name] then flags[#flags + 1] = "died as actor" end
+                want[name] = { role = "actor", flags = table.concat(flags, ", "), char = m }
             end
         end
 
