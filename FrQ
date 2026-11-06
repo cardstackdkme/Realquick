@@ -5999,6 +5999,7 @@ end)()  -- /Music
     end
 
     function ACTOR_ESP.update()
+        if not ACTOR_ESP.Enabled then ACTOR_ESP.hideAll(); return end
         ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
         local origin = originPos()
         if not origin then ACTOR_ESP.state = "no camera position"; return end
