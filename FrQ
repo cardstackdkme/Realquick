@@ -422,19 +422,23 @@ local PLAYER_ESP = {
 -- ============================================================
 -- ACTOR ESP CONFIG
 -- ============================================================
--- Independent toggle. Tracks NPC actors via their *_ragdoll models
--- (registered on first sight of a ragdoll with Actor=true). Actors can
--- respawn, so each update we resolve the entry to either:
---   * Workspace.<Name>           → respawned, ESP the live model
---   * Workspace.<Name>_ragdoll   → still dead, ESP the corpse
---   * neither                    → cleanup
--- Objects shape: [actorName] = { liveModel, ragdollModel, prefixTag, nameTag }
+-- Actor ESP: players flagged as actors (or staff) from public signals —
+-- see the ACTOR / STAFF ESP ENGINE section for the flag rules.
+-- Objects shape: [playerName] = { role, flags, char, part, <drawings> }
 local ACTOR_ESP = {
     Enabled     = false,
-    MaxDistance = 5000,
-    TextSize    = 17,
+    NearbyOnly  = false,
+    ScanRadius  = 500,
+    MaxLabels   = 25,
+    MaxDistance = 100000,
+    TextSize    = 13,
     FontIndex   = 3,
     Objects     = {},
+}
+
+-- Staff toggle: also show players classified as staff. Needs Actors on.
+local STAFF_ESP = {
+    Enabled = false,
 }
 
 -- Branch tag prefix shown before player names in the ESP (e.g. "[SL] Name").
@@ -3272,6 +3276,154 @@ local function ragdollPosition(model)
     return nil
 end
 
+-- DEAD BODIES for the Player List's Dead tab. While that tab is open, Workspace's top level is read
+-- in chunks (it can hold 700+ children) for <Name>_ragdoll models; each body's death attributes
+-- (Reason, Category, Damage, Timestamp, Actor) are read once. GUI.PLBodies is the result.
+-- Bodies switched on with the details pane's Body ESP button stay drawn, list open or not.
+;(function()
+    local checked = {}
+    task.spawn(function()
+        while GUI.Running do
+            if GUI.PlayerListOpen and GUI.PlayerListTab == "Dead" then
+                local kids = nil
+                pcall(function() kids = Workspace:GetChildren() end)
+                local found = {}
+                if kids then
+                    local i = 1
+                    while i <= #kids do
+                        local stop = math.min(#kids, i + 99)
+                        for j = i, stop do
+                            local c, nm = kids[j], nil
+                            pcall(function() nm = c.Name end)
+                            if type(nm) == "string" and #nm > 8 and nm:sub(-8) == "_ragdoll" then
+                                found[#found + 1] = { nm = nm, model = c }
+                            end
+                        end
+                        i = stop + 1
+                        task.wait()
+                    end
+                end
+                local list, keep = {}, {}
+                for _, b in ipairs(found) do
+                    local info = checked[b.nm]
+                    if not info or info.model ~= b.model then
+                        info = { name = b.nm:sub(1, -9), model = b.model, firstSeen = os.time() }
+                        pcall(function()
+                            local m = b.model
+                            info.reason = m:GetAttribute("Reason")
+                            info.category = m:GetAttribute("Category")
+                            info.damage = m:GetAttribute("Damage")
+                            info.timestamp = tonumber(m:GetAttribute("Timestamp"))
+                            info.actor = m:GetAttribute("Actor") == true
+                        end)
+                        checked[b.nm] = info
+                        task.wait()
+                    end
+                    keep[b.nm] = info
+                    list[#list + 1] = info
+                end
+                checked = keep
+                GUI.PLBodies = list
+                task.wait(2)
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+
+    -- BODY ESP: bodies switched on from the details pane (GUI.PLBodyESP[body] = true) get the same
+    -- pills as the Actor ESP - distance + crosshair, then the name - with the name in blue.
+    GUI.PLBodyESP = GUI.PLBodyESP or {}
+    task.spawn(function()
+        local PILL, TEXT, DIM, BLUE = Color3.fromRGB(24, 24, 28), Color3.fromRGB(235, 235, 240),
+            Color3.fromRGB(170, 170, 178), Color3.fromRGB(80, 175, 255)
+        local SIZE, PAD = 13, 4
+        local H, CW = SIZE + 4, SIZE * 0.55
+        local font = nil
+        pcall(function() font = TITAN_FONTS[ACTOR_ESP.FontIndex].font end)
+        local function pill()
+            local s = Drawing.new("Square")
+            s.Color, s.Filled, s.Corner, s.Transparency, s.ZIndex, s.Visible = PILL, true, 4, 0.85, 53, false
+            return s
+        end
+        local function text(c)
+            local t = Drawing.new("Text")
+            t.Color, t.Size, t.Center, t.Outline, t.ZIndex, t.Visible = c, SIZE, false, false, 54, false
+            if font then t.Font = font end
+            return t
+        end
+        local function circle(filled, r)
+            local c = Drawing.new("Circle")
+            c.Color, c.Filled, c.Radius, c.NumSides, c.ZIndex, c.Visible = DIM, filled, r, filled and 8 or 16, 54, false
+            if not filled then c.Thickness = 1 end
+            return c
+        end
+        local KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
+        local drawn = {}       -- [body] = { drawings..., part, shown }
+        local function hide(d)
+            if d.shown == false then return end
+            d.shown = false
+            for _, k in ipairs(KEYS) do d[k].Visible = false end
+        end
+        local function free(d) for _, k in ipairs(KEYS) do pcall(function() d[k]:Remove() end) end end
+        while GUI.Running do
+            local on = GUI.PLBodyESP
+            for b, d in pairs(drawn) do
+                if not on[b] then free(d); drawn[b] = nil end
+            end
+            local cam = nil
+            pcall(function() cam = Workspace.CurrentCamera.CFrame.Position end)
+            for b in pairs(on) do
+                local d = drawn[b]
+                if not d then
+                    d = { distBg = pill(), distText = text(TEXT), icon = circle(false, 3), dot = circle(true, 1),
+                          nameBg = pill(), nameText = text(BLUE) }
+                    d.nameText.Text = tostring(b.name)
+                    drawn[b] = d
+                end
+                if not d.part then
+                    for _, n in ipairs({ "HumanoidRootPart", "Torso", "UpperTorso", "Head" }) do
+                        pcall(function() d.part = d.part or b.model:FindFirstChild(n) end)
+                    end
+                end
+                local pos = nil
+                if d.part then pcall(function() pos = d.part.Position end) end
+                local s, vis = nil, false
+                if pos and cam then s, vis = WorldToScreen(Vector3.new(pos.X, pos.Y + 2, pos.Z)) end
+                if not pos then
+                    local alive = false
+                    pcall(function() alive = b.model.Parent ~= nil end)
+                    if not alive then on[b] = nil end        -- the body despawned
+                    hide(d)
+                elseif not (s and vis) then
+                    hide(d)
+                else
+                    local distStr = tostring(math.floor((cam - pos).Magnitude))
+                    local name = tostring(b.name)
+                    local distW = PAD + #distStr * CW + 4 + 6 + PAD
+                    local nameW = PAD + #name * CW + PAD
+                    local left = s.X - (distW + 3 + nameW) / 2
+                    local top = s.Y - H - 5
+                    local ty = top + (H - SIZE) / 2
+                    d.distBg.Position, d.distBg.Size = Vector2.new(left, top), Vector2.new(distW, H)
+                    d.distText.Text, d.distText.Position = distStr, Vector2.new(left + PAD, ty)
+                    local ix = left + PAD + #distStr * CW + 4 + 3
+                    d.icon.Position, d.dot.Position = Vector2.new(ix, top + H / 2), Vector2.new(ix, top + H / 2)
+                    local nl = left + distW + 3
+                    d.nameBg.Position, d.nameBg.Size = Vector2.new(nl, top), Vector2.new(nameW, H)
+                    d.nameText.Position = Vector2.new(nl + PAD, ty)
+                    if not d.shown then
+                        d.shown = true
+                        for _, k in ipairs(KEYS) do d[k].Visible = true end
+                    end
+                end
+            end
+            task.wait(1 / 60)
+        end
+        for _, d in pairs(drawn) do free(d) end
+    end)
+end)()
+
 local function playerEspDeadRegister(model)
     pcall(function()
         local cls
@@ -4868,11 +5020,7 @@ UnloadScript = function()
         pcall(function() data.nameTag:Remove() end)
     end
     PLAYER_ESP.DeadObjects = {}
-    for _, data in pairs(ACTOR_ESP.Objects) do
-        pcall(function() data.prefixTag:Remove() end)
-        pcall(function() data.nameTag:Remove() end)
-    end
-    ACTOR_ESP.Objects = {}
+    pcall(ACTOR_ESP.destroyAll)
     uiNotify("Menu", "Unloaded!", 3)
 end
 
@@ -5603,218 +5751,617 @@ end
 end)()  -- /Music
 
 -- ============================================================
--- ACTOR ESP ENGINE
+-- ACTOR / STAFF ESP ENGINE
 -- ============================================================
--- Hot-path design:
---   * actorEspScan runs at the slow cadence (~1s) and is the ONLY
---     place that walks Workspace. It indexes top-level children by
---     name in a single pass, discovers new actor ragdolls, and
---     refreshes every registered entry's liveModel / ragdollModel
---     refs. No per-actor FindFirstChild calls.
---   * actorEspUpdate runs every frame but only touches cached refs
---     (with a cheap .Parent nil-check). It also caches the BasePart
---     used for position lookup so we don't re-walk the model's
---     rig each frame.
---   * actorEspCleanup also runs at the slow cadence and trusts
---     scan's freshly-refreshed refs — no extra Workspace lookups.
+-- The server never tells other clients who is an actor, so players are
+-- flagged from public signals. Every flag is high priority (green name):
+--   shared slot   - 2+ players hold the same slot id (Character attr);
+--                   only staff-loaded slots can be shared. Slots saved
+--                   from earlier sessions count too.
+--   Player name   - Name or DisplayName attribute has the word "Player"
+--   died as actor - an Actor=true <name>_ragdoll was seen for their slot
+--   hidden player - a character in Workspace with no Player object
+--                   (staff hid them from the leaderboard). Ignored when
+--                   hidden characters outnumber visible players, since
+--                   staff can hide the whole server at once. Anyone already
+--                   tagged before being hidden keeps their tag while their
+--                   character stays in the world.
+-- A player with StaffState but no flag is staff (pink, Show Staff on).
+--
+-- Measured Matcha costs: GetAttribute ~1.5ms, Workspace:FindFirstChild
+-- ~2.6ms, reading .Character ~0.07ms. So work runs each frame under a
+-- small time budget, and a player's attributes are only re-read when
+-- their character model changes (slot loads and respawns both make a
+-- new one), plus a slow safety re-read.
+-- Wrapped in its own function: the main chunk is near Lua's 200-local cap.
+;(function()
+    local SLOT_FILE    = CONFIG_DIR .. "/actor_slots.txt"
+    local PART_NAMES   = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
+    local BUDGET       = 0.002
+    local ROSTER_EVERY = 2
+    local WORLD_EVERY  = 3
+    local REREAD_EVERY = 30
+    local COLOR_ACTOR  = Color3.fromRGB(40, 255, 90)
+    local COLOR_STAFF  = Color3.fromRGB(255, 120, 230)
+    local COLOR_TEXT   = Color3.fromRGB(235, 235, 240)
+    local COLOR_DIM    = Color3.fromRGB(170, 170, 178)
+    local COLOR_PILL   = Color3.fromRGB(24, 24, 28)
 
-local function actorEspRegisterByName(name)
-    if ACTOR_ESP.Objects[name] then return end
+    local knownSlots     = {}   -- [slot] = true, persisted actor slots
+    local sharedSlots    = {}   -- [slot] = true, seen held by 2+ players
+    local ragdollSlots   = {}   -- [slot] = true, seen on an Actor=true ragdoll
+    local actorNames     = {}   -- [name] = true, owner of an Actor=true ragdoll
+    local pendingRagdoll = {}   -- [name] = true, ragdoll seen before their slot was read
+    local cache          = {}   -- [name] = per-player cached reads
+    local roster, rosterSet, rosterAt, cursor = {}, {}, -1e9, 0
+    local world, worldIdx, worldAt = nil, 0, -1e9
+    local checkedRagdolls, ragdollsSeen = {}, {}
+    local notCharacter = {}     -- [modelName] = true, top-level models that aren't characters
+    local hidden, hiddenSeen = {}, {}
+    local remembered = {}       -- [name] = { role, flags } kept when their Player object is hidden
+    local dirty = true
+    local reported = {}
 
-    local prefixTag = Drawing.new("Text")
-    prefixTag.Color = Color3.fromRGB(80, 220, 100)   -- "(ACTOR)" stays green; we never render the dead state
-    prefixTag.Size = ACTOR_ESP.TextSize
-    prefixTag.Font = TITAN_FONTS[ACTOR_ESP.FontIndex].font
-    prefixTag.Center = false
-    prefixTag.Outline = true
-    prefixTag.Visible = false
-    prefixTag.ZIndex = 52
+    local function attr(inst, key)
+        local v
+        pcall(function() v = inst:GetAttribute(key) end)
+        return v
+    end
 
-    local nameTag = Drawing.new("Text")
-    nameTag.Color = Color3.fromRGB(220, 220, 225)
-    nameTag.Size = ACTOR_ESP.TextSize
-    nameTag.Font = TITAN_FONTS[ACTOR_ESP.FontIndex].font
-    nameTag.Center = false
-    nameTag.Outline = true
-    nameTag.Visible = false
-    nameTag.ZIndex = 52
+    local function loadKnownSlots()
+        if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
+        local raw
+        pcall(function() if isfile(SLOT_FILE) then raw = readfile(SLOT_FILE) end end)
+        if type(raw) ~= "string" then return end
+        for id in raw:gmatch("%x+") do
+            if #id == 32 then knownSlots[id] = true end
+        end
+    end
 
-    ACTOR_ESP.Objects[name] = {
-        liveModel    = nil,
-        ragdollModel = nil,
-        livePart     = nil,   -- cached BasePart used for position; invalidated on respawn
-        prefixTag    = prefixTag,
-        nameTag      = nameTag,
-    }
-end
+    local function saveKnownSlots()
+        if type(writefile) ~= "function" then return end
+        pcall(function()
+            if type(makefolder) == "function" and type(isfolder) == "function"
+               and not isfolder(CONFIG_DIR) then
+                makefolder(CONFIG_DIR)
+            end
+        end)
+        local ids = {}
+        for id in pairs(knownSlots) do ids[#ids + 1] = id end
+        table.sort(ids)
+        pcall(writefile, SLOT_FILE, table.concat(ids, "\n"))
+    end
 
--- One Workspace walk per scan tick — top-level only. Builds two
--- indexes (live name → Model, ragdoll name → Model), registers any
--- *_ragdoll with Actor=true we haven't seen before, and refreshes
--- every registered entry's cached refs. NO recursion — descending
--- into player characters / accessory trees was costing thousands of
--- pcalls and locking the VM for a minute.
-actorEspScan = function()
-    local kids
-    pcall(function() kids = Workspace:GetChildren() end)
-    if not kids then return end
+    local function rememberSlot(slot)
+        if type(slot) == "string" and #slot == 32 and not knownSlots[slot] then
+            knownSlots[slot] = true
+            saveKnownSlots()
+        end
+    end
 
-    local liveByName    = {}
-    local ragdollByName = {}
-    for i = 1, #kids do
-        local c = kids[i]
-        local nm, cls
-        pcall(function() nm = c.Name end)
-        pcall(function() cls = c.ClassName end)
-        if type(nm) == "string" and cls == "Model" then
-            local len = #nm
-            if len > 8 and nm:sub(len - 7) == "_ragdoll" then
-                ragdollByName[nm] = c
-            else
-                liveByName[nm] = c
+    local function hasPlayerWord(s)
+        return type(s) == "string" and s:lower():find("%f[%a]player%f[%A]") ~= nil
+    end
+
+    -- Named parts first: Matcha's PrimaryPart on player characters is a
+    -- broken shim with no Position, so it's only a last resort.
+    local function resolvePart(model)
+        for i = 1, #PART_NAMES do
+            local part
+            pcall(function() part = model:FindFirstChild(PART_NAMES[i]) end)
+            if part then return part end
+        end
+        local pp, pos
+        pcall(function() pp = model.PrimaryPart; pos = pp.Position end)
+        if pos then return pp end
+        return nil
+    end
+
+    local function originPos()
+        local o
+        pcall(function() o = Workspace.CurrentCamera.CFrame.Position end)
+        return o or getPlayerPos()
+    end
+
+    local function newText(color)
+        local t = Drawing.new("Text")
+        t.Color = color
+        t.Size = ACTOR_ESP.TextSize
+        t.Font = TITAN_FONTS[ACTOR_ESP.FontIndex].font
+        t.Center = false
+        t.Outline = false
+        t.Visible = false
+        t.ZIndex = 54
+        return t
+    end
+
+    local function newPill()
+        local s = Drawing.new("Square")
+        s.Color = COLOR_PILL
+        s.Filled = true
+        s.Corner = 4
+        s.Transparency = 0.85
+        s.Visible = false
+        s.ZIndex = 53
+        return s
+    end
+
+    local function newEntry()
+        local icon = Drawing.new("Circle")
+        icon.Color = COLOR_DIM
+        icon.Filled = false
+        icon.Thickness = 1
+        icon.NumSides = 16
+        icon.Radius = 3
+        icon.Visible = false
+        icon.ZIndex = 54
+        local dot = Drawing.new("Circle")
+        dot.Color = COLOR_DIM
+        dot.Filled = true
+        dot.NumSides = 8
+        dot.Radius = 1
+        dot.Visible = false
+        dot.ZIndex = 54
+        return {
+            distBg   = newPill(),
+            distText = newText(COLOR_TEXT),
+            icon     = icon,
+            dot      = dot,
+            nameBg   = newPill(),
+            nameText = newText(COLOR_ACTOR),
+        }
+    end
+
+    local DRAW_KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
+
+    -- Visibility is tracked so hidden labels aren't rewritten every frame.
+    local function hideEntry(e)
+        if e.shown == false then return end
+        e.shown = false
+        for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = false end
+    end
+
+    local function removeEntry(e)
+        for i = 1, #DRAW_KEYS do
+            local d = e[DRAW_KEYS[i]]
+            pcall(function() d:Remove() end)
+        end
+    end
+
+    local function markRagdollSlot(slot)
+        if type(slot) == "string" and not ragdollSlots[slot] then
+            ragdollSlots[slot] = true
+            rememberSlot(slot)
+        end
+    end
+
+    local function refreshRoster(now)
+        rosterAt = now
+        local plist
+        pcall(function() plist = Players:GetPlayers() end)
+        if not plist then return end
+        local names, set = {}, {}
+        for i = 1, #plist do
+            local p = plist[i]
+            local nm
+            pcall(function() nm = p.Name end)
+            if nm then
+                names[#names + 1] = nm
+                set[nm] = true
+                local c = cache[nm]
+                if c then c.player = p else cache[nm] = { name = nm, player = p } end
+                remembered[nm] = nil
             end
         end
-    end
-
-    -- Register any newly seen actor ragdolls.
-    for nm, model in pairs(ragdollByName) do
-        if deathGetAttr(model, "Actor") == true then
-            local baseName = nm:sub(1, #nm - 8)
-            if baseName ~= "" then
-                actorEspRegisterByName(baseName)
+        -- Gone from the player list: staff hid them (or they left). Keep what they were tagged
+        -- as; it is used while their character is still in the world.
+        for nm in pairs(cache) do
+            if not set[nm] then
+                local e = ACTOR_ESP.Objects[nm]
+                if e and e.role then remembered[nm] = { role = e.role, flags = e.flags or "" } end
+                cache[nm] = nil
             end
         end
+        roster, rosterSet = names, set
+        if cursor > #roster then cursor = 0 end
+        dirty = true
     end
 
-    -- Refresh cached refs for every registered actor. If the live
-    -- model identity changed (respawn → new Model under the same name)
-    -- invalidate the cached part so the next update re-resolves.
-    for name, data in pairs(ACTOR_ESP.Objects) do
-        local prevLive = data.liveModel
-        data.liveModel    = liveByName[name]
-        data.ragdollModel = ragdollByName[name .. "_ragdoll"]
-        if data.liveModel ~= prevLive then
-            data.livePart = nil
+    -- Returns true when anything that affects classification changed.
+    local function visitPlayer(c, origin, now)
+        local changed = false
+        local char
+        pcall(function() char = c.player.Character end)
+        if char ~= c.char then
+            c.char = char
+            c.part = char and resolvePart(char) or nil
+            c.readAt = nil
+            changed = true
         end
-    end
-end
 
-local function actorEspHide(data)
-    data.prefixTag.Visible = false
-    data.nameTag.Visible = false
-end
-
--- Resolve a BasePart on the live model whose Position we can read.
--- Tries PrimaryPart, then the usual character anchors, then the first
--- BasePart child. Returns the part (so the caller can cache it).
-local ACTOR_PART_NAMES = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
-local function actorResolvePart(model)
-    local pp
-    pcall(function() pp = model.PrimaryPart end)
-    if pp then return pp end
-    for i = 1, #ACTOR_PART_NAMES do
-        local part
-        pcall(function() part = model:FindFirstChild(ACTOR_PART_NAMES[i]) end)
-        if part then return part end
-    end
-    local kids
-    pcall(function() kids = model:GetChildren() end)
-    if kids then
-        for i = 1, #kids do
-            local c = kids[i]
+        if ACTOR_ESP.NearbyOnly and origin and c.part then
             local pos
-            pcall(function() pos = c.Position end)
-            if pos then return c end
-        end
-    end
-    return nil
-end
-
-local function actorEspUpdate()
-    if not ACTOR_ESP.Enabled then
-        for _, data in pairs(ACTOR_ESP.Objects) do actorEspHide(data) end
-        return
-    end
-
-    local playerPos = getPlayerPos()
-    if not playerPos then return end
-
-    for name, data in pairs(ACTOR_ESP.Objects) do
-        -- Cached ref check only — scan handles re-discovery at ~1s.
-        local liveModel = data.liveModel
-        if liveModel then
-            local valid = false
-            pcall(function() valid = liveModel.Parent ~= nil end)
-            if not valid then liveModel = nil end
+            pcall(function() pos = c.part.Position end)
+            if not pos and c.char then
+                c.part = resolvePart(c.char)
+                if c.part then pcall(function() pos = c.part.Position end) end
+            end
+            if pos then
+                local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
+                local r = ACTOR_ESP.ScanRadius
+                if dx * dx + dy * dy + dz * dz > r * r then return changed end
+            end
         end
 
-        if not liveModel then
-            actorEspHide(data)
-        else
-            -- Cached part. Only re-resolve when the cached one lost its
-            -- parent (respawn invalidates it via scan; mid-frame Destroy
-            -- via this fallback).
-            local part = data.livePart
-            if part then
-                local valid = false
-                pcall(function() valid = part.Parent ~= nil end)
-                if not valid then part = nil end
-            end
-            if not part then
-                part = actorResolvePart(liveModel)
-                data.livePart = part
-            end
+        if c.readAt and now - c.readAt < REREAD_EVERY then return changed end
+        c.readAt = now
+        local p = c.player
+        local slot = attr(p, "Character")
+        if slot ~= c.slot then
+            c.slot = slot
+            c.charName = attr(p, "Name")
+            c.display = attr(p, "DisplayName")
+            c.staffState = attr(p, "StaffState")
+            changed = true
+        end
+        if pendingRagdoll[c.name] and type(c.slot) == "string" then
+            pendingRagdoll[c.name] = nil
+            markRagdollSlot(c.slot)
+            changed = true
+        end
+        return changed
+    end
 
-            local pos
-            if part then pcall(function() pos = part.Position end) end
-            if not pos then
-                actorEspHide(data)
-            else
-                local dx = playerPos.X - pos.X
-                local dy = playerPos.Y - pos.Y
-                local dz = playerPos.Z - pos.Z
-                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                if dist > ACTOR_ESP.MaxDistance then
-                    actorEspHide(data)
-                else
-                    local headTop = Vector3.new(pos.X, pos.Y + 3, pos.Z)
-                    local screenPos, onScreen = WorldToScreen(headTop)
-                    if not (screenPos and onScreen) then
-                        actorEspHide(data)
-                    else
-                        local approxChar = ACTOR_ESP.TextSize * 0.55
-                        local prefixStr  = "(ACTOR) "
-                        local prefixW = #prefixStr * approxChar
-                        local nameW   = #name * approxChar
-                        local totalW  = prefixW + nameW
-                        local leftX   = screenPos.X - totalW / 2
-                        local y       = screenPos.Y - 20
-
-                        data.prefixTag.Position = Vector2.new(leftX, y)
-                        data.prefixTag.Text     = "(ACTOR)"
-                        data.prefixTag.Visible  = true
-
-                        data.nameTag.Position = Vector2.new(leftX + prefixW, y)
-                        data.nameTag.Text     = name
-                        data.nameTag.Visible  = true
+    -- Incremental sweep of Workspace's top level for actor ragdolls and
+    -- characters whose Player object is hidden. Returns true on changes.
+    local function worldStep(now, deadline)
+        if not world then
+            if now - worldAt < WORLD_EVERY then return false end
+            pcall(function() world = Workspace:GetChildren() end)
+            worldIdx, hiddenSeen, ragdollsSeen = 0, {}, {}
+            if not world then worldAt = now; return false end
+        end
+        local changed = false
+        while worldIdx < #world and os.clock() < deadline do
+            worldIdx = worldIdx + 1
+            local m = world[worldIdx]
+            local nm
+            pcall(function() nm = m.Name end)
+            if type(nm) == "string" then
+                if #nm > 8 and nm:sub(-8) == "_ragdoll" then
+                    ragdollsSeen[nm] = true
+                    if not checkedRagdolls[nm] then
+                        checkedRagdolls[nm] = true
+                        if attr(m, "Actor") == true then
+                            local base = nm:sub(1, #nm - 8)
+                            actorNames[base] = true
+                            local c = cache[base]
+                            if c and type(c.slot) == "string" then
+                                markRagdollSlot(c.slot)
+                            else
+                                pendingRagdoll[base] = true
+                            end
+                            changed = true
+                        end
                     end
+                elseif not rosterSet[nm] and not notCharacter[nm] then
+                    local hum
+                    pcall(function() hum = m:FindFirstChildOfClass("Humanoid") end)
+                    if hum then hiddenSeen[nm] = m else notCharacter[nm] = true end
+                end
+            end
+        end
+        if worldIdx >= #world then
+            world, worldAt = nil, now
+            for nm in pairs(checkedRagdolls) do
+                if not ragdollsSeen[nm] then checkedRagdolls[nm] = nil end
+            end
+            for nm in pairs(hiddenSeen) do
+                if not hidden[nm] then changed = true end
+            end
+            for nm in pairs(hidden) do
+                if not hiddenSeen[nm] then changed = true end
+            end
+            hidden = hiddenSeen
+            -- their character is gone too: they left, so a later rejoin starts clean
+            for nm in pairs(remembered) do
+                if not hiddenSeen[nm] and not rosterSet[nm] then remembered[nm] = nil end
+            end
+        end
+        return changed
+    end
+
+    local function classify()
+        local counts = {}
+        for _, c in pairs(cache) do
+            if type(c.slot) == "string" then counts[c.slot] = (counts[c.slot] or 0) + 1 end
+        end
+        for s, n in pairs(counts) do
+            if n >= 2 and not sharedSlots[s] then
+                sharedSlots[s] = true
+                rememberSlot(s)
+            end
+        end
+
+        local want = {}
+        for name, c in pairs(cache) do
+            local flags = {}
+            local s = c.slot
+            if type(s) == "string" then
+                if sharedSlots[s] then flags[#flags + 1] = "shared slot"
+                elseif knownSlots[s] then flags[#flags + 1] = "known slot" end
+                if ragdollSlots[s] then flags[#flags + 1] = "died as actor" end
+            end
+            if hasPlayerWord(c.charName) or hasPlayerWord(c.display) then
+                flags[#flags + 1] = "Player name"
+            end
+            local role
+            if #flags > 0 then role = "actor" elseif c.staffState ~= nil then role = "staff" end
+            if role then
+                want[name] = { role = role, flags = table.concat(flags, ", "), char = c.char, part = c.part }
+            end
+        end
+        -- Staff can hide the whole server, which strips every Player object;
+        -- being hidden only means something when most players are visible.
+        local hiddenCount = 0
+        for _ in pairs(hidden) do hiddenCount = hiddenCount + 1 end
+        local visibleOthers = #roster - 1
+        local hidingIsTell = hiddenCount < visibleOthers
+        ACTOR_ESP.hiddenMode = hidingIsTell and "partial" or (hiddenCount > 0 and "whole server" or "none")
+        for name, m in pairs(hidden) do
+            if not want[name] then
+                local mem = remembered[name]
+                local flags = {}
+                local actor = false
+                if mem and mem.role == "actor" then
+                    actor = true
+                    flags[#flags + 1] = "remembered: " .. (mem.flags ~= "" and mem.flags or "actor")
+                end
+                if hidingIsTell then actor = true; flags[#flags + 1] = "hidden player" end
+                if actorNames[name] then actor = true; flags[#flags + 1] = "died as actor" end
+                if actor then
+                    want[name] = { role = "actor", flags = table.concat(flags, ", "), char = m }
+                elseif mem and mem.role == "staff" then
+                    want[name] = { role = "staff", flags = "remembered: staff", char = m }
+                end
+            end
+        end
+        -- just hidden, not yet found by the world sweep: keep their current label meanwhile
+        for name in pairs(remembered) do
+            local e = ACTOR_ESP.Objects[name]
+            if not want[name] and e and e.char then
+                want[name] = { role = e.role, flags = e.flags, char = e.char, part = e.part }
+            end
+        end
+
+        for name, w in pairs(want) do
+            local e = ACTOR_ESP.Objects[name]
+            if not e then
+                e = newEntry()
+                ACTOR_ESP.Objects[name] = e
+            end
+            e.role, e.flags = w.role, w.flags
+            if e.char ~= w.char then
+                e.char = w.char
+                e.part = w.part
+            end
+        end
+        for name, e in pairs(ACTOR_ESP.Objects) do
+            if not want[name] then
+                removeEntry(e)
+                ACTOR_ESP.Objects[name] = nil
+            end
+        end
+    end
+
+    function ACTOR_ESP.step(budget)
+        local now = os.clock()
+        local deadline = now + (budget or BUDGET)
+        if now - rosterAt >= ROSTER_EVERY then refreshRoster(now) end
+        local origin = originPos()
+        local n = #roster
+        local visited = 0
+        while visited < n and os.clock() < deadline do
+            cursor = cursor % n + 1
+            local c = cache[roster[cursor]]
+            if c and visitPlayer(c, origin, now) then dirty = true end
+            visited = visited + 1
+        end
+        if os.clock() < deadline and worldStep(now, deadline) then dirty = true end
+        if dirty then
+            dirty = false
+            classify()
+        end
+    end
+
+    -- Catch-up pass when a toggle is switched on; anything it doesn't
+    -- reach is finished by the per-frame steps.
+    actorEspScan = function()
+        rosterAt, worldAt = -1e9, -1e9
+        ACTOR_ESP.step(0.3)
+    end
+
+    local function entryPos(e)
+        local char = e.char
+        if not char then return nil end
+        local pos
+        if e.part then pcall(function() pos = e.part.Position end) end
+        if not pos then
+            e.part = resolvePart(char)
+            if e.part then pcall(function() pos = e.part.Position end) end
+        end
+        return pos
+    end
+
+    -- Camera to their feet (3 studs under the root part), to match Matcha's own ESP readout:
+    -- in a side-by-side frame it read 16 where camera-to-root read 14, with the camera above.
+    local function distTo(origin, pos)
+        local dx, dy, dz = origin.X - pos.X, origin.Y - (pos.Y - 3), origin.Z - pos.Z
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+    end
+
+    -- Label cap (MaxLabels 0 = draw none): when more players are tagged than it, only the
+    -- nearest get drawn. Selected labels refresh their distance as they
+    -- draw; a few others are re-measured per frame, and the nearest set
+    -- is re-picked a few times a second.
+    local SELECT_EVERY, REFRESH_PER_FRAME = 0.25, 8
+    local distCursor, selectAt = 0, -1e9
+
+    function ACTOR_ESP.update()
+        if not ACTOR_ESP.Enabled then ACTOR_ESP.hideAll(); return end
+        ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
+        local origin = originPos()
+        if not origin then ACTOR_ESP.state = "no camera position"; return end
+        ACTOR_ESP.state = "ok"
+        local showStaff = STAFF_ESP.Enabled
+        local limit = ACTOR_ESP.NearbyOnly and ACTOR_ESP.ScanRadius or ACTOR_ESP.MaxDistance
+        local cap = ACTOR_ESP.MaxLabels
+        if cap <= 0 then
+            ACTOR_ESP.state = "labels set to 0"
+            ACTOR_ESP.hideAll()
+            return
+        end
+        local size = ACTOR_ESP.TextSize
+        local cw = size * 0.55
+        local h = size + 4
+        local pad = 4
+
+        -- On death the character model is renamed <name>_ragdoll and becomes the corpse (the
+        -- Player still points at it until respawn), so a twice-a-second name check hides the dead.
+        local now = os.clock()
+        local cands = {}
+        for name, e in pairs(ACTOR_ESP.Objects) do
+            if e.char and (e.deadAt == nil or now - e.deadAt > 0.5 or e.deadChar ~= e.char) then
+                local nm = nil
+                pcall(function() nm = e.char.Name end)
+                e.dead = type(nm) == "string" and nm:sub(-8) == "_ragdoll"
+                e.deadAt, e.deadChar = now, e.char
+            end
+            if e.dead then
+                e.selected = false
+                e.state = "dead"
+                hideEntry(e)
+            elseif e.role == "actor" or showStaff then
+                cands[#cands + 1] = name
+            else
+                e.selected = false
+                e.state = "staff hidden"
+                hideEntry(e)
+            end
+        end
+
+        local n = #cands
+        if n <= cap then
+            for i = 1, n do ACTOR_ESP.Objects[cands[i]].selected = true end
+        else
+            for _ = 1, math.min(REFRESH_PER_FRAME, n) do
+                distCursor = distCursor % n + 1
+                local e = ACTOR_ESP.Objects[cands[distCursor]]
+                if not e.selected then
+                    local pos = entryPos(e)
+                    e.dist = pos and distTo(origin, pos) or math.huge
+                end
+            end
+            if now - selectAt >= SELECT_EVERY then
+                selectAt = now
+                local order = {}
+                for i = 1, n do order[i] = cands[i] end
+                table.sort(order, function(a, b)
+                    return (ACTOR_ESP.Objects[a].dist or math.huge) < (ACTOR_ESP.Objects[b].dist or math.huge)
+                end)
+                for i = 1, n do
+                    local e = ACTOR_ESP.Objects[order[i]]
+                    e.selected = i <= cap and (e.dist or math.huge) <= limit
+                end
+            end
+        end
+
+        for i = 1, n do
+            local name = cands[i]
+            local e = ACTOR_ESP.Objects[name]
+            local pos, screenPos, onScreen, dist
+            if e.selected then
+                pos = entryPos(e)
+                if pos then
+                    dist = distTo(origin, pos)
+                    e.dist = dist
+                    if dist <= limit then
+                        screenPos, onScreen = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z))
+                    end
+                end
+            end
+
+            if not (screenPos and onScreen) then
+                e.state = not e.selected and "over label cap" or not e.char and "no character"
+                    or not e.part and "no part" or not pos and "no position"
+                    or not screenPos and "too far" or "off screen"
+                hideEntry(e)
+            else
+                e.state = "shown"
+                local distStr = tostring(math.floor(dist))
+                local distW = pad + #distStr * cw + 4 + 6 + pad
+                local nameW = pad + #name * cw + pad
+                local left = screenPos.X - (distW + 3 + nameW) / 2
+                local top = screenPos.Y - h - 5
+                local textY = top + (h - size) / 2
+
+                e.distBg.Position = Vector2.new(left, top)
+                e.distBg.Size = Vector2.new(distW, h)
+                e.distText.Text = distStr
+                e.distText.Position = Vector2.new(left + pad, textY)
+                local iconX = left + pad + #distStr * cw + 4 + 3
+                e.icon.Position = Vector2.new(iconX, top + h / 2)
+                e.dot.Position = Vector2.new(iconX, top + h / 2)
+
+                local nameLeft = left + distW + 3
+                e.nameBg.Position = Vector2.new(nameLeft, top)
+                e.nameBg.Size = Vector2.new(nameW, h)
+                e.nameText.Position = Vector2.new(nameLeft + pad, textY)
+                if not e.shown or e.drawnRole ~= e.role then
+                    e.nameText.Text = name
+                    e.nameText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
+                    e.drawnRole = e.role
+                end
+                if not e.shown then
+                    e.shown = true
+                    for k = 1, #DRAW_KEYS do e[DRAW_KEYS[k]].Visible = true end
                 end
             end
         end
     end
-end
 
--- Drop entries where BOTH refs are gone. Trusts scan's just-refreshed
--- refs — no extra Workspace lookups here.
-local function actorEspCleanup()
-    for name, data in pairs(ACTOR_ESP.Objects) do
-        if not data.liveModel and not data.ragdollModel then
-            pcall(function() data.prefixTag:Remove() end)
-            pcall(function() data.nameTag:Remove() end)
-            ACTOR_ESP.Objects[name] = nil
+    function ACTOR_ESP.hideAll()
+        for _, e in pairs(ACTOR_ESP.Objects) do hideEntry(e) end
+    end
+
+    function ACTOR_ESP.destroyAll()
+        for _, e in pairs(ACTOR_ESP.Objects) do removeEntry(e) end
+        ACTOR_ESP.Objects = {}
+    end
+
+    -- Keeps an engine error from killing the shared ESP loop; the first
+    -- error of each stage is shown on screen.
+    function ACTOR_ESP.guard(stage, fn)
+        local ok, err = pcall(fn)
+        if not ok then ACTOR_ESP.lastError = stage .. ": " .. tostring(err) end
+        if not ok and not reported[stage] then
+            reported[stage] = true
+            pcall(function() uiNotify("Actor ESP error (" .. stage .. ")", tostring(err), 10) end)
         end
     end
-end
+
+    function ACTOR_ESP.summary(role)
+        local list = {}
+        for name, e in pairs(ACTOR_ESP.Objects) do
+            if e.role == role then list[#list + 1] = name .. " (" .. (e.flags ~= "" and e.flags or "StaffState") .. ")" end
+        end
+        table.sort(list)
+        return #list, table.concat(list, "; ")
+    end
+
+    loadKnownSlots()
+    _G.__RQ_ACTOR_ESP = ACTOR_ESP
+end)()
 
 -- Helper: hide all labels for a simple ESP type
 local function hideESPLabels(objects)
@@ -6056,7 +6603,7 @@ local function ESPLoop()
         local oreOn = anyOreEnabled()
         local anyActive = oreOn or MARCS.Enabled or GEAR.Enabled or RESUPPLY.Enabled or FLINTLOCK.Enabled
             or TITAN.Enabled or ANIMAL.Enabled or PLAYER_ESP.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
-            or LANDMINE.Enabled or GUI.CounterVisible
+            or LANDMINE.Enabled or GUI.CounterVisible or ACTOR_ESP.Classify
 
         -- If nothing is active, sleep longer
         if not anyActive then
@@ -6099,10 +6646,7 @@ local function ESPLoop()
                 wasOn.playerEsp = false
             end
             if wasOn.actorEsp then
-                for _, data in pairs(ACTOR_ESP.Objects) do
-                    data.prefixTag.Visible = false
-                    data.nameTag.Visible = false
-                end
+                ACTOR_ESP.hideAll()
                 wasOn.actorEsp = false
             end
             wait(0.1) -- Sleep longer when idle
@@ -6166,14 +6710,16 @@ local function ESPLoop()
             end
 
             if ACTOR_ESP.Enabled then
-                actorEspUpdate()
+                ACTOR_ESP.guard("step", ACTOR_ESP.step)
+                ACTOR_ESP.guard("update", ACTOR_ESP.update)
                 wasOn.actorEsp = true
-            elseif wasOn.actorEsp then
-                for _, data in pairs(ACTOR_ESP.Objects) do
-                    data.prefixTag.Visible = false
-                    data.nameTag.Visible = false
+            else
+                if wasOn.actorEsp then
+                    ACTOR_ESP.hideAll()
+                    wasOn.actorEsp = false
                 end
-                wasOn.actorEsp = false
+                -- Auto Grapple / Trigger Bot actor filters: classify without drawing
+                if ACTOR_ESP.Classify then ACTOR_ESP.guard("step", ACTOR_ESP.step) end
             end
 
             if DEATHLOG.Enabled then deathLogUpdate() end
@@ -6204,9 +6750,6 @@ local function ESPLoop()
                 if PLAYER_ESP.Enabled then
                     playerEspScan(); playerEspCleanup()
                     playerEspDeadScan(); playerEspDeadCleanup()
-                end
-                if ACTOR_ESP.Enabled then
-                    actorEspScan(); actorEspCleanup()
                 end
                 if GUI.CounterVisible then
                     pcall(function()
@@ -6258,6 +6801,24 @@ saveConfig = function()
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
+            staffEsp     = STAFF_ESP.Enabled,
+            actorNearby  = ACTOR_ESP.NearbyOnly,
+            actorRadius  = ACTOR_ESP.ScanRadius,
+            actorLabels  = ACTOR_ESP.MaxLabels,
+            actorRange   = ACTOR_ESP.MaxDistance,
+            agKeyBox     = GUI.AGKeyBox ~= false,
+            agKeyX       = GUI.AGKeyX,
+            agKeyY       = GUI.AGKeyY,
+            agKeySize    = GUI.AGKeySize,
+            agPanel      = GUI.AGPanel ~= false,
+            agPanelX     = GUI.AGPanelX,
+            agPanelY     = GUI.AGPanelY,
+            agToggleKey  = GUI.AG and GUI.AG.ToggleKey or GUI.AGToggleKey,
+            agCfg        = GUI.AG and {
+                filter = GUI.AG.Filter, retry = GUI.AG.Retry, snap = GUI.AG.Snap,
+                radius = GUI.AG.SnapRadius, strength = GUI.AG.SnapStrength,
+                dpc = GUI.AG.DegPerCount, minChance = GUI.AG.MinChance,
+            } or GUI.AGCfg,
         },
         ores = oresOn,
         titan = {
@@ -6341,6 +6902,37 @@ loadConfig = function()
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
+        if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
+        if type(f.actorNearby)  == "boolean" then ACTOR_ESP.NearbyOnly     = f.actorNearby  end
+        if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
+        if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
+        if type(f.actorRange)   == "number"  then ACTOR_ESP.MaxDistance    = math.max(100, math.floor(f.actorRange)) end
+        if type(f.agKeyBox)     == "boolean" then GUI.AGKeyBox             = f.agKeyBox     end
+        if type(f.agKeyX)       == "number" and type(f.agKeyY) == "number" then
+            GUI.AGKeyX, GUI.AGKeyY = f.agKeyX, f.agKeyY
+        end
+        if type(f.agKeySize)    == "number"  then GUI.AGKeySize            = math.max(28, math.min(200, f.agKeySize)) end
+        if type(f.agPanel)      == "boolean" then GUI.AGPanel              = f.agPanel      end
+        if type(f.agPanelX)     == "number" and type(f.agPanelY) == "number" then
+            GUI.AGPanelX, GUI.AGPanelY = f.agPanelX, f.agPanelY
+        end
+        if type(f.agToggleKey)  == "number"  then
+            GUI.AGToggleKey = f.agToggleKey
+            if GUI.AG then GUI.AG.ToggleKey = f.agToggleKey end
+        end
+        if type(f.agCfg) == "table" then
+            GUI.AGCfg = f.agCfg
+            local A, c = GUI.AG, f.agCfg
+            if A then
+                if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then A.Filter = c.filter end
+                if type(c.retry) == "boolean" then A.Retry = c.retry end
+                if type(c.snap) == "boolean" then A.Snap = c.snap end
+                if type(c.radius) == "number" then A.SnapRadius = c.radius end
+                if type(c.strength) == "number" then A.SnapStrength = c.strength end
+                if type(c.dpc) == "number" and c.dpc > 0 then A.DegPerCount = c.dpc end
+                if type(c.minChance) == "number" then A.MinChance = c.minChance end
+            end
+        end
         if type(f.deathLog)     == "boolean" then
             DEATHLOG.Enabled    = f.deathLog
             -- Re-seed so ragdolls already on the ground when the script
@@ -6794,15 +7386,34 @@ local function drawPlayers()
     local src=GUI.PLCachedPlayers or {}
     local tab,search=GUI.PlayerListTab or "Players",string.lower(GUI.PLSearchText or "")
     local list={}
-    for _,p in ipairs(src) do
-        local ok
-        if tab=="Dead" then ok=p.Dead==true elseif tab=="Staff" then ok=(not p.Dead) and (p.StaffState or 0)>0 else ok=(not p.Dead) and (p.StaffState or 0)<=0 end
-        if ok and search~="" then ok=string.find(string.lower(tostring(p.Name).." "..tostring(p.DisplayName or "")),search,1,true)~=nil end
-        if ok then list[#list+1]=p end
+    if tab=="Dead" then
+        -- dead BODIES (ragdolls still in the world), named after their owner when online
+        local dn={}
+        for _,p in ipairs(src) do dn[p.Name]=p.DisplayName end
+        for _,b in ipairs(GUI.PLBodies or {}) do
+            local q={Name=b.name,DisplayName=dn[b.name] or b.name,Dead=true,Body=b,Health=0,MaxHealth=0,Rank=0,Online=dn[b.name]~=nil}
+            local ok=search=="" or string.find(string.lower(q.Name.." "..q.DisplayName),search,1,true)~=nil
+            if ok then list[#list+1]=q end
+        end
+        table.sort(list,function(a,b) return (a.Body.timestamp or a.Body.firstSeen or 0)>(b.Body.timestamp or b.Body.firstSeen or 0) end)
+    else
+        for _,p in ipairs(src) do
+            local ok
+            if tab=="Staff" then ok=(not p.Dead) and (p.StaffState or 0)>0 else ok=(not p.Dead) and (p.StaffState or 0)<=0 end
+            if ok and search~="" then ok=string.find(string.lower(tostring(p.Name).." "..tostring(p.DisplayName or "")),search,1,true)~=nil end
+            if ok then list[#list+1]=p end
+        end
+        if GUI.PLSortMode=="Rank" then table.sort(list,function(a,b) return (a.Rank or 0)>(b.Rank or 0) end)
+        elseif GUI.PLSortMode=="Health" then table.sort(list,function(a,b) return (a.Health or 0)<(b.Health or 0) end)
+        else table.sort(list,function(a,b) return tostring(a.Name)<tostring(b.Name) end) end
     end
-    if GUI.PLSortMode=="Rank" then table.sort(list,function(a,b) return (a.Rank or 0)>(b.Rank or 0) end)
-    elseif GUI.PLSortMode=="Health" then table.sort(list,function(a,b) return (a.Health or 0)<(b.Health or 0) end)
-    else table.sort(list,function(a,b) return tostring(a.Name)<tostring(b.Name) end) end
+    local function ago(b)
+        local t=b and (b.timestamp or b.firstSeen)
+        if not t then return "?" end
+        local s=maxf(0,os.time()-t)
+        if s<60 then return floor(s).."s ago" elseif s<3600 then return floor(s/60).."m ago" end
+        return floor(s/3600).."h ago"
+    end
 
     local cx,cy,cw=window("pl",x,y,w,h,"Player List","("..#list..")",function() GUI.PlayerListOpen=false end)
     local listW=floor(cw*0.52); local detX=x+14+listW+16; local detW=w-28-listW-16
@@ -6839,14 +7450,22 @@ local function drawPlayers()
     for i,p in ipairs(list) do
         local rY=listY+(i-1)*rowH-off
         if rY+rowH>listY-2 and rY<y+h-12 then
-            local sel=GUI.PlayerListSelected==p.Name
-            local hv=hot("plrow"..i,x+14,rY,listW-12,rowH-6,function() GUI.PlayerListSelected=p.Name end)
+            local key=p.Body and ("body:"..p.Name) or p.Name
+            local sel=GUI.PlayerListSelected==key
+            local hv=hot("plrow"..i,x+14,rY,listW-12,rowH-6,function() GUI.PlayerListSelected=key end)
             card(x+14,rY,listW-12,rowH-6,63,sel,T.red,hv)
             txt(trim(p.DisplayName or p.Name,20),x+26,rY+7,13,sel and T.red or T.text,66,false,Drawing.Fonts.SystemBold)
-            healthbar(x+26,rY+26,listW-150,p.Health,p.MaxHealth,65)
-            local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
-            local hs=p.Dead and "DEAD" or (floor(p.Health or 0).."/"..floor(mh))
-            txt(hs,x+14+listW-20-tw(hs,12),rY+14,12,p.Dead and T.red or T.muted,66,false,p.Dead and Drawing.Fonts.SystemBold or Drawing.Fonts.System)
+            if p.Body then
+                local cause=tostring(p.Body.reason or p.Body.category or "unknown")
+                txt(trim(cause,16).."  -  "..ago(p.Body),x+26,rY+24,11,T.muted,66)
+                local tag=p.Body.actor and "ACTOR" or "BODY"
+                txt(tag,x+14+listW-20-tw(tag,12),rY+14,12,p.Body.actor and T.green or T.red,66,false,Drawing.Fonts.SystemBold)
+            else
+                healthbar(x+26,rY+26,listW-150,p.Health,p.MaxHealth,65)
+                local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
+                local hs=p.Dead and "DEAD" or (floor(p.Health or 0).."/"..floor(mh))
+                txt(hs,x+14+listW-20-tw(hs,12),rY+14,12,p.Dead and T.red or T.muted,66,false,p.Dead and Drawing.Fonts.SystemBold or Drawing.Fonts.System)
+            end
         end
     end
     R.clipTop=nil; R.clipBot=nil
@@ -6854,7 +7473,42 @@ local function drawPlayers()
     local dH=h-(cy-y)-14
     card(detX,cy,detW,dH,61,false)
     local p; for _,q in ipairs(src) do if q.Name==GUI.PlayerListSelected then p=q break end end
-    if p then
+    local body; for _,q in ipairs(list) do if q.Body and ("body:"..q.Name)==GUI.PlayerListSelected then body=q break end end
+    if body then
+        local b=body.Body
+        local chipC=b.actor and T.green or T.red
+        txt(trim(body.DisplayName or body.Name,16),detX+16,cy+14,18,T.text,64,false,Drawing.Fonts.SystemBold)
+        txt("@"..trim(body.Name,18)..(body.Online and "" or "  (left)"),detX+16,cy+37,12,T.muted,64)
+        rect(detX+detW-72,cy+16,56,20,mixc(T.panel,chipC,0.22),64,0.9,6)
+        rect(detX+detW-72,cy+16,56,20,chipC,65,0.55,6,false,1)
+        txt(b.actor and "ACTOR" or "BODY",detX+detW-44,cy+21,11,chipC,66,true,Drawing.Fonts.SystemBold)
+        local dist="?"
+        pcall(function()
+            local pos=ragdollPosition(b.model)
+            local cam=Workspace.CurrentCamera.CFrame.Position
+            if pos and cam then dist=tostring(floor((cam-pos).Magnitude)).." studs" end
+        end)
+        local info={
+            {"Cause",tostring(b.reason or "unknown"),T.text},
+            {"Category",tostring(b.category or "-"),T.muted},
+            {"Damage",b.damage and tostring(floor((tonumber(b.damage) or 0)+0.5)) or "-",T.text},
+            {"Died",ago(b),T.muted},
+            {"Distance",dist,T.blue},
+        }
+        for i,rw in ipairs(info) do
+            local rY=cy+64+(i-1)*30
+            rect(detX+16,rY,detW-32,24,T.panel,63,0.55,5)
+            txt(rw[1],detX+26,rY+5,12,T.muted,64)
+            local v=trim(rw[2],20)
+            txt(v,detX+detW-26-tw(v,13),rY+5,13,rw[3] or T.text,64,false,Drawing.Fonts.SystemBold)
+        end
+        GUI.PLBodyESP=GUI.PLBodyESP or {}
+        local onKey=nil
+        for k in pairs(GUI.PLBodyESP) do if k.model==b.model then onKey=k break end end
+        button("plbodyesp",detX+16,cy+dH-44,detW-32,30,onKey and "Remove Body ESP" or "Body ESP",function()
+            if onKey then GUI.PLBodyESP[onKey]=nil else GUI.PLBodyESP[b]=true end
+        end,true,T.blue)
+    elseif p then
         local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
         local alive=not p.Dead; local chipC=alive and T.green or T.red
         txt(trim(p.DisplayName or p.Name,16),detX+16,cy+14,18,T.text,64,false,Drawing.Fonts.SystemBold)
@@ -9724,12 +10378,14 @@ end)
 -- GRAPPLE. Left of screen centre hooks with Q, right with E, and the key is HELD (key up = let go).
 --   If you are already holding one of them yourself, it uses the OTHER hand: pressing a key that
 --   is already down does nothing in game, and letting it go later would drop YOUR hook.
---   Hold   - armed only while HoldKey is down; the hook stays on until it is released, or moves
---            to another player your cursor settles on.
---   Toggle - armed while the switch is on; the hook stays on while you keep looking at them and
---            lets go Grace seconds after you look away (or moves at once to someone else).
---   Both let go when the target leaves the server. The game refuses more than 5 hooks in 2s, so
---   hooks are MinGap apart.
+--   It presses only when the game's spread-jittered ray is at least MinChance likely to land
+--   (see AGX.chance). Once hooked, the key stays held wherever you look; to take over, press and
+--   hold the same key yourself - when you let go the key really goes up and the game drops the
+--   hook. The bot lets go on its own only when the game already has (target left, died,
+--   respawned or shook it off) or Roblox loses focus.
+--   Hold   - new hooks only while HoldKey is down.
+--   Toggle - new hooks while the switch is on.
+--   The game refuses more than 5 hooks in 2s, so hooks are MinGap apart.
 -- TRIGGER BOT. Fires at the player under the cursor while a gun is in your hands and the server
 --   says you are aiming (the character's "Aiming" attribute). Per-gun rules in TB_GUNS, read live
 --   from the game's CharacterFirearmHandler (2026-11-01):
@@ -9746,14 +10402,34 @@ local AG = {
     Enabled = false,
     Mode = "Toggle",       -- "Toggle" | "Hold"
     HoldKey = 0x30,        -- 0  (note: 0 is also the game's hotbar slot 0)
+    ToggleKey = GUI.AGToggleKey,  -- turns Auto Grapple on/off without the menu (unbound by default)
     KeyLeft = 0x51,        -- Q, left hook
     KeyRight = 0x45,       -- E, right hook
-    AwayFrac = 0.18,       -- Toggle: looking further than this x screen height from them...
-    Grace = 0.45,          -- ...for this long lets go
     MinGap = 0.45,         -- seconds between hooks
+    MinChance = 0.85,      -- only hook when the game's spread ray is at least this likely to land
+    Range = 400,           -- the game's base hook range; its spread scales with distance / range
+    Filter = "All",        -- "All" | "Actors" | "Players" (Actor ESP's classification)
+    Retry = true,          -- a hook that lands on something else is let go and fired again
+    Snap = false,          -- turn the camera toward a target near your aim
+    SnapRadius = 90,       -- pixels from your aim that Snap reaches
+    SnapStrength = 0.45,   -- share of the remaining aim error corrected per tick
+    DegPerCount = nil,     -- camera degrees per mouse count, measured by Calibrate Snap
     -- runtime
-    Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off", Pending = nil,
+    Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off", Pending = nil, Chance = nil,
+    Await = nil, HookPart = nil, Lat = nil, Hooks = 0, Hits = 0, Misses = 0, Presses = {},
 }
+do
+    local c = GUI.AGCfg
+    if type(c) == "table" then
+        if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then AG.Filter = c.filter end
+        if type(c.retry) == "boolean" then AG.Retry = c.retry end
+        if type(c.snap) == "boolean" then AG.Snap = c.snap end
+        if type(c.radius) == "number" then AG.SnapRadius = c.radius end
+        if type(c.strength) == "number" then AG.SnapStrength = c.strength end
+        if type(c.dpc) == "number" and c.dpc > 0 then AG.DegPerCount = c.dpc end
+        if type(c.minChance) == "number" then AG.MinChance = c.minChance end
+    end
+end
 local TB = {
     Enabled = false,
     ActorsOnly = false,    -- only players whose Player has Actor = true
@@ -9815,7 +10491,7 @@ end
 
 local function agRelease()
     if AG.Held then pcall(keyrelease, AG.Held) end
-    AG.Held, AG.Target, AG.Pending = nil, nil, nil
+    AG.Held, AG.Target, AG.Pending, AG.Await, AG.HookPart = nil, nil, nil, nil, nil
 end
 
 -- Is this hook key down because YOU hold it? (Our own press reads as down too.)
@@ -9936,6 +10612,165 @@ local function agOn(f, zone, px, py)
     return agSegDist(px, py, f.ax, f.ay, f.bx, f.by) <= r
 end
 
+-- Hook hit chance. The grapple is hitscan from the camera at Mouse.Hit on the press frame, but
+-- the game first adds a random offset of up to `spread` studs on each axis: none within 50
+-- studs, growing linearly to 5 at the hook's range (Grapples.Default, MAX_INACCURACY_OFFSET).
+-- So "cursor on them" is not enough far away: this estimates how likely the jittered ray still
+-- lands on the body capsule, or in the game's own aim-assist box around fast movers
+-- (workspace.GrappleAimAssist, welded to each root part and sized each frame by the client).
+local AGX = { assistOf = {}, assistAt = -10 }
+function AGX.spread(d)
+    local off = (d - 50) / (AG.Range - 50) * 5
+    if off < 0 then return 0 elseif off > 5 then return 5 end
+    return off
+end
+-- share of a uniform jitter [x - off, x + off] that lands inside [lo, hi]
+function AGX.overlap(x, off, lo, hi)
+    if off < 0.01 then return (x >= lo and x <= hi) and 1 or 0 end
+    local a, b = math.max(x - off, lo), math.min(x + off, hi)
+    return b > a and (b - a) / (2 * off) or 0
+end
+-- Map each aim-assist part to its owner through its weld (cheap, refreshed every 2s).
+function AGX.refreshAssist(now)
+    if now - AGX.assistAt < 2 then return end
+    AGX.assistAt = now
+    local map = {}
+    pcall(function()
+        local folder = Workspace:FindFirstChild("GrappleAimAssist")
+        if not folder then return end
+        for _, part in ipairs(folder:GetChildren()) do
+            pcall(function()
+                local w = part:FindFirstChildOfClass("WeldConstraint")
+                local other = w and (w.Part0 ~= part and w.Part0 or w.Part1)
+                local owner = other and other.Parent and other.Parent.Name
+                if type(owner) == "string" then map[owner] = part end
+            end)
+        end
+    end)
+    AGX.assistOf = map
+end
+-- half-size of a player's aim-assist box in studs (0 when they are slow), read every 0.1s
+function AGX.assistHalf(e, nm, now)
+    if e.aAt and now - e.aAt < 0.1 then return e.aHalf or 0 end
+    e.aAt = now
+    local half = 0
+    local part = AGX.assistOf[nm]
+    if part then
+        pcall(function()
+            local sz = part.Size
+            half = math.min(sz.X, sz.Y, sz.Z) / 2
+        end)
+    end
+    if half <= 0.5 then half = 0 end         -- 1x1x1 is the idle size: no help
+    e.aHalf = half
+    return half
+end
+-- chance that a press with the cursor at (px, py) hooks them
+function AGX.chance(f, px, py, half)
+    local s = f.s
+    local off = AGX.spread(f.d)
+    local dx, dy = px - f.cx, py - f.cy
+    local ux, uy = f.ax - f.bx, f.ay - f.by
+    local len = math.sqrt(ux * ux + uy * uy)
+    local w = AIM.BodyR
+    local along, perp
+    if len < 1 then
+        along, perp = 0, math.sqrt(dx * dx + dy * dy) / s
+    else
+        ux, uy = ux / len, uy / len
+        along, perp = (dx * ux + dy * uy) / s, (dx * uy - dy * ux) / s
+    end
+    local k = len / (5 * s)                  -- the body axis, foreshortened on screen
+    local pBody = AGX.overlap(perp, off, -w, w)
+        * AGX.overlap(along, off, -math.max(2.9 * k, w), math.max(2.1 * k, w))
+    local pBox = 0
+    if half > 0 then
+        pBox = AGX.overlap(dx / s, off, -half, half) * AGX.overlap(dy / s, off, -half, half)
+    end
+    return math.max(pBody, pBox)
+end
+
+-- The hitbox the game makes for every hook: an unnamed 5x5x5 Part in Workspace, welded to what
+-- the hook hit (Grapples.Default). Newest children sit at the end, so only the tail is looked at.
+function AGX.hookParts()
+    local list = {}
+    local kids = nil
+    pcall(function() kids = Workspace:GetChildren() end)
+    if not kids then return list end
+    for i = #kids, math.max(1, #kids - 9), -1 do
+        local c = kids[i]
+        pcall(function()
+            if c.Name ~= "Part" or c.ClassName ~= "Part" then return end
+            local sz = c.Size
+            if math.abs(sz.X - 5) > 0.05 or math.abs(sz.Y - 5) > 0.05 then return end
+            local w = c:FindFirstChildOfClass("WeldConstraint")
+            if not w then return end
+            list[#list + 1] = { part = c, hit = w.Part1, id = tostring(c.Address) }
+        end)
+    end
+    return list
+end
+-- Is `part` inside the character named `nm`? (gear and accessories sit a few levels down)
+function AGX.ownedBy(part, nm)
+    local p = part
+    for _ = 1, 5 do
+        if not p then return false end
+        local n = nil
+        pcall(function() n = p.Name end)
+        if n == nm then return true end
+        local up = nil
+        pcall(function() up = p.Parent end)
+        p = up
+    end
+    return false
+end
+-- Camera degrees per mouse count. Turns the camera by a known amount and back, with the menu
+-- closed (an open menu frees the cursor, which then moves instead of the camera).
+function AGX.calibrate()
+    if AGX.calibrating then return end
+    AGX.calibrating = true
+    task.spawn(function()
+        pcall(function() uiNotify("Calibrate Snap", "close the menu and keep the mouse still", 5) end)
+        local t0 = os.clock()
+        while agMenuOpen(os.clock()) and os.clock() - t0 < 10 do task.wait(0.1) end
+        task.wait(0.6)
+        local function yaw()
+            local y = nil
+            pcall(function()
+                local lv = Workspace.CurrentCamera.CFrame.LookVector
+                y = math.deg(math.atan2(-lv.X, -lv.Z))
+            end)
+            return y
+        end
+        local msg
+        local focused = false
+        pcall(function() focused = isrbxactive() and true or false end)
+        if not focused then
+            msg = "Roblox must be focused"
+        else
+            local y0 = yaw()
+            pcall(mousemoverel, 0, 200, 0)
+            task.wait(0.3)
+            local y1 = yaw()
+            pcall(mousemoverel, 0, -200, 0)
+            if not (y0 and y1) then
+                msg = "could not read the camera"
+            else
+                local d = (y1 - y0 + 540) % 360 - 180
+                if math.abs(d) < 0.3 then
+                    msg = "the camera did not turn - is the mouse locked in game?"
+                else
+                    AG.DegPerCount = math.abs(d) / 200
+                    msg = string.format("%.4f degrees per count", AG.DegPerCount)
+                end
+            end
+        end
+        pcall(function() uiNotify("Calibrate Snap", msg, 6) end)
+        AGX.calibrating = false
+    end)
+end
+GUI.AGCalibrate = AGX.calibrate
+
 -- The press gate: on the zone now AND where the cursor will be relative to them when the game
 -- reads it. Judged once per player per zone per tick (the grapple and the trigger both ask).
 local function agSteady(e, f, zone, mx, my, cvx, cvy, now, tickN, lead)
@@ -9957,13 +10792,11 @@ local function agSteady(e, f, zone, mx, my, cvx, cvy, now, tickN, lead)
     return ok
 end
 
--- Actor flag, cached: a Player GetAttribute costs ~5ms.
-local function tbIsActor(e, now)
-    if e.actorAt and now - e.actorAt < 20 then return e.actor end
-    local v = nil
-    pcall(function() v = e.p:GetAttribute("Actor") end)
-    e.actor, e.actorAt = (v == true), now
-    return e.actor
+-- Actor or not, from the Actor ESP's classification (players carry no "Actor" attribute; only
+-- their death ragdolls do). The ESP keeps classifying in the background while a filter needs it.
+local function tbIsActor(nm)
+    local o = nm and ACTOR_ESP.Objects[nm]
+    return o ~= nil and o.role == "actor"
 end
 
 -- Has the bot used up this aim? While true it stops clicking until you lower and re-aim, or a
@@ -10028,6 +10861,9 @@ task.spawn(function()
             if lastTick and now - lastTick < 0.25 then tickDt = tickDt + ((now - lastTick) - tickDt) * 0.2 end
             lastTick = now
             local lead = math.max(AIM.Lead, AIM.LeadTicks * tickDt)
+            -- once hooks have been timed, use the measured press-to-read delay instead (frame rate,
+            -- input lag); clamped so one odd sample cannot swing it far
+            if AG.Lat then lead = math.max(tickDt, math.min(0.2, AG.Lat)) end
             if not AG.Enabled and (AG.Held or AG.Pending) then agRelease() end
             if not AG.Enabled then AG.Status = "off"; holdReady = false end
             if not TB.Enabled then
@@ -10151,7 +10987,7 @@ task.spawn(function()
                     local c = near[i]
                     local f = agFresh(c.e, tickN, now, ppK, cx, cy, cz, zone == "head")
                     if f and agSteady(c.e, f, zone, mx, my, cvx, cvy, now, tickN, lead)
-                        and f.d < bestD and (not want or want(c.e)) then
+                        and f.d < bestD and (not want or want(c.e, c.nm)) then
                         best, bestD, bestF = c.nm, f.d, f
                     end
                 end
@@ -10159,92 +10995,199 @@ task.spawn(function()
             end
 
             -- ================= grapple =================
-            -- Hook `nm`: the key on their side of the screen unless YOU hold it, then the other one.
-            -- Moving a held hook to someone else presses the new key before letting go of the old,
-            -- so you are never left hanging; the same key is let go now and pressed next tick.
+            -- Actor / player filters need the Actor ESP's classification even while its ESP is off.
+            ACTOR_ESP.Classify = ((AG.Enabled and AG.Filter ~= "All") or (TB.Enabled and TB.ActorsOnly)) or nil
+            local function agWant(nm)
+                if AG.Filter == "Actors" then return tbIsActor(nm) end
+                if AG.Filter == "Players" then return not tbIsActor(nm) end
+                return true
+            end
+            -- Hook `nm` with the key on their side of the screen, unless YOU hold it: then the other.
             local function agHook(nm, f)
                 local onLeft = f.cx < vp.X / 2
                 local pref, alt = AG.KeyLeft, AG.KeyRight
                 if not onLeft then pref, alt = alt, pref end
-                -- moving a hook: the free hand first, so the old hook holds until the new one is out
-                if AG.Held and AG.Held == pref then pref, alt = alt, pref end
                 local vk = nil
                 if not agUserHolds(pref) then vk = pref elseif not agUserHolds(alt) then vk = alt end
                 if not vk then
                     AG.Status = "both hooks are in your hands"
                     return false
                 end
-                if AG.Held and vk == AG.Held then
-                    pcall(keyrelease, AG.Held)
-                    AG.Held = nil
-                    AG.Pending = { vk = vk, nm = nm }
-                    AG.Target, AG.OnAt = nm, now
-                    AG.Status = "moving hook to " .. nm
-                    return true
+                -- the game refuses a 6th hook inside 2 seconds
+                local recent = {}
+                for _, t in ipairs(AG.Presses) do
+                    if now - t < 2 then recent[#recent + 1] = t end
                 end
-                local old = AG.Held
+                AG.Presses = recent
+                if #recent >= 5 then
+                    AG.Status = "waiting - game allows 5 hooks per 2s"
+                    return false
+                end
+                -- hitboxes already seen, so the new one can be told apart afterwards (no Workspace
+                -- scan here: with hundreds of children it would delay the press by milliseconds)
+                local pre = {}
+                for id in pairs(AGX.known or {}) do pre[id] = true end
                 agPress(vk, now)
-                if old then pcall(keyrelease, old) end
-                AG.Target, AG.OnAt = nm, now
+                recent[#recent + 1] = now
+                AG.Await, AG.HookPart = { t0 = now, nm = nm, pre = pre }, nil
+                AG.Hooks = AG.Hooks + 1
+                AG.Target, AG.OnAt, AG.DropAt = nm, now, now
                 AG.Status = "holding " .. agKeyName(vk) .. " on " .. nm
                 return true
+            end
+            -- Best hook among the players nearest the cursor. What counts is where your aim is,
+            -- relative to them, when the game reads the key (`lead` from now): flicking ONTO someone
+            -- fires on that point alone, so a fast sweep still lands; moving OFF someone needs both
+            -- now and then to hold. Also returns the nearest target's aim error, for Snap.
+            local function pickHook()
+                AGX.refreshAssist(now)
+                local best, bestP, bestF, seenP = nil, -1, nil, nil
+                local snapX, snapY, snapD = nil, nil, math.huge
+                local ig = AG.Ignore
+                for i = 1, math.min(3, #near) do
+                    local c = near[i]
+                    if agWant(c.nm) and not (ig and ig.nm == c.nm and now < ig.untilT) then
+                        local f = agFresh(c.e, tickN, now, ppK, cx, cy, cz, false)
+                        if f then
+                            local half = AGX.assistHalf(c.e, c.nm, now)
+                            local rvx, rvy = cvx - (c.e.svx or 0), cvy - (c.e.svy or 0)
+                            local px, py = mx + rvx * lead, my + rvy * lead
+                            local pNow = AGX.chance(f, mx, my, half)
+                            local pAt = AGX.chance(f, px, py, half)
+                            local p = pAt >= pNow and pAt or math.min(pNow, pAt)
+                            if p > 0 and (not seenP or p > seenP) then seenP = p end
+                            if p >= AG.MinChance and p > bestP then best, bestP, bestF = c.nm, p, f end
+                            local ex, ey = f.cx - px, f.cy - py
+                            local d = math.sqrt(ex * ex + ey * ey)
+                            if d < snapD then snapX, snapY, snapD = ex, ey, d end
+                        end
+                    end
+                end
+                AG.Chance = seenP
+                return best, bestF, snapX, snapY, snapD
+            end
+            -- Snap: turn toward a target near your aim by a share of the error each tick. In game the
+            -- cursor is locked to the screen centre, so this is a camera turn and needs the measured
+            -- degrees per mouse count (Calibrate Snap); with a free cursor it moves the cursor.
+            local function agSnap(ex, ey, d)
+                if not (AG.Snap and ex) or d > AG.SnapRadius or d < 1 then return end
+                local locked = math.abs(mx - vp.X / 2) < 2 and math.abs(my - vp.Y / 2) < 2
+                local s = AG.SnapStrength
+                local kx, ky
+                if locked then
+                    local dpc = AG.DegPerCount
+                    if not dpc then AG.Status = "Snap needs Calibrate Snap"; return end
+                    kx = math.deg(math.atan(ex / ppK)) / dpc * s
+                    ky = math.deg(math.atan(ey / ppK)) / dpc * s
+                else
+                    kx, ky = ex * s, ey * s
+                end
+                -- whole counts only; the remainder carries into the next tick
+                kx, ky = kx + (AGX.remX or 0), ky + (AGX.remY or 0)
+                local ix = kx >= 0 and math.floor(kx) or math.ceil(kx)
+                local iy = ky >= 0 and math.floor(ky) or math.ceil(ky)
+                ix, iy = math.max(-120, math.min(120, ix)), math.max(-120, math.min(120, iy))
+                AGX.remX, AGX.remY = kx - ix, ky - iy
+                if ix ~= 0 or iy ~= 0 then pcall(mousemoverel, 0, ix, iy) end
+            end
+            -- Has the game already let go of them? They left, their body was replaced (death,
+            -- respawn, slot load), or they shook the hook off. Attribute reads are slow, so those
+            -- are only checked a few times a second.
+            local function agTargetLost(e)
+                if not e or (now - (e.at or 0)) > 2.5 or not e.hrp then return true end
+                local lost = false
+                pcall(function() if e.hrp.Parent == nil then lost = true end end)
+                if lost or now - (AG.DropAt or 0) < 0.25 then return lost end
+                AG.DropAt = now
+                pcall(function()
+                    if e.p:GetAttribute("Dead") == true then lost = true; return end
+                    local ch = e.hrp.Parent
+                    if ch and ch:GetAttribute("Shaking") then lost = true end
+                end)
+                return lost
+            end
+            -- The confirmed hook's hitbox was removed: the game (or server) dropped it.
+            local function agHookGone()
+                if not AG.HookPart or now - (AG.HookCheckAt or 0) < 0.15 then return false end
+                AG.HookCheckAt = now
+                local ok, par = pcall(function() return AG.HookPart.Parent end)
+                return ok and par == nil
+            end
+            local function agRetrySoon(why)
+                agRelease()
+                AG.PressedAt = now - AG.MinGap + 0.12
+                AG.Status = why
             end
             if AG.Enabled then
                 local hk = false
                 pcall(function() hk = iskeypressed(AG.HoldKey) and true or false end)
                 if not hk then holdReady = true end
                 local armed = AG.Mode ~= "Hold" or (holdReady and hk)
-                if not armed or blocked then
-                    if AG.Held or AG.Pending then agRelease() end
-                    AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
-                elseif AG.Pending then
-                    -- second half of a same-key move: the key was let go last tick
-                    local pd = AG.Pending
-                    AG.Pending = nil
-                    if agUserHolds(pd.vk) then
-                        AG.Target = nil
-                        AG.Status = "armed"
-                    else
-                        agPress(pd.vk, now)
-                        AG.Target, AG.OnAt = pd.nm, now
-                        AG.Status = "holding " .. agKeyName(pd.vk) .. " on " .. tostring(pd.nm)
+                -- Confirm the last hook: the new hitbox and what it is welded to. A hook that landed on
+                -- something else is let go and fired again. Not seen in 0.4s: keep holding as before.
+                local aw = AG.Held and AG.Await
+                if aw and now - (aw.polledAt or 0) >= 0.03 then
+                    aw.polledAt = now
+                    local found = nil
+                    local known = AGX.known or {}
+                    for _, h in ipairs(AGX.hookParts()) do
+                        if not aw.pre[h.id] and not found then found = h end
+                        known[h.id] = true
                     end
-                elseif AG.Held then
-                    local e = AG.Target and cache[AG.Target]
-                    -- e.at stops moving once they are off the player list (left the server)
-                    local gone = (not e) or (now - (e.at or 0)) > 2.5
-                    local switchTo, switchF = nil, nil
-                    if not gone then
-                        local f = agFresh(e, tickN, now, ppK, cx, cy, cz, false)
-                        local lookAt = false
-                        if f then
-                            local lim = math.max(vp.Y * AG.AwayFrac, 2.5 * AIM.BodyR * f.s)
-                            lookAt = (mx - f.cx) ^ 2 + (my - f.cy) ^ 2 <= lim * lim
+                    local n = 0
+                    for _ in pairs(known) do n = n + 1 end
+                    AGX.known = n > 40 and {} or known
+                    if found then
+                        AG.Await = nil
+                        local lat = now - aw.t0
+                        AG.Lat = AG.Lat and (AG.Lat + (lat - AG.Lat) * 0.3) or lat
+                        if AGX.ownedBy(found.hit, aw.nm) then
+                            AG.Hits = AG.Hits + 1
+                            AG.HookPart, AG.HookCheckAt = found.part, now
+                        else
+                            AG.Misses = AG.Misses + 1
+                            if AG.Retry then agRetrySoon("missed " .. tostring(aw.nm) .. " - retrying") end
                         end
-                        if lookAt then AG.OnAt = now end
-                        -- settled on someone else: move the hook to them (both modes). Needs the
-                        -- core, not just the body: swinging past a bystander must not steal it.
-                        if now - AG.PressedAt >= AG.MinGap then
-                            local other, of = pick("core")
-                            if other and other ~= AG.Target then switchTo, switchF = other, of end
-                        end
-                        -- Toggle lets go once you have looked away for a while; Hold keeps it
-                        -- until the key is released.
-                        if AG.Mode ~= "Hold" and not switchTo and (now - AG.OnAt) > AG.Grace then gone = true end
+                    elseif now - aw.t0 > 0.4 then
+                        AG.Await = nil
                     end
-                    if switchTo then
-                        agHook(switchTo, switchF)
-                    elseif gone then
+                end
+                if AG.Held then
+                    -- The hook stays on wherever you look until YOU take it: press and hold the same
+                    -- key, and when you let go the key goes up for real and the game drops the hook.
+                    -- The bot only lets go itself when the game already has, or Roblox loses focus.
+                    local down = true
+                    pcall(function() down = iskeypressed(AG.Held) and true or false end)
+                    if not down and now - AG.PressedAt > 0.15 then
+                        AG.Ignore = { nm = AG.Target, untilT = now + 1 }
+                        AG.Held, AG.Target, AG.PressedAt, AG.Await, AG.HookPart = nil, nil, now, nil, nil
+                        AG.Status = "you let go"
+                    elseif not focused then
                         agRelease()
-                        AG.Status = "armed"
-                    else
+                        AG.Status = blocked
+                    elseif agTargetLost(AG.Target and cache[AG.Target]) then
+                        agRelease()
+                        AG.PressedAt = now
+                        AG.Status = "target lost - let go"
+                    elseif agHookGone() then
+                        agRetrySoon("hook dropped - retrying")
+                    elseif not AG.Status:find("retrying", 1, true) then
                         AG.Status = "holding " .. agKeyName(AG.Held) .. " on " .. tostring(AG.Target)
                     end
+                elseif not armed or blocked then
+                    AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
                 else
-                    AG.Status = "armed"
-                    if now - AG.PressedAt >= AG.MinGap then
-                        local best, f = pick("body")
-                        if best then agHook(best, f) end
+                    local best, f, sx, sy, sd = pickHook()
+                    if best and now - AG.PressedAt >= AG.MinGap then
+                        agHook(best, f)
+                    else
+                        agSnap(sx, sy, sd)
+                        if AG.Chance then
+                            AG.Status = string.format("aim closer (%d%% < %d%%)",
+                                math.floor(AG.Chance * 100 + 0.5), math.floor(AG.MinChance * 100 + 0.5))
+                        elseif not AG.Status:find("Snap needs", 1, true) then
+                            AG.Status = "armed"
+                        end
                     end
                 end
             end
@@ -10322,7 +11265,7 @@ task.spawn(function()
                     TB.Status = "armed (" .. gunName .. ")"
                     if now - TB.LastAt >= (prof.gap or 0.3) then
                         local want = nil
-                        if TB.ActorsOnly then want = function(e) return tbIsActor(e, now) end end
+                        if TB.ActorsOnly then want = function(_, nm) return tbIsActor(nm) end end
                         local best = pick(zone, want)
                         if best then
                             if prof.auto then
@@ -10342,6 +11285,226 @@ task.spawn(function()
     end
     agRelease()
     tbRelease()
+end)
+
+-- KEY INDICATOR + HOTKEYS PANEL (Drawing only - neither touches the game).
+--   Key box: a pulsing Q / E while the bot holds that hook for you, so you know which key to press
+--   to take it over. Hidden while Auto Grapple is off.
+--   Hotkeys panel: shows whether Auto Grapple is ON (with its toggle key) or OFF.
+--   With the menu open both can be placed: drag to move; the key box also resizes by its corner
+--   grip (or the wheel, if the executor reports it). This loop also runs the Auto Grapple toggle
+--   key, since the grapple loop itself idles while the feature is off.
+if GUI.AGKeyBox == nil then GUI.AGKeyBox = true end
+if GUI.AGPanel == nil then GUI.AGPanel = true end
+GUI.AGKeySize = GUI.AGKeySize or 64
+task.spawn(function()
+    local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
+    local function mix(a, b, t)
+        return rgb(a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t)
+    end
+    local DIM, ACCENT, WHITE = { 90, 90, 100 }, { 255, 205, 60 }, { 245, 245, 250 }
+    local BLUE, GREY = rgb(80, 175, 255), rgb(125, 125, 135)
+
+    local function sq(filled, corner, z)
+        local d = Drawing.new("Square")
+        d.Filled, d.Corner, d.ZIndex, d.Visible = filled, corner, z, false
+        return d
+    end
+    local function tx(size, z, center)
+        local d = Drawing.new("Text")
+        d.Size, d.ZIndex, d.Center, d.Outline, d.Visible = size, z, center, false, false
+        return d
+    end
+
+    -- key box
+    local bg = sq(true, 10, 60)
+    bg.Color, bg.Transparency = rgb(14, 14, 16), 0.85
+    local border = sq(false, 10, 61)
+    local letter = tx(20, 62, true)
+    pcall(function() letter.Font = Drawing.Fonts.SystemBold end)
+    local grip = sq(true, 3, 63)
+    grip.Color = rgb(150, 150, 160)
+    local boxParts = { bg, border, letter, grip }
+
+    -- hotkeys panel, styled after Matcha's own: dark card, wand icon + bold blue title, a thin
+    -- divider, one row with the state in a right-hand column. System fonts throughout (the
+    -- Drawing default is a pixel font).
+    local PW, PH = 168, 54
+    local function line(z)
+        local l = Drawing.new("Line")
+        l.ZIndex, l.Visible = z, false
+        return l
+    end
+    local function font(t, bold)
+        pcall(function() t.Font = bold and Drawing.Fonts.SystemBold or Drawing.Fonts.System end)
+        return t
+    end
+    local pBg = sq(true, 8, 60)
+    pBg.Color, pBg.Transparency = rgb(13, 13, 15), 0.94
+    local pBorder = sq(false, 8, 61)
+    pBorder.Color, pBorder.Thickness, pBorder.Transparency = rgb(255, 255, 255), 1, 0.07
+    local wand = line(62)
+    wand.Color, wand.Thickness = BLUE, 2
+    local spark1, spark2 = line(62), line(62)
+    spark1.Color, spark1.Thickness, spark2.Color, spark2.Thickness = BLUE, 1, BLUE, 1
+    local pTitle = font(tx(13, 62, false), true)
+    pTitle.Text, pTitle.Color = "Hotkeys", BLUE
+    local pLine = line(62)
+    pLine.Color, pLine.Thickness, pLine.Transparency = rgb(255, 255, 255), 1, 0.08
+    local pDot = Drawing.new("Circle")
+    pDot.Filled, pDot.Radius, pDot.NumSides, pDot.ZIndex, pDot.Visible = true, 2, 12, 62, false
+    local pLabel = font(tx(12, 62, false), false)
+    pLabel.Text = "Auto Grapple"
+    local pKey = font(tx(11, 62, true), true)
+    local panelParts = { pBg, pBorder, wand, spark1, spark2, pTitle, pLine, pDot, pLabel, pKey }
+
+    local wheel = 0
+    local conn = nil
+    pcall(function()
+        conn = game:GetService("UserInputService").InputBegan:Connect(function(input)
+            pcall(function()
+                if tostring(input.UserInputType):find("MouseWheel") then
+                    local z = input.Position.Z
+                    if z > 0 then wheel = wheel + 1 elseif z < 0 then wheel = wheel - 1 end
+                end
+            end)
+        end)
+    end)
+
+    local function setVis(list, v) for _, d in ipairs(list) do d.Visible = v end end
+    local drag, wasDown, boxShown, panelShown = nil, true, false, false
+    local keyReady, keyWas = false, false
+    while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
+        local now = os.clock()
+
+        -- Auto Grapple toggle key, with the release-arm guard (a key reading stuck-down never fires)
+        local tk = AG.ToggleKey
+        if tk then
+            local d = false
+            pcall(function() d = iskeypressed(tk) and true or false end)
+            if not keyReady then
+                if not d then keyReady = true end
+            elseif d and not keyWas and not (GUI.PLTyping and GUI.PLTyping(tk)) then
+                local on = not AG.Enabled
+                if GUI._uiAG then pcall(function() GUI._uiAG:Set(on) end) end
+                AG.Enabled = on
+            end
+            keyWas = d
+        end
+
+        local holding = AG.Enabled and AG.Held
+        local menu = agMenuOpen(now)
+        local showBox = GUI.AGKeyBox and AG.Enabled and (holding or menu)
+        local showPanel = GUI.AGPanel
+
+        local vp = nil
+        if (showBox and not GUI.AGKeyX) or (showPanel and not GUI.AGPanelX) then
+            pcall(function() vp = Workspace.CurrentCamera.ViewportSize end)
+        end
+        if showBox and not GUI.AGKeyX then
+            GUI.AGKeyX = vp and (vp.X / 2 - GUI.AGKeySize / 2) or 400
+            GUI.AGKeyY = vp and (vp.Y * 0.72) or 400
+        end
+        if showPanel and not GUI.AGPanelX then
+            GUI.AGPanelX = vp and (vp.X - PW - 18) or 600
+            GUI.AGPanelY = vp and (vp.Y * 0.35) or 300
+        end
+
+        -- placing: one drag target at a time, picked on the press
+        if menu and (showBox or showPanel) then
+            local mx, my, down = nil, nil, false
+            pcall(function() mx, my = Mouse.X, Mouse.Y; down = ismouse1pressed() and true or false end)
+            if mx then
+                local x, y, s = GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize
+                local onBox = showBox and mx >= x and mx <= x + s and my >= y and my <= y + s
+                local onGrip = showBox and mx >= x + s - 14 and mx <= x + s + 4 and my >= y + s - 14 and my <= y + s + 4
+                local px, py = GUI.AGPanelX, GUI.AGPanelY
+                local onPanel = showPanel and mx >= px and mx <= px + PW and my >= py and my <= py + PH
+                if down then
+                    if not wasDown then
+                        if onGrip then drag = { kind = "size", mx = mx, my = my, s = s }
+                        elseif onBox then drag = { kind = "box", ox = mx - x, oy = my - y }
+                        elseif onPanel then drag = { kind = "panel", ox = mx - px, oy = my - py } end
+                    end
+                    if drag and drag.kind == "size" then
+                        GUI.AGKeySize = math.max(28, math.min(200, drag.s + math.max(mx - drag.mx, my - drag.my)))
+                    elseif drag and drag.kind == "box" then
+                        GUI.AGKeyX, GUI.AGKeyY = mx - drag.ox, my - drag.oy
+                    elseif drag and drag.kind == "panel" then
+                        GUI.AGPanelX, GUI.AGPanelY = mx - drag.ox, my - drag.oy
+                    end
+                else
+                    drag = nil
+                end
+                wasDown = down
+                if onBox and wheel ~= 0 then
+                    GUI.AGKeySize = math.max(28, math.min(200, GUI.AGKeySize + wheel * 6))
+                end
+            end
+        else
+            drag, wasDown = nil, true
+        end
+        wheel = 0
+
+        -- key box
+        if showBox then
+            local x, y, s = GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize
+            local pulse = holding and (0.5 + 0.5 * math.sin(now * 7)) or 0
+            bg.Position, bg.Size = Vector2.new(x, y), Vector2.new(s, s)
+            border.Position, border.Size = Vector2.new(x, y), Vector2.new(s, s)
+            border.Thickness = holding and 2 or 1
+            border.Color = holding and mix(DIM, ACCENT, pulse) or rgb(DIM[1], DIM[2], DIM[3])
+            local ts = math.floor(s * (holding and 0.6 or 0.3))
+            letter.Text = holding and agKeyName(AG.Held) or "Q / E"
+            letter.Size = ts
+            letter.Color = holding and mix(WHITE, ACCENT, pulse) or rgb(DIM[1], DIM[2], DIM[3])
+            letter.Position = Vector2.new(x + s / 2, y + s / 2 - ts / 2)
+            grip.Position, grip.Size = Vector2.new(x + s - 10, y + s - 10), Vector2.new(8, 8)
+            if not boxShown then
+                boxShown = true
+                bg.Visible, border.Visible, letter.Visible = true, true, true
+            end
+            grip.Visible = menu
+        elseif boxShown then
+            boxShown = false
+            setVis(boxParts, false)
+        end
+
+        -- hotkeys panel
+        if showPanel then
+            local x, y = GUI.AGPanelX, GUI.AGPanelY
+            local on = AG.Enabled == true
+            pBg.Position, pBg.Size = Vector2.new(x, y), Vector2.new(PW, PH)
+            pBorder.Position, pBorder.Size = Vector2.new(x, y), Vector2.new(PW, PH)
+            -- wand: a short diagonal with a two-stroke sparkle at its tip
+            wand.From, wand.To = Vector2.new(x + 12, y + 20), Vector2.new(x + 19, y + 13)
+            spark1.From, spark1.To = Vector2.new(x + 21, y + 8), Vector2.new(x + 21, y + 12)
+            spark2.From, spark2.To = Vector2.new(x + 19, y + 10), Vector2.new(x + 23, y + 10)
+            pTitle.Position = Vector2.new(x + 29, y + 8)
+            pLine.From, pLine.To = Vector2.new(x + 10, y + 28), Vector2.new(x + PW - 10, y + 28)
+            local rowY = y + 33
+            pDot.Position = Vector2.new(x + 15, rowY + 7)
+            pDot.Color = on and BLUE or rgb(85, 85, 95)
+            pLabel.Position = Vector2.new(x + 24, rowY)
+            pLabel.Color = on and rgb(230, 230, 236) or rgb(115, 115, 125)
+            local key = on and (AG.ToggleKey and agKeyName(AG.ToggleKey) or "ON") or "off"
+            pKey.Text = key
+            pKey.Color = on and BLUE or rgb(100, 100, 110)
+            pKey.Position = Vector2.new(x + PW - 26, rowY + 1)
+            if not panelShown then
+                panelShown = true
+                setVis(panelParts, true)
+            end
+        elseif panelShown then
+            panelShown = false
+            setVis(panelParts, false)
+        end
+
+        task.wait(1 / 60)
+    end
+    pcall(function() if conn then conn:Disconnect() end end)
+    for _, d in ipairs(boxParts) do pcall(function() d:Remove() end) end
+    for _, d in ipairs(panelParts) do pcall(function() d:Remove() end) end
 end)
 -- /AUTO GRAPPLE
 
@@ -10538,15 +11701,39 @@ end)()
         secEnt:Toggle("Actors", ACTOR_ESP.Enabled, function(v)
             ACTOR_ESP.Enabled = v
             if v and actorEspScan then
-                pcall(actorEspScan)
-                local registered, alive = 0, 0
-                for _, data in pairs(ACTOR_ESP.Objects) do
-                    registered = registered + 1
-                    if data.liveModel then alive = alive + 1 end
-                end
-                uiNotify("Actors", registered .. " registered, " .. alive .. " alive", 4)
+                local ok, err = pcall(actorEspScan)
+                local n, list = ACTOR_ESP.summary("actor")
+                local msg = n .. " actor" .. (n == 1 and "" or "s")
+                if n > 0 then msg = msg .. ": " .. list end
+                if not ok then msg = msg .. " | scan error: " .. tostring(err) end
+                uiNotify("Actors", msg, 8)
             end
         end)
+        secEnt:Toggle("Show Staff", STAFF_ESP.Enabled, function(v)
+            STAFF_ESP.Enabled = v
+            if v and ACTOR_ESP.Enabled and actorEspScan then
+                local ok, err = pcall(actorEspScan)
+                local n, list = ACTOR_ESP.summary("staff")
+                local msg = n .. " staff"
+                if n > 0 then msg = msg .. ": " .. list end
+                if not ok then msg = msg .. " | scan error: " .. tostring(err) end
+                uiNotify("Staff ESP", msg, 8)
+            elseif v and not ACTOR_ESP.Enabled then
+                uiNotify("Staff ESP", "Turn on Actors first", 4)
+            end
+        end):Tooltip("shows players on staff data (StaffState set, no actor flags) on the ESP overlay. Actors must be enabled first")
+        secEnt:Toggle("Nearby Only", ACTOR_ESP.NearbyOnly, function(v)
+            ACTOR_ESP.NearbyOnly = v
+        end):Tooltip("only scan and show actors/staff within Scan Radius of the camera. Cheaper in full servers")
+        secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
+            ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
+        end):Tooltip("studs from the camera that Nearby Only covers")
+        secEnt:Slider("Actor Range", ACTOR_ESP.MaxDistance, 100, 100, 100000, "", function(v)
+            ACTOR_ESP.MaxDistance = math.max(100, math.floor(tonumber(v) or ACTOR_ESP.MaxDistance))
+        end):Tooltip("studs from the camera that actor/staff labels are drawn to (Nearby Only overrides it with Scan Radius). Click the number to type one")
+        secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 1, 0, 1000, "", function(v)
+            ACTOR_ESP.MaxLabels = math.max(0, math.floor(tonumber(v) or ACTOR_ESP.MaxLabels))
+        end):Tooltip("most actor/staff labels drawn at once - the nearest win. 0 hides all labels (detection keeps running). Click the number to type one")
     end)
 
     -- ===== Tab: Style =====
@@ -12190,8 +13377,40 @@ end)()
         local AG = GUI.AG
         if AG then
             local secAG = tab:Section("Auto Grapple", "Right", "Hooks players under your cursor")
-            secAG:Toggle("Auto Grapple", AG.Enabled, function(v) AG.Enabled = v == true end)
-                :Tooltip("When your cursor is on a player's body it presses Q (left of centre) or E (right) and HOLDS it, so the hook stays on. If you already hold one of them yourself it uses the other hand. Moves the hook when your cursor settles on someone else. Never while the menu is open or Roblox is in the background.")
+            GUI._uiAG = secAG:Toggle("Auto Grapple", AG.Enabled, function(v) AG.Enabled = v == true end)
+                :Tooltip("When a hook on the player under your cursor is likely to land, it presses Q (left of centre) or E (right) and HOLDS it, even when they leave your view. To take over, press and hold the same key yourself; letting go releases the hook. If you already hold one key it uses the other hand. No new hooks while the menu is open or Roblox is in the background.")
+            secAG:Slider("Min Hit Chance", math.floor(AG.MinChance * 100 + 0.5), 1, 50, 100, "%", function(v)
+                local n = tonumber(v)
+                if n then AG.MinChance = math.max(0.5, math.min(1, n / 100)) end
+            end):Tooltip("the game adds random spread to hooks past 50 studs. It only hooks when the jittered hook is at least this likely to land. Lower = more hooks at range, more misses")
+            pcall(function()
+                secAG:Dropdown("Targets", AG.Filter, { "All", "Actors", "Players" }, false, function(v)
+                    local m = type(v) == "table" and v[1] or v
+                    if m == "All" or m == "Actors" or m == "Players" then AG.Filter = m end
+                end)
+            end)
+            secAG:Toggle("Retry Misses", AG.Retry, function(v) AG.Retry = v == true end)
+                :Tooltip("after each hook it checks what the hook stuck to. If it landed on something other than the target, it lets go and fires again a moment later")
+            secAG:Toggle("Snap", AG.Snap, function(v) AG.Snap = v == true end)
+                :Tooltip("turns your camera toward a target that is near your aim so the hook lands. Run Calibrate Snap once first. Off = it only fires, never moves your view")
+            secAG:Slider("Snap Radius", AG.SnapRadius, 5, 10, 400, "px", function(v)
+                AG.SnapRadius = math.floor(tonumber(v) or AG.SnapRadius)
+            end):Tooltip("how far from your aim (on screen) Snap starts pulling")
+            secAG:Slider("Snap Strength", math.floor(AG.SnapStrength * 100 + 0.5), 5, 5, 100, "%", function(v)
+                local n = tonumber(v)
+                if n then AG.SnapStrength = math.max(0.05, math.min(1, n / 100)) end
+            end):Tooltip("share of the remaining aim error corrected each tick. Higher snaps harder; lower looks smoother")
+            secAG:Button("Calibrate Snap", function() if GUI.AGCalibrate then GUI.AGCalibrate() end end)
+            pcall(function()
+                secAG:Keybind("Toggle Key", AG.ToggleKey and toName(AG.ToggleKey) or "", function(k)
+                    local vk = toVK(k)
+                    AG.ToggleKey, GUI.AGToggleKey = vk, vk
+                end, "click, then press a key to turn Auto Grapple on/off without opening the menu")
+            end)
+            secAG:Toggle("Hotkeys Panel", GUI.AGPanel ~= false, function(v) GUI.AGPanel = v == true end)
+                :Tooltip("on-screen panel showing whether Auto Grapple is ON (with its toggle key) or OFF. Drag it while the menu is open")
+            secAG:Toggle("Key Indicator", GUI.AGKeyBox ~= false, function(v) GUI.AGKeyBox = v == true end)
+                :Tooltip("on-screen box with a pulsing Q or E while the bot holds that hook for you - press and hold that key to take over. With the menu open: drag the box to move it, drag its corner (or scroll over it) to resize")
             pcall(function()
                 secAG:Dropdown("Mode", AG.Mode, { "Toggle", "Hold" }, false, function(v)
                     local m = type(v) == "table" and v[1] or v
@@ -12258,7 +13477,10 @@ end)()
             secInfo:Label(function()
                 local AG = GUI.AG
                 if not AG then return "Auto Grapple:  unavailable" end
-                return "Auto Grapple:  " .. tostring(AG.Status or "off") .. ((AG.Enabled and AG.Mode == "Hold") and "   (Hold)" or "")
+                local judged = (AG.Hits or 0) + (AG.Misses or 0)
+                local acc = judged > 0 and string.format("   hits %d/%d (%d%%)", AG.Hits, judged, math.floor(AG.Hits / judged * 100 + 0.5)) or ""
+                local lat = AG.Lat and string.format("   lag %dms", math.floor(AG.Lat * 1000 + 0.5)) or ""
+                return "Auto Grapple:  " .. tostring(AG.Status or "off") .. ((AG.Enabled and AG.Mode == "Hold") and "   (Hold)" or "") .. acc .. lat
             end)
         end)
         pcall(function()
