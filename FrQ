@@ -431,7 +431,7 @@ local ACTOR_ESP = {
     ScanRadius  = 500,
     MaxLabels   = 25,
     MaxDistance = 100000,
-    TextSize    = 17,
+    TextSize    = 13,
     FontIndex   = 3,
     Objects     = {},
 }
@@ -5731,7 +5731,7 @@ end)()  -- /Music
         local s = Drawing.new("Square")
         s.Color = COLOR_PILL
         s.Filled = true
-        s.Corner = 5
+        s.Corner = 4
         s.Transparency = 0.85
         s.Visible = false
         s.ZIndex = 53
@@ -5744,14 +5744,14 @@ end)()  -- /Music
         icon.Filled = false
         icon.Thickness = 1
         icon.NumSides = 16
-        icon.Radius = 4
+        icon.Radius = 3
         icon.Visible = false
         icon.ZIndex = 54
         local dot = Drawing.new("Circle")
         dot.Color = COLOR_DIM
         dot.Filled = true
         dot.NumSides = 8
-        dot.Radius = 1.2
+        dot.Radius = 1
         dot.Visible = false
         dot.ZIndex = 54
         return {
@@ -6075,8 +6075,8 @@ end)()  -- /Music
         end
         local size = ACTOR_ESP.TextSize
         local cw = size * 0.55
-        local h = size + 6
-        local pad = 6
+        local h = size + 4
+        local pad = 4
 
         local cands = {}
         for name, e in pairs(ACTOR_ESP.Objects) do
@@ -6139,21 +6139,21 @@ end)()  -- /Music
             else
                 e.state = "shown"
                 local distStr = tostring(math.floor(dist))
-                local distW = pad + #distStr * cw + 5 + 9 + pad
+                local distW = pad + #distStr * cw + 4 + 6 + pad
                 local nameW = pad + #name * cw + pad
-                local left = screenPos.X - (distW + 4 + nameW) / 2
-                local top = screenPos.Y - h - 8
+                local left = screenPos.X - (distW + 3 + nameW) / 2
+                local top = screenPos.Y - h - 5
                 local textY = top + (h - size) / 2
 
                 e.distBg.Position = Vector2.new(left, top)
                 e.distBg.Size = Vector2.new(distW, h)
                 e.distText.Text = distStr
                 e.distText.Position = Vector2.new(left + pad, textY)
-                local iconX = left + pad + #distStr * cw + 5 + 4
+                local iconX = left + pad + #distStr * cw + 4 + 3
                 e.icon.Position = Vector2.new(iconX, top + h / 2)
                 e.dot.Position = Vector2.new(iconX, top + h / 2)
 
-                local nameLeft = left + distW + 4
+                local nameLeft = left + distW + 3
                 e.nameBg.Position = Vector2.new(nameLeft, top)
                 e.nameBg.Size = Vector2.new(nameW, h)
                 e.nameText.Position = Vector2.new(nameLeft + pad, textY)
