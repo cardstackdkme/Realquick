@@ -6644,6 +6644,10 @@ saveConfig = function()
             agKeyX       = GUI.AGKeyX,
             agKeyY       = GUI.AGKeyY,
             agKeySize    = GUI.AGKeySize,
+            agPanel      = GUI.AGPanel ~= false,
+            agPanelX     = GUI.AGPanelX,
+            agPanelY     = GUI.AGPanelY,
+            agToggleKey  = GUI.AG and GUI.AG.ToggleKey or GUI.AGToggleKey,
         },
         ores = oresOn,
         titan = {
@@ -6737,6 +6741,14 @@ loadConfig = function()
             GUI.AGKeyX, GUI.AGKeyY = f.agKeyX, f.agKeyY
         end
         if type(f.agKeySize)    == "number"  then GUI.AGKeySize            = math.max(28, math.min(200, f.agKeySize)) end
+        if type(f.agPanel)      == "boolean" then GUI.AGPanel              = f.agPanel      end
+        if type(f.agPanelX)     == "number" and type(f.agPanelY) == "number" then
+            GUI.AGPanelX, GUI.AGPanelY = f.agPanelX, f.agPanelY
+        end
+        if type(f.agToggleKey)  == "number"  then
+            GUI.AGToggleKey = f.agToggleKey
+            if GUI.AG then GUI.AG.ToggleKey = f.agToggleKey end
+        end
         if type(f.deathLog)     == "boolean" then
             DEATHLOG.Enabled    = f.deathLog
             -- Re-seed so ragdolls already on the ground when the script
@@ -10144,6 +10156,7 @@ local AG = {
     Enabled = false,
     Mode = "Toggle",       -- "Toggle" | "Hold"
     HoldKey = 0x30,        -- 0  (note: 0 is also the game's hotbar slot 0)
+    ToggleKey = GUI.AGToggleKey,  -- turns Auto Grapple on/off without the menu (unbound by default)
     KeyLeft = 0x51,        -- Q, left hook
     KeyRight = 0x45,       -- E, right hook
     MinGap = 0.45,         -- seconds between hooks
@@ -10830,11 +10843,15 @@ task.spawn(function()
     tbRelease()
 end)
 
--- KEY INDICATOR. A box with the hook key the bot is holding for you (pulsing Q / E), so you know
--- which key to press to take the hook over. Shown while the bot holds a key, and while the menu
--- is open so it can be placed: drag it to move, drag its corner (or scroll over it, if the
--- executor reports the wheel) to resize. Drawing only - it never touches the game.
+-- KEY INDICATOR + HOTKEYS PANEL (Drawing only - neither touches the game).
+--   Key box: a pulsing Q / E while the bot holds that hook for you, so you know which key to press
+--   to take it over. Hidden while Auto Grapple is off.
+--   Hotkeys panel: shows whether Auto Grapple is ON (with its toggle key) or OFF.
+--   With the menu open both can be placed: drag to move; the key box also resizes by its corner
+--   grip (or the wheel, if the executor reports it). This loop also runs the Auto Grapple toggle
+--   key, since the grapple loop itself idles while the feature is off.
 if GUI.AGKeyBox == nil then GUI.AGKeyBox = true end
+if GUI.AGPanel == nil then GUI.AGPanel = true end
 GUI.AGKeySize = GUI.AGKeySize or 64
 task.spawn(function()
     local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
@@ -10842,17 +10859,48 @@ task.spawn(function()
         return rgb(a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t)
     end
     local DIM, ACCENT, WHITE = { 90, 90, 100 }, { 255, 205, 60 }, { 245, 245, 250 }
-    local bg = Drawing.new("Square")
-    bg.Filled, bg.Corner, bg.Color, bg.Transparency, bg.ZIndex = true, 10, rgb(14, 14, 16), 0.85, 60
-    local border = Drawing.new("Square")
-    border.Filled, border.Corner, border.ZIndex = false, 10, 61
-    local letter = Drawing.new("Text")
-    letter.Center, letter.Outline, letter.ZIndex = true, false, 62
+    local BLUE, GREY = rgb(80, 175, 255), rgb(125, 125, 135)
+
+    local function sq(filled, corner, z)
+        local d = Drawing.new("Square")
+        d.Filled, d.Corner, d.ZIndex, d.Visible = filled, corner, z, false
+        return d
+    end
+    local function tx(size, z, center)
+        local d = Drawing.new("Text")
+        d.Size, d.ZIndex, d.Center, d.Outline, d.Visible = size, z, center, false, false
+        return d
+    end
+
+    -- key box
+    local bg = sq(true, 10, 60)
+    bg.Color, bg.Transparency = rgb(14, 14, 16), 0.85
+    local border = sq(false, 10, 61)
+    local letter = tx(20, 62, true)
     pcall(function() letter.Font = Drawing.Fonts.SystemBold end)
-    local grip = Drawing.new("Square")
-    grip.Filled, grip.Corner, grip.Color, grip.ZIndex = true, 3, rgb(150, 150, 160), 63
-    local parts = { bg, border, letter, grip }
-    for _, d in ipairs(parts) do d.Visible = false end
+    local grip = sq(true, 3, 63)
+    grip.Color = rgb(150, 150, 160)
+    local boxParts = { bg, border, letter, grip }
+
+    -- hotkeys panel
+    local PW, PH = 180, 52
+    local pBg = sq(true, 8, 60)
+    pBg.Color, pBg.Transparency = rgb(15, 15, 15), 0.92
+    local pBorder = sq(false, 8, 61)
+    pBorder.Color, pBorder.Thickness, pBorder.Transparency = rgb(255, 255, 255), 1, 0.08
+    local pTitle = tx(13, 62, false)
+    pTitle.Text, pTitle.Color = "Hotkeys", BLUE
+    pcall(function() pTitle.Font = Drawing.Fonts.SystemBold end)
+    local pLine = sq(true, 1, 62)
+    pLine.Color, pLine.Transparency = BLUE, 0.9
+    local pDot = Drawing.new("Circle")
+    pDot.Filled, pDot.Radius, pDot.NumSides, pDot.ZIndex, pDot.Visible = true, 2.5, 10, 62, false
+    local pLabel = tx(12, 62, false)
+    pLabel.Text = "Auto Grapple"
+    local pBadge = sq(true, 4, 62)
+    pBadge.Color, pBadge.Transparency = rgb(255, 255, 255), 0.08
+    local pKey = tx(11, 63, true)
+    local panelParts = { pBg, pBorder, pTitle, pLine, pDot, pLabel, pBadge, pKey }
 
     local wheel = 0
     local conn = nil
@@ -10867,47 +10915,84 @@ task.spawn(function()
         end)
     end)
 
-    local drag, resize, wasDown, shown = nil, nil, true, false
+    local function setVis(list, v) for _, d in ipairs(list) do d.Visible = v end end
+    local drag, wasDown, boxShown, panelShown = nil, true, false, false
+    local keyReady, keyWas = false, false
     while GUI.Running and _G.__RQ_AUTOPARRY == myGen do
         local now = os.clock()
+
+        -- Auto Grapple toggle key, with the release-arm guard (a key reading stuck-down never fires)
+        local tk = AG.ToggleKey
+        if tk then
+            local d = false
+            pcall(function() d = iskeypressed(tk) and true or false end)
+            if not keyReady then
+                if not d then keyReady = true end
+            elseif d and not keyWas and not (GUI.PLTyping and GUI.PLTyping(tk)) then
+                local on = not AG.Enabled
+                if GUI._uiAG then pcall(function() GUI._uiAG:Set(on) end) end
+                AG.Enabled = on
+            end
+            keyWas = d
+        end
+
         local holding = AG.Enabled and AG.Held
         local menu = agMenuOpen(now)
-        if GUI.AGKeyBox and AG.Enabled and (holding or menu) then
-            if not GUI.AGKeyX then
-                local vp = nil
-                pcall(function() vp = Workspace.CurrentCamera.ViewportSize end)
-                GUI.AGKeyX = vp and (vp.X / 2 - GUI.AGKeySize / 2) or 400
-                GUI.AGKeyY = vp and (vp.Y * 0.72) or 400
-            end
-            local x, y, s = GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize
-            if menu then
-                local mx, my, down = nil, nil, false
-                pcall(function() mx, my = Mouse.X, Mouse.Y; down = ismouse1pressed() and true or false end)
-                if mx then
-                    local onBox = mx >= x and mx <= x + s and my >= y and my <= y + s
-                    local onGrip = mx >= x + s - 14 and mx <= x + s + 4 and my >= y + s - 14 and my <= y + s + 4
-                    if down then
-                        if not wasDown then
-                            if onGrip then resize = { mx = mx, my = my, s = s }
-                            elseif onBox then drag = { ox = mx - x, oy = my - y } end
-                        end
-                        if resize then
-                            s = math.max(28, math.min(200, resize.s + math.max(mx - resize.mx, my - resize.my)))
-                        elseif drag then
-                            x, y = mx - drag.ox, my - drag.oy
-                        end
-                    else
-                        drag, resize = nil, nil
-                    end
-                    wasDown = down
-                    if onBox and wheel ~= 0 then s = math.max(28, math.min(200, s + wheel * 6)) end
-                    GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize = x, y, s
-                end
-            else
-                drag, resize, wasDown = nil, nil, true
-            end
-            wheel = 0
+        local showBox = GUI.AGKeyBox and AG.Enabled and (holding or menu)
+        local showPanel = GUI.AGPanel
 
+        local vp = nil
+        if (showBox and not GUI.AGKeyX) or (showPanel and not GUI.AGPanelX) then
+            pcall(function() vp = Workspace.CurrentCamera.ViewportSize end)
+        end
+        if showBox and not GUI.AGKeyX then
+            GUI.AGKeyX = vp and (vp.X / 2 - GUI.AGKeySize / 2) or 400
+            GUI.AGKeyY = vp and (vp.Y * 0.72) or 400
+        end
+        if showPanel and not GUI.AGPanelX then
+            GUI.AGPanelX = vp and (vp.X - PW - 18) or 600
+            GUI.AGPanelY = vp and (vp.Y * 0.35) or 300
+        end
+
+        -- placing: one drag target at a time, picked on the press
+        if menu and (showBox or showPanel) then
+            local mx, my, down = nil, nil, false
+            pcall(function() mx, my = Mouse.X, Mouse.Y; down = ismouse1pressed() and true or false end)
+            if mx then
+                local x, y, s = GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize
+                local onBox = showBox and mx >= x and mx <= x + s and my >= y and my <= y + s
+                local onGrip = showBox and mx >= x + s - 14 and mx <= x + s + 4 and my >= y + s - 14 and my <= y + s + 4
+                local px, py = GUI.AGPanelX, GUI.AGPanelY
+                local onPanel = showPanel and mx >= px and mx <= px + PW and my >= py and my <= py + PH
+                if down then
+                    if not wasDown then
+                        if onGrip then drag = { kind = "size", mx = mx, my = my, s = s }
+                        elseif onBox then drag = { kind = "box", ox = mx - x, oy = my - y }
+                        elseif onPanel then drag = { kind = "panel", ox = mx - px, oy = my - py } end
+                    end
+                    if drag and drag.kind == "size" then
+                        GUI.AGKeySize = math.max(28, math.min(200, drag.s + math.max(mx - drag.mx, my - drag.my)))
+                    elseif drag and drag.kind == "box" then
+                        GUI.AGKeyX, GUI.AGKeyY = mx - drag.ox, my - drag.oy
+                    elseif drag and drag.kind == "panel" then
+                        GUI.AGPanelX, GUI.AGPanelY = mx - drag.ox, my - drag.oy
+                    end
+                else
+                    drag = nil
+                end
+                wasDown = down
+                if onBox and wheel ~= 0 then
+                    GUI.AGKeySize = math.max(28, math.min(200, GUI.AGKeySize + wheel * 6))
+                end
+            end
+        else
+            drag, wasDown = nil, true
+        end
+        wheel = 0
+
+        -- key box
+        if showBox then
+            local x, y, s = GUI.AGKeyX, GUI.AGKeyY, GUI.AGKeySize
             local pulse = holding and (0.5 + 0.5 * math.sin(now * 7)) or 0
             bg.Position, bg.Size = Vector2.new(x, y), Vector2.new(s, s)
             border.Position, border.Size = Vector2.new(x, y), Vector2.new(s, s)
@@ -10919,22 +11004,49 @@ task.spawn(function()
             letter.Color = holding and mix(WHITE, ACCENT, pulse) or rgb(DIM[1], DIM[2], DIM[3])
             letter.Position = Vector2.new(x + s / 2, y + s / 2 - ts / 2)
             grip.Position, grip.Size = Vector2.new(x + s - 10, y + s - 10), Vector2.new(8, 8)
-            if not shown then
-                shown = true
+            if not boxShown then
+                boxShown = true
                 bg.Visible, border.Visible, letter.Visible = true, true, true
             end
             grip.Visible = menu
-        else
-            wheel = 0
-            if shown then
-                shown = false
-                for _, d in ipairs(parts) do d.Visible = false end
-            end
+        elseif boxShown then
+            boxShown = false
+            setVis(boxParts, false)
         end
+
+        -- hotkeys panel
+        if showPanel then
+            local x, y = GUI.AGPanelX, GUI.AGPanelY
+            local on = AG.Enabled == true
+            pBg.Position, pBg.Size = Vector2.new(x, y), Vector2.new(PW, PH)
+            pBorder.Position, pBorder.Size = Vector2.new(x, y), Vector2.new(PW, PH)
+            pTitle.Position = Vector2.new(x + 12, y + 8)
+            pLine.Position, pLine.Size = Vector2.new(x + 10, y + 27), Vector2.new(PW - 20, 2)
+            local rowY = y + 31
+            pDot.Position = Vector2.new(x + 15, rowY + 10)
+            pDot.Color = on and BLUE or GREY
+            pLabel.Position = Vector2.new(x + 24, rowY + 3)
+            pLabel.Color = on and rgb(235, 235, 240) or GREY
+            local key = on and (AG.ToggleKey and agKeyName(AG.ToggleKey) or "ON") or "OFF"
+            local bw = math.max(26, #key * 7 + 12)
+            pBadge.Position, pBadge.Size = Vector2.new(x + PW - 10 - bw, rowY + 2), Vector2.new(bw, 16)
+            pKey.Text = key
+            pKey.Color = on and rgb(235, 235, 240) or GREY
+            pKey.Position = Vector2.new(x + PW - 10 - bw / 2, rowY + 4)
+            if not panelShown then
+                panelShown = true
+                setVis(panelParts, true)
+            end
+        elseif panelShown then
+            panelShown = false
+            setVis(panelParts, false)
+        end
+
         task.wait(1 / 60)
     end
     pcall(function() if conn then conn:Disconnect() end end)
-    for _, d in ipairs(parts) do pcall(function() d:Remove() end) end
+    for _, d in ipairs(boxParts) do pcall(function() d:Remove() end) end
+    for _, d in ipairs(panelParts) do pcall(function() d:Remove() end) end
 end)
 -- /AUTO GRAPPLE
 
@@ -12807,12 +12919,20 @@ end)()
         local AG = GUI.AG
         if AG then
             local secAG = tab:Section("Auto Grapple", "Right", "Hooks players under your cursor")
-            secAG:Toggle("Auto Grapple", AG.Enabled, function(v) AG.Enabled = v == true end)
+            GUI._uiAG = secAG:Toggle("Auto Grapple", AG.Enabled, function(v) AG.Enabled = v == true end)
                 :Tooltip("When a hook on the player under your cursor is likely to land, it presses Q (left of centre) or E (right) and HOLDS it, even when they leave your view. To take over, press and hold the same key yourself; letting go releases the hook. If you already hold one key it uses the other hand. No new hooks while the menu is open or Roblox is in the background.")
             secAG:Slider("Min Hit Chance", math.floor(AG.MinChance * 100 + 0.5), 1, 50, 100, "%", function(v)
                 local n = tonumber(v)
                 if n then AG.MinChance = math.max(0.5, math.min(1, n / 100)) end
             end):Tooltip("the game adds random spread to hooks past 50 studs. It only hooks when the jittered hook is at least this likely to land. Lower = more hooks at range, more misses")
+            pcall(function()
+                secAG:Keybind("Toggle Key", AG.ToggleKey and toName(AG.ToggleKey) or "", function(k)
+                    local vk = toVK(k)
+                    AG.ToggleKey, GUI.AGToggleKey = vk, vk
+                end, "click, then press a key to turn Auto Grapple on/off without opening the menu")
+            end)
+            secAG:Toggle("Hotkeys Panel", GUI.AGPanel ~= false, function(v) GUI.AGPanel = v == true end)
+                :Tooltip("on-screen panel showing whether Auto Grapple is ON (with its toggle key) or OFF. Drag it while the menu is open")
             secAG:Toggle("Key Indicator", GUI.AGKeyBox ~= false, function(v) GUI.AGKeyBox = v == true end)
                 :Tooltip("on-screen box with a pulsing Q or E while the bot holds that hook for you - press and hold that key to take over. With the menu open: drag the box to move it, drag its corner (or scroll over it) to resize")
             pcall(function()
