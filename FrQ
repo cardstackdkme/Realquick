@@ -11326,25 +11326,37 @@ task.spawn(function()
     grip.Color = rgb(150, 150, 160)
     local boxParts = { bg, border, letter, grip }
 
-    -- hotkeys panel
-    local PW, PH = 180, 52
+    -- hotkeys panel, styled after Matcha's own: dark card, wand icon + bold blue title, a thin
+    -- divider, one row with the state in a right-hand column. System fonts throughout (the
+    -- Drawing default is a pixel font).
+    local PW, PH = 168, 54
+    local function line(z)
+        local l = Drawing.new("Line")
+        l.ZIndex, l.Visible = z, false
+        return l
+    end
+    local function font(t, bold)
+        pcall(function() t.Font = bold and Drawing.Fonts.SystemBold or Drawing.Fonts.System end)
+        return t
+    end
     local pBg = sq(true, 8, 60)
-    pBg.Color, pBg.Transparency = rgb(15, 15, 15), 0.92
+    pBg.Color, pBg.Transparency = rgb(13, 13, 15), 0.94
     local pBorder = sq(false, 8, 61)
-    pBorder.Color, pBorder.Thickness, pBorder.Transparency = rgb(255, 255, 255), 1, 0.08
-    local pTitle = tx(13, 62, false)
+    pBorder.Color, pBorder.Thickness, pBorder.Transparency = rgb(255, 255, 255), 1, 0.07
+    local wand = line(62)
+    wand.Color, wand.Thickness = BLUE, 2
+    local spark1, spark2 = line(62), line(62)
+    spark1.Color, spark1.Thickness, spark2.Color, spark2.Thickness = BLUE, 1, BLUE, 1
+    local pTitle = font(tx(13, 62, false), true)
     pTitle.Text, pTitle.Color = "Hotkeys", BLUE
-    pcall(function() pTitle.Font = Drawing.Fonts.SystemBold end)
-    local pLine = sq(true, 1, 62)
-    pLine.Color, pLine.Transparency = BLUE, 0.9
+    local pLine = line(62)
+    pLine.Color, pLine.Thickness, pLine.Transparency = rgb(255, 255, 255), 1, 0.08
     local pDot = Drawing.new("Circle")
-    pDot.Filled, pDot.Radius, pDot.NumSides, pDot.ZIndex, pDot.Visible = true, 2.5, 10, 62, false
-    local pLabel = tx(12, 62, false)
+    pDot.Filled, pDot.Radius, pDot.NumSides, pDot.ZIndex, pDot.Visible = true, 2, 12, 62, false
+    local pLabel = font(tx(12, 62, false), false)
     pLabel.Text = "Auto Grapple"
-    local pBadge = sq(true, 4, 62)
-    pBadge.Color, pBadge.Transparency = rgb(255, 255, 255), 0.08
-    local pKey = tx(11, 63, true)
-    local panelParts = { pBg, pBorder, pTitle, pLine, pDot, pLabel, pBadge, pKey }
+    local pKey = font(tx(11, 62, true), true)
+    local panelParts = { pBg, pBorder, wand, spark1, spark2, pTitle, pLine, pDot, pLabel, pKey }
 
     local wheel = 0
     local conn = nil
@@ -11464,19 +11476,21 @@ task.spawn(function()
             local on = AG.Enabled == true
             pBg.Position, pBg.Size = Vector2.new(x, y), Vector2.new(PW, PH)
             pBorder.Position, pBorder.Size = Vector2.new(x, y), Vector2.new(PW, PH)
-            pTitle.Position = Vector2.new(x + 12, y + 8)
-            pLine.Position, pLine.Size = Vector2.new(x + 10, y + 27), Vector2.new(PW - 20, 2)
-            local rowY = y + 31
-            pDot.Position = Vector2.new(x + 15, rowY + 10)
-            pDot.Color = on and BLUE or GREY
-            pLabel.Position = Vector2.new(x + 24, rowY + 3)
-            pLabel.Color = on and rgb(235, 235, 240) or GREY
-            local key = on and (AG.ToggleKey and agKeyName(AG.ToggleKey) or "ON") or "OFF"
-            local bw = math.max(26, #key * 7 + 12)
-            pBadge.Position, pBadge.Size = Vector2.new(x + PW - 10 - bw, rowY + 2), Vector2.new(bw, 16)
+            -- wand: a short diagonal with a two-stroke sparkle at its tip
+            wand.From, wand.To = Vector2.new(x + 12, y + 20), Vector2.new(x + 19, y + 13)
+            spark1.From, spark1.To = Vector2.new(x + 21, y + 8), Vector2.new(x + 21, y + 12)
+            spark2.From, spark2.To = Vector2.new(x + 19, y + 10), Vector2.new(x + 23, y + 10)
+            pTitle.Position = Vector2.new(x + 29, y + 8)
+            pLine.From, pLine.To = Vector2.new(x + 10, y + 28), Vector2.new(x + PW - 10, y + 28)
+            local rowY = y + 33
+            pDot.Position = Vector2.new(x + 15, rowY + 7)
+            pDot.Color = on and BLUE or rgb(85, 85, 95)
+            pLabel.Position = Vector2.new(x + 24, rowY)
+            pLabel.Color = on and rgb(230, 230, 236) or rgb(115, 115, 125)
+            local key = on and (AG.ToggleKey and agKeyName(AG.ToggleKey) or "ON") or "off"
             pKey.Text = key
-            pKey.Color = on and rgb(235, 235, 240) or GREY
-            pKey.Position = Vector2.new(x + PW - 10 - bw / 2, rowY + 4)
+            pKey.Color = on and BLUE or rgb(100, 100, 110)
+            pKey.Position = Vector2.new(x + PW - 26, rowY + 1)
             if not panelShown then
                 panelShown = true
                 setVis(panelParts, true)
