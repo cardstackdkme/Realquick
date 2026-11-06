@@ -5622,7 +5622,8 @@ end)()  -- /Music
 -- small time budget, and a player's attributes are only re-read when
 -- their character model changes (slot loads and respawns both make a
 -- new one), plus a slow safety re-read.
-do
+-- Wrapped in its own function: the main chunk is near Lua's 200-local cap.
+;(function()
     local SLOT_FILE    = CONFIG_DIR .. "/actor_slots.txt"
     local PART_NAMES   = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
     local BUDGET       = 0.002
@@ -6093,7 +6094,7 @@ do
 
     loadKnownSlots()
     _G.__RQ_ACTOR_ESP = ACTOR_ESP
-end
+end)()
 
 -- Helper: hide all labels for a simple ESP type
 local function hideESPLabels(objects)
