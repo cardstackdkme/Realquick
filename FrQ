@@ -3279,7 +3279,7 @@ end
 -- DEAD BODIES for the Player List's Dead tab. While that tab is open, Workspace's top level is read
 -- in chunks (it can hold 700+ children) for <Name>_ragdoll models; each body's death attributes
 -- (Reason, Category, Damage, Timestamp, Actor) are read once. GUI.PLBodies is the result.
--- GUI.PLMarkBody (set from the details pane) keeps a world label on one body, list open or not.
+-- Bodies switched on with the details pane's Body ESP button stay drawn, list open or not.
 ;(function()
     local checked = {}
     task.spawn(function()
@@ -3331,45 +3331,96 @@ end
         end
     end)
 
-    -- marker on the body picked in the details pane
+    -- BODY ESP: bodies switched on from the details pane (GUI.PLBodyESP[body] = true) get the same
+    -- pills as the Actor ESP - distance + crosshair, then the name - with the name in blue.
+    GUI.PLBodyESP = GUI.PLBodyESP or {}
     task.spawn(function()
-        local label = Drawing.new("Text")
-        label.Center, label.Outline, label.Size, label.ZIndex, label.Visible = true, true, 14, 55, false
-        label.Color = Color3.fromRGB(255, 70, 70)
-        pcall(function() label.Font = Drawing.Fonts.SystemBold end)
-        local partOf, part = nil, nil
+        local PILL, TEXT, DIM, BLUE = Color3.fromRGB(24, 24, 28), Color3.fromRGB(235, 235, 240),
+            Color3.fromRGB(170, 170, 178), Color3.fromRGB(80, 175, 255)
+        local SIZE, PAD = 13, 4
+        local H, CW = SIZE + 4, SIZE * 0.55
+        local font = nil
+        pcall(function() font = TITAN_FONTS[ACTOR_ESP.FontIndex].font end)
+        local function pill()
+            local s = Drawing.new("Square")
+            s.Color, s.Filled, s.Corner, s.Transparency, s.ZIndex, s.Visible = PILL, true, 4, 0.85, 53, false
+            return s
+        end
+        local function text(c)
+            local t = Drawing.new("Text")
+            t.Color, t.Size, t.Center, t.Outline, t.ZIndex, t.Visible = c, SIZE, false, false, 54, false
+            if font then t.Font = font end
+            return t
+        end
+        local function circle(filled, r)
+            local c = Drawing.new("Circle")
+            c.Color, c.Filled, c.Radius, c.NumSides, c.ZIndex, c.Visible = DIM, filled, r, filled and 8 or 16, 54, false
+            if not filled then c.Thickness = 1 end
+            return c
+        end
+        local KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
+        local drawn = {}       -- [body] = { drawings..., part, shown }
+        local function hide(d)
+            if d.shown == false then return end
+            d.shown = false
+            for _, k in ipairs(KEYS) do d[k].Visible = false end
+        end
+        local function free(d) for _, k in ipairs(KEYS) do pcall(function() d[k]:Remove() end) end end
         while GUI.Running do
-            local b = GUI.PLMarkBody
-            local shown = false
-            if b and b.model then
-                if partOf ~= b.model then
-                    partOf, part = b.model, nil
+            local on = GUI.PLBodyESP
+            for b, d in pairs(drawn) do
+                if not on[b] then free(d); drawn[b] = nil end
+            end
+            local cam = nil
+            pcall(function() cam = Workspace.CurrentCamera.CFrame.Position end)
+            for b in pairs(on) do
+                local d = drawn[b]
+                if not d then
+                    d = { distBg = pill(), distText = text(TEXT), icon = circle(false, 3), dot = circle(true, 1),
+                          nameBg = pill(), nameText = text(BLUE) }
+                    d.nameText.Text = tostring(b.name)
+                    drawn[b] = d
+                end
+                if not d.part then
                     for _, n in ipairs({ "HumanoidRootPart", "Torso", "UpperTorso", "Head" }) do
-                        pcall(function() part = part or b.model:FindFirstChild(n) end)
+                        pcall(function() d.part = d.part or b.model:FindFirstChild(n) end)
                     end
                 end
                 local pos = nil
-                if part then pcall(function() pos = part.Position end) end
+                if d.part then pcall(function() pos = d.part.Position end) end
+                local s, vis = nil, false
+                if pos and cam then s, vis = WorldToScreen(Vector3.new(pos.X, pos.Y + 2, pos.Z)) end
                 if not pos then
                     local alive = false
                     pcall(function() alive = b.model.Parent ~= nil end)
-                    if not alive then GUI.PLMarkBody = nil end
+                    if not alive then on[b] = nil end        -- the body despawned
+                    hide(d)
+                elseif not (s and vis) then
+                    hide(d)
                 else
-                    local cam = nil
-                    pcall(function() cam = Workspace.CurrentCamera.CFrame.Position end)
-                    local s, on = WorldToScreen(Vector3.new(pos.X, pos.Y + 2.5, pos.Z))
-                    if s and on then
-                        local d = cam and math.floor((cam - pos).Magnitude) or 0
-                        label.Text = "BODY  " .. tostring(b.name) .. "  " .. d
-                        label.Position = Vector2.new(s.X, s.Y - 16)
-                        shown = true
+                    local distStr = tostring(math.floor((cam - pos).Magnitude))
+                    local name = tostring(b.name)
+                    local distW = PAD + #distStr * CW + 4 + 6 + PAD
+                    local nameW = PAD + #name * CW + PAD
+                    local left = s.X - (distW + 3 + nameW) / 2
+                    local top = s.Y - H - 5
+                    local ty = top + (H - SIZE) / 2
+                    d.distBg.Position, d.distBg.Size = Vector2.new(left, top), Vector2.new(distW, H)
+                    d.distText.Text, d.distText.Position = distStr, Vector2.new(left + PAD, ty)
+                    local ix = left + PAD + #distStr * CW + 4 + 3
+                    d.icon.Position, d.dot.Position = Vector2.new(ix, top + H / 2), Vector2.new(ix, top + H / 2)
+                    local nl = left + distW + 3
+                    d.nameBg.Position, d.nameBg.Size = Vector2.new(nl, top), Vector2.new(nameW, H)
+                    d.nameText.Position = Vector2.new(nl + PAD, ty)
+                    if not d.shown then
+                        d.shown = true
+                        for _, k in ipairs(KEYS) do d[k].Visible = true end
                     end
                 end
             end
-            label.Visible = shown
             task.wait(1 / 60)
         end
-        pcall(function() label:Remove() end)
+        for _, d in pairs(drawn) do free(d) end
     end)
 end)()
 
@@ -7451,10 +7502,12 @@ local function drawPlayers()
             local v=trim(rw[2],20)
             txt(v,detX+detW-26-tw(v,13),rY+5,13,rw[3] or T.text,64,false,Drawing.Fonts.SystemBold)
         end
-        local marked=GUI.PLMarkBody and GUI.PLMarkBody.model==b.model
-        button("plmark",detX+16,cy+dH-44,detW-32,30,marked and "Unmark Body" or "Mark Body",function()
-            if GUI.PLMarkBody and GUI.PLMarkBody.model==b.model then GUI.PLMarkBody=nil else GUI.PLMarkBody=b end
-        end,true,T.red)
+        GUI.PLBodyESP=GUI.PLBodyESP or {}
+        local onKey=nil
+        for k in pairs(GUI.PLBodyESP) do if k.model==b.model then onKey=k break end end
+        button("plbodyesp",detX+16,cy+dH-44,detW-32,30,onKey and "Remove Body ESP" or "Body ESP",function()
+            if onKey then GUI.PLBodyESP[onKey]=nil else GUI.PLBodyESP[b]=true end
+        end,true,T.blue)
     elseif p then
         local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
         local alive=not p.Dead; local chipC=alive and T.green or T.red
