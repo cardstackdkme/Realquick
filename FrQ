@@ -5603,8 +5603,8 @@ end)()  -- /Music
 -- ACTOR / STAFF ESP ENGINE
 -- ============================================================
 -- The server never tells other clients who is an actor, so a player is
--- classified from public signals. Any HIGH flag tags them as an actor;
--- LOW flags only count in pairs.
+-- classified from public signals and their name is colored by tier:
+-- any HIGH flag = green, two LOW flags = yellow, one LOW flag = red.
 --   HIGH  shared slot   - two players on the same slot (Character attr)
 --                         at once; only staff-loaded slots can be shared
 --   HIGH  died as actor - their slot was seen on an Actor=true ragdoll
@@ -5616,15 +5616,19 @@ end)()  -- /Music
 --   LOW   low health    - MaxHealth under 150
 --   LOW   gen 1 gear    - GearBoxes holds ODMBoxes (gen 2 holds Canisters)
 -- StaffState only exists on staff and actor slots, so a player who has it
--- but no actor flags is shown as staff.
+-- but no HIGH flag or LOW pair is shown as staff (pink, Show Staff on).
 --
 -- Scan runs on ESPLoop's ~1s tick (actorEspScan); the full-server slot
 -- pass runs every third tick. Render touches only cached refs.
 do
     local SLOT_FILE = CONFIG_DIR .. "/actor_slots.txt"
     local PART_NAMES = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
-    local COLOR_ACTOR = Color3.fromRGB(80, 220, 100)
-    local COLOR_STAFF = Color3.fromRGB(255, 150, 241)
+    local TIER_COLORS = {
+        high   = Color3.fromRGB(40, 255, 90),
+        medium = Color3.fromRGB(255, 225, 0),
+        low    = Color3.fromRGB(255, 55, 55),
+        staff  = Color3.fromRGB(255, 120, 230),
+    }
     local COLOR_TEXT  = Color3.fromRGB(235, 235, 240)
     local COLOR_DIM   = Color3.fromRGB(170, 170, 178)
     local COLOR_PILL  = Color3.fromRGB(24, 24, 28)
@@ -5745,12 +5749,11 @@ do
             icon     = icon,
             dot      = dot,
             nameBg   = newPill(),
-            roleText = newText(COLOR_ACTOR),
             nameText = newText(COLOR_TEXT),
         }
     end
 
-    local DRAW_KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "roleText", "nameText" }
+    local DRAW_KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
 
     local function hideEntry(e)
         for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = false end
@@ -5884,12 +5887,17 @@ do
             if type(r.maxHp) == "number" and r.maxHp < 150 then low[#low + 1] = "low health" end
             if r.char and hasGen1Gear(r.char) then low[#low + 1] = "gen 1 gear" end
 
-            local role
-            if #high > 0 or #low >= 2 then
-                role = "actor"
+            local tier
+            if #high > 0 then
+                tier = "high"
+            elseif #low >= 2 then
+                tier = "medium"
             elseif r.staffState ~= nil then
-                role = "staff"
+                tier = "staff"
+            elseif #low == 1 then
+                tier = "low"
             end
+            local role = tier and (tier == "staff" and "staff" or "actor")
 
             local e = ACTOR_ESP.Objects[r.name]
             if role then
@@ -5899,6 +5907,7 @@ do
                     ACTOR_ESP.Objects[r.name] = e
                 end
                 e.role = role
+                e.tier = tier
                 for j = 1, #low do high[#high + 1] = low[j] end
                 e.flags = table.concat(high, ", ")
                 if e.char ~= r.char then e.part = nil end
@@ -5916,8 +5925,10 @@ do
 
     function ACTOR_ESP.update()
         ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
-        local playerPos = getPlayerPos()
-        if not playerPos then ACTOR_ESP.state = "no local position"; return end
+        local origin
+        pcall(function() origin = Workspace.CurrentCamera.CFrame.Position end)
+        origin = origin or getPlayerPos()
+        if not origin then ACTOR_ESP.state = "no camera position"; return end
         ACTOR_ESP.state = "ok"
         local showStaff = STAFF_ESP.Enabled
         local size = ACTOR_ESP.TextSize
@@ -5944,7 +5955,7 @@ do
 
             local screenPos, onScreen, dist
             if pos then
-                local dx, dy, dz = playerPos.X - pos.X, playerPos.Y - pos.Y, playerPos.Z - pos.Z
+                local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
                 dist = math.sqrt(dx * dx + dy * dy + dz * dz)
                 if dist <= ACTOR_ESP.MaxDistance then
                     screenPos, onScreen = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z))
@@ -5957,10 +5968,9 @@ do
                 hideEntry(e)
             else
                 e.state = "shown"
-                local roleStr = e.role == "staff" and "STAFF" or "ACTOR"
                 local distStr = tostring(math.floor(dist))
                 local distW = pad + #distStr * cw + 5 + 9 + pad
-                local nameW = pad + (#roleStr + 1) * cw + #name * cw + pad
+                local nameW = pad + #name * cw + pad
                 local left = screenPos.X - (distW + 4 + nameW) / 2
                 local top = screenPos.Y - h - 8
                 local textY = top + (h - size) / 2
@@ -5976,11 +5986,9 @@ do
                 local nameLeft = left + distW + 4
                 e.nameBg.Position = Vector2.new(nameLeft, top)
                 e.nameBg.Size = Vector2.new(nameW, h)
-                e.roleText.Text = roleStr
-                e.roleText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
-                e.roleText.Position = Vector2.new(nameLeft + pad, textY)
                 e.nameText.Text = name
-                e.nameText.Position = Vector2.new(nameLeft + pad + (#roleStr + 1) * cw, textY)
+                e.nameText.Color = TIER_COLORS[e.tier] or COLOR_TEXT
+                e.nameText.Position = Vector2.new(nameLeft + pad, textY)
 
                 for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = true end
             end
