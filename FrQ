@@ -427,6 +427,8 @@ local PLAYER_ESP = {
 -- Objects shape: [playerName] = { role, flags, char, part, <drawings> }
 local ACTOR_ESP = {
     Enabled     = false,
+    NearbyOnly  = false,
+    ScanRadius  = 500,
     MaxDistance = 5000,
     TextSize    = 17,
     FontIndex   = 3,
@@ -5602,42 +5604,48 @@ end)()  -- /Music
 -- ============================================================
 -- ACTOR / STAFF ESP ENGINE
 -- ============================================================
--- The server never tells other clients who is an actor, so a player is
--- classified from public signals and their name is colored by tier:
--- any HIGH flag = green, two LOW flags = yellow, one LOW flag = red.
---   HIGH  shared slot   - two players on the same slot (Character attr)
---                         at once; only staff-loaded slots can be shared
---   HIGH  died as actor - their slot was seen on an Actor=true ragdoll
---   HIGH  known slot    - slot saved from an earlier session
---   HIGH  civilian      - Branch attribute is 0
---   HIGH  hidden name   - DisplayName is only "?"-style symbols
---   HIGH  Player name   - DisplayName contains the word "Player"
---   HIGH  Player char   - Name attribute contains the word "Player"
---   LOW   low health    - MaxHealth under 150
---   LOW   gen 1 gear    - GearBoxes holds ODMBoxes (gen 2 holds Canisters)
--- StaffState only exists on staff and actor slots, so a player who has it
--- but no HIGH flag or LOW pair is shown as staff (pink, Show Staff on).
+-- The server never tells other clients who is an actor, so players are
+-- flagged from public signals. Every flag is high priority (green name):
+--   shared slot   - 2+ players hold the same slot id (Character attr);
+--                   only staff-loaded slots can be shared. Slots saved
+--                   from earlier sessions count too.
+--   Player name   - Name or DisplayName attribute has the word "Player"
+--   died as actor - an Actor=true <name>_ragdoll was seen for their slot
+--   hidden player - a character in Workspace with no Player object
+--                   (staff hid them from the leaderboard)
+-- A player with StaffState but no flag is staff (pink, Show Staff on).
 --
--- Scan runs on ESPLoop's ~1s tick (actorEspScan); the full-server slot
--- pass runs every third tick. Render touches only cached refs.
+-- Measured Matcha costs: GetAttribute ~1.5ms, Workspace:FindFirstChild
+-- ~2.6ms, reading .Character ~0.07ms. So work runs each frame under a
+-- small time budget, and a player's attributes are only re-read when
+-- their character model changes (slot loads and respawns both make a
+-- new one), plus a slow safety re-read.
 do
-    local SLOT_FILE = CONFIG_DIR .. "/actor_slots.txt"
-    local PART_NAMES = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
-    local TIER_COLORS = {
-        high   = Color3.fromRGB(40, 255, 90),
-        medium = Color3.fromRGB(255, 225, 0),
-        low    = Color3.fromRGB(255, 55, 55),
-        staff  = Color3.fromRGB(255, 120, 230),
-    }
-    local COLOR_TEXT  = Color3.fromRGB(235, 235, 240)
-    local COLOR_DIM   = Color3.fromRGB(170, 170, 178)
-    local COLOR_PILL  = Color3.fromRGB(24, 24, 28)
+    local SLOT_FILE    = CONFIG_DIR .. "/actor_slots.txt"
+    local PART_NAMES   = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
+    local BUDGET       = 0.002
+    local ROSTER_EVERY = 2
+    local WORLD_EVERY  = 3
+    local REREAD_EVERY = 30
+    local COLOR_ACTOR  = Color3.fromRGB(40, 255, 90)
+    local COLOR_STAFF  = Color3.fromRGB(255, 120, 230)
+    local COLOR_TEXT   = Color3.fromRGB(235, 235, 240)
+    local COLOR_DIM    = Color3.fromRGB(170, 170, 178)
+    local COLOR_PILL   = Color3.fromRGB(24, 24, 28)
 
-    local knownSlots   = {}   -- [slotId] = true, persisted across sessions
-    local sharedSlots  = {}   -- [slotId] = true, seen held by 2+ players
-    local ragdollSlots = {}   -- [slotId] = true, seen on an Actor=true ragdoll
-    local scanTick     = 0
-    local reported     = {}
+    local knownSlots     = {}   -- [slot] = true, persisted actor slots
+    local sharedSlots    = {}   -- [slot] = true, seen held by 2+ players
+    local ragdollSlots   = {}   -- [slot] = true, seen on an Actor=true ragdoll
+    local actorNames     = {}   -- [name] = true, owner of an Actor=true ragdoll
+    local pendingRagdoll = {}   -- [name] = true, ragdoll seen before their slot was read
+    local cache          = {}   -- [name] = per-player cached reads
+    local roster, rosterSet, rosterAt, cursor = {}, {}, -1e9, 0
+    local world, worldIdx, worldAt = nil, 0, -1e9
+    local checkedRagdolls, ragdollsSeen = {}, {}
+    local notCharacter = {}     -- [modelName] = true, top-level models that aren't characters
+    local hidden, hiddenSeen = {}, {}
+    local dirty = true
+    local reported = {}
 
     local function attr(inst, key)
         local v
@@ -5676,18 +5684,8 @@ do
         end
     end
 
-    -- "???"-style: non-empty and no letters, digits or UTF-8 letters.
-    local function isHiddenName(dn)
-        return type(dn) == "string" and dn:gsub("%s", "") ~= "" and not dn:find("[%w\128-\255]")
-    end
-
-    local function hasGen1Gear(char)
-        local found = false
-        pcall(function()
-            local gb = char:FindFirstChild("GearBoxes")
-            found = gb ~= nil and gb:FindFirstChild("ODMBoxes") ~= nil
-        end)
-        return found
+    local function hasPlayerWord(s)
+        return type(s) == "string" and s:lower():find("%f[%a]player%f[%A]") ~= nil
     end
 
     -- Named parts first: Matcha's PrimaryPart on player characters is a
@@ -5702,6 +5700,12 @@ do
         pcall(function() pp = model.PrimaryPart; pos = pp.Position end)
         if pos then return pp end
         return nil
+    end
+
+    local function originPos()
+        local o
+        pcall(function() o = Workspace.CurrentCamera.CFrame.Position end)
+        return o or getPlayerPos()
     end
 
     local function newText(color)
@@ -5749,7 +5753,7 @@ do
             icon     = icon,
             dot      = dot,
             nameBg   = newPill(),
-            nameText = newText(COLOR_TEXT),
+            nameText = newText(COLOR_ACTOR),
         }
     end
 
@@ -5766,171 +5770,232 @@ do
         end
     end
 
-    local function scanRagdolls()
-        local kids
-        pcall(function() kids = Workspace:GetChildren() end)
-        if not kids then return end
-        for i = 1, #kids do
-            local c = kids[i]
-            local nm
-            pcall(function() nm = c.Name end)
-            if type(nm) == "string" and #nm > 8 and nm:sub(-8) == "_ragdoll"
-               and attr(c, "Actor") == true then
-                -- Link the ragdoll to its owner's slot (by UserId, else name).
-                local uid = attr(c, "User")
-                local owner
-                pcall(function()
-                    if uid then owner = Players:GetPlayerByUserId(tonumber(uid)) end
-                end)
-                if not owner then
-                    pcall(function() owner = Players:FindFirstChild(nm:sub(1, #nm - 8)) end)
-                end
-                local slot = owner and attr(owner, "Character")
-                if type(slot) == "string" and not ragdollSlots[slot] then
-                    ragdollSlots[slot] = true
-                    rememberSlot(slot)
-                end
-            end
+    local function markRagdollSlot(slot)
+        if type(slot) == "string" and not ragdollSlots[slot] then
+            ragdollSlots[slot] = true
+            rememberSlot(slot)
         end
     end
 
-    actorEspScan = function()
+    local function refreshRoster(now)
+        rosterAt = now
         local plist
         pcall(function() plist = Players:GetPlayers() end)
         if not plist then return end
-        scanTick = scanTick + 1
-
-        local info = {}
+        local names, set = {}, {}
         for i = 1, #plist do
             local p = plist[i]
-            local name
-            pcall(function() name = p.Name end)
-            if name then
-                local char
-                pcall(function() char = p.Character end)
-                info[#info + 1] = {
-                    player     = p,
-                    name       = name,
-                    char       = char,
-                    display    = attr(p, "DisplayName"),
-                    charName   = attr(p, "Name"),
-                    slot       = attr(p, "Character"),
-                    staffState = attr(p, "StaffState"),
-                    branch     = attr(p, "Branch"),
-                    maxHp      = attr(p, "MaxHealth"),
+            local nm
+            pcall(function() nm = p.Name end)
+            if nm then
+                names[#names + 1] = nm
+                set[nm] = true
+                local c = cache[nm]
+                if c then c.player = p else cache[nm] = { name = nm, player = p } end
+            end
+        end
+        for nm in pairs(cache) do
+            if not set[nm] then cache[nm] = nil end
+        end
+        roster, rosterSet = names, set
+        if cursor > #roster then cursor = 0 end
+        dirty = true
+    end
+
+    -- Returns true when anything that affects classification changed.
+    local function visitPlayer(c, origin, now)
+        local changed = false
+        local char
+        pcall(function() char = c.player.Character end)
+        if char ~= c.char then
+            c.char = char
+            c.part = char and resolvePart(char) or nil
+            c.readAt = nil
+            changed = true
+        end
+
+        if ACTOR_ESP.NearbyOnly and origin and c.part then
+            local pos
+            pcall(function() pos = c.part.Position end)
+            if not pos and c.char then
+                c.part = resolvePart(c.char)
+                if c.part then pcall(function() pos = c.part.Position end) end
+            end
+            if pos then
+                local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
+                local r = ACTOR_ESP.ScanRadius
+                if dx * dx + dy * dy + dz * dz > r * r then return changed end
+            end
+        end
+
+        if c.readAt and now - c.readAt < REREAD_EVERY then return changed end
+        c.readAt = now
+        local p = c.player
+        local slot = attr(p, "Character")
+        if slot ~= c.slot then
+            c.slot = slot
+            c.charName = attr(p, "Name")
+            c.display = attr(p, "DisplayName")
+            c.staffState = attr(p, "StaffState")
+            changed = true
+        end
+        if pendingRagdoll[c.name] and type(c.slot) == "string" then
+            pendingRagdoll[c.name] = nil
+            markRagdollSlot(c.slot)
+            changed = true
+        end
+        return changed
+    end
+
+    -- Incremental sweep of Workspace's top level for actor ragdolls and
+    -- characters whose Player object is hidden. Returns true on changes.
+    local function worldStep(now, deadline)
+        if not world then
+            if now - worldAt < WORLD_EVERY then return false end
+            pcall(function() world = Workspace:GetChildren() end)
+            worldIdx, hiddenSeen, ragdollsSeen = 0, {}, {}
+            if not world then worldAt = now; return false end
+        end
+        local changed = false
+        while worldIdx < #world and os.clock() < deadline do
+            worldIdx = worldIdx + 1
+            local m = world[worldIdx]
+            local nm
+            pcall(function() nm = m.Name end)
+            if type(nm) == "string" then
+                if #nm > 8 and nm:sub(-8) == "_ragdoll" then
+                    ragdollsSeen[nm] = true
+                    if not checkedRagdolls[nm] then
+                        checkedRagdolls[nm] = true
+                        if attr(m, "Actor") == true then
+                            local base = nm:sub(1, #nm - 8)
+                            actorNames[base] = true
+                            local c = cache[base]
+                            if c and type(c.slot) == "string" then
+                                markRagdollSlot(c.slot)
+                            else
+                                pendingRagdoll[base] = true
+                            end
+                            changed = true
+                        end
+                    end
+                elseif not rosterSet[nm] and not notCharacter[nm] then
+                    local hum
+                    pcall(function() hum = m:FindFirstChildOfClass("Humanoid") end)
+                    if hum then hiddenSeen[nm] = m else notCharacter[nm] = true end
+                end
+            end
+        end
+        if worldIdx >= #world then
+            world, worldAt = nil, now
+            for nm in pairs(checkedRagdolls) do
+                if not ragdollsSeen[nm] then checkedRagdolls[nm] = nil end
+            end
+            for nm in pairs(hiddenSeen) do
+                if not hidden[nm] then changed = true end
+            end
+            for nm in pairs(hidden) do
+                if not hiddenSeen[nm] then changed = true end
+            end
+            hidden = hiddenSeen
+        end
+        return changed
+    end
+
+    local function classify()
+        local counts = {}
+        for _, c in pairs(cache) do
+            if type(c.slot) == "string" then counts[c.slot] = (counts[c.slot] or 0) + 1 end
+        end
+        for s, n in pairs(counts) do
+            if n >= 2 and not sharedSlots[s] then
+                sharedSlots[s] = true
+                rememberSlot(s)
+            end
+        end
+
+        local want = {}
+        for name, c in pairs(cache) do
+            local flags = {}
+            local s = c.slot
+            if type(s) == "string" then
+                if sharedSlots[s] then flags[#flags + 1] = "shared slot"
+                elseif knownSlots[s] then flags[#flags + 1] = "known slot" end
+                if ragdollSlots[s] then flags[#flags + 1] = "died as actor" end
+            end
+            if hasPlayerWord(c.charName) or hasPlayerWord(c.display) then
+                flags[#flags + 1] = "Player name"
+            end
+            local role
+            if #flags > 0 then role = "actor" elseif c.staffState ~= nil then role = "staff" end
+            if role then
+                want[name] = { role = role, flags = table.concat(flags, ", "), char = c.char, part = c.part }
+            end
+        end
+        for name, m in pairs(hidden) do
+            if not want[name] then
+                want[name] = {
+                    role = "actor",
+                    flags = actorNames[name] and "hidden player, died as actor" or "hidden player",
+                    char = m,
                 }
             end
         end
 
-        -- Priority 1 (fast, every tick): players sharing an exact
-        -- DisplayName, confirmed by an identical slot id.
-        local byDisplay = {}
-        for i = 1, #info do
-            local r = info[i]
-            if type(r.display) == "string" and r.display ~= "" then
-                local g = byDisplay[r.display]
-                if g then g[#g + 1] = r else byDisplay[r.display] = { r } end
+        for name, w in pairs(want) do
+            local e = ACTOR_ESP.Objects[name]
+            if not e then
+                e = newEntry()
+                ACTOR_ESP.Objects[name] = e
+            end
+            e.role, e.flags = w.role, w.flags
+            if e.char ~= w.char then
+                e.char = w.char
+                e.part = w.part
             end
         end
-        for _, g in pairs(byDisplay) do
-            if #g >= 2 then
-                local count = {}
-                for i = 1, #g do
-                    local s = g[i].slot
-                    if type(s) == "string" then count[s] = (count[s] or 0) + 1 end
-                end
-                for s, c in pairs(count) do
-                    if c >= 2 and not sharedSlots[s] then
-                        sharedSlots[s] = true
-                        rememberSlot(s)
-                    end
-                end
-            end
-        end
-
-        -- Slower: whole server grouped by slot id, catching shared slots
-        -- whose holders have no DisplayName attribute.
-        if scanTick % 3 == 1 then
-            local bySlot = {}
-            for i = 1, #info do
-                local s = info[i].slot
-                if type(s) == "string" then bySlot[s] = (bySlot[s] or 0) + 1 end
-            end
-            for s, c in pairs(bySlot) do
-                if c >= 2 and not sharedSlots[s] then
-                    sharedSlots[s] = true
-                    rememberSlot(s)
-                end
-            end
-        end
-
-        scanRagdolls()
-
-        local seen = {}
-        for i = 1, #info do
-            local r = info[i]
-            local high, low = {}, {}
-            local s = r.slot
-            if type(s) == "string" then
-                if sharedSlots[s] then high[#high + 1] = "shared slot" end
-                if ragdollSlots[s] then high[#high + 1] = "died as actor"
-                elseif knownSlots[s] and not sharedSlots[s] then high[#high + 1] = "known slot" end
-            end
-            if r.branch == 0 then high[#high + 1] = "civilian" end
-            if isHiddenName(r.display) then high[#high + 1] = "hidden name" end
-            if type(r.display) == "string" and r.display:lower():find("%f[%a]player%f[%A]") then
-                high[#high + 1] = "Player name"
-            end
-            if type(r.charName) == "string" and r.charName:lower():find("%f[%a]player%f[%A]") then
-                high[#high + 1] = "Player character"
-            end
-            if type(r.maxHp) == "number" and r.maxHp < 150 then low[#low + 1] = "low health" end
-            if r.char and hasGen1Gear(r.char) then low[#low + 1] = "gen 1 gear" end
-
-            local tier
-            if #high > 0 then
-                tier = "high"
-            elseif #low >= 2 then
-                tier = "medium"
-            elseif r.staffState ~= nil then
-                tier = "staff"
-            elseif #low == 1 then
-                tier = "low"
-            end
-            local role = tier and (tier == "staff" and "staff" or "actor")
-
-            local e = ACTOR_ESP.Objects[r.name]
-            if role then
-                seen[r.name] = true
-                if not e then
-                    e = newEntry()
-                    ACTOR_ESP.Objects[r.name] = e
-                end
-                e.role = role
-                e.tier = tier
-                for j = 1, #low do high[#high + 1] = low[j] end
-                e.flags = table.concat(high, ", ")
-                if e.char ~= r.char then e.part = nil end
-                e.char = r.char
-            end
-        end
-
         for name, e in pairs(ACTOR_ESP.Objects) do
-            if not seen[name] then
+            if not want[name] then
                 removeEntry(e)
                 ACTOR_ESP.Objects[name] = nil
             end
         end
     end
 
+    function ACTOR_ESP.step(budget)
+        local now = os.clock()
+        local deadline = now + (budget or BUDGET)
+        if now - rosterAt >= ROSTER_EVERY then refreshRoster(now) end
+        local origin = originPos()
+        local n = #roster
+        local visited = 0
+        while visited < n and os.clock() < deadline do
+            cursor = cursor % n + 1
+            local c = cache[roster[cursor]]
+            if c and visitPlayer(c, origin, now) then dirty = true end
+            visited = visited + 1
+        end
+        if os.clock() < deadline and worldStep(now, deadline) then dirty = true end
+        if dirty then
+            dirty = false
+            classify()
+        end
+    end
+
+    -- Catch-up pass when a toggle is switched on; anything it doesn't
+    -- reach is finished by the per-frame steps.
+    actorEspScan = function()
+        rosterAt, worldAt = -1e9, -1e9
+        ACTOR_ESP.step(0.3)
+    end
+
     function ACTOR_ESP.update()
         ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
-        local origin
-        pcall(function() origin = Workspace.CurrentCamera.CFrame.Position end)
-        origin = origin or getPlayerPos()
+        local origin = originPos()
         if not origin then ACTOR_ESP.state = "no camera position"; return end
         ACTOR_ESP.state = "ok"
         local showStaff = STAFF_ESP.Enabled
+        local limit = ACTOR_ESP.NearbyOnly and ACTOR_ESP.ScanRadius or ACTOR_ESP.MaxDistance
         local size = ACTOR_ESP.TextSize
         local cw = size * 0.55
         local h = size + 6
@@ -5940,24 +6005,18 @@ do
             local char = e.char
             local pos
             if char and (e.role == "actor" or showStaff) then
-                local part = e.part
-                if part then
-                    local ok = false
-                    pcall(function() ok = part.Parent ~= nil end)
-                    if not ok then part = nil end
+                if e.part then pcall(function() pos = e.part.Position end) end
+                if not pos then
+                    e.part = resolvePart(char)
+                    if e.part then pcall(function() pos = e.part.Position end) end
                 end
-                if not part then
-                    part = resolvePart(char)
-                    e.part = part
-                end
-                if part then pcall(function() pos = part.Position end) end
             end
 
             local screenPos, onScreen, dist
             if pos then
                 local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
                 dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                if dist <= ACTOR_ESP.MaxDistance then
+                if dist <= limit then
                     screenPos, onScreen = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z))
                 end
             end
@@ -5987,7 +6046,7 @@ do
                 e.nameBg.Position = Vector2.new(nameLeft, top)
                 e.nameBg.Size = Vector2.new(nameW, h)
                 e.nameText.Text = name
-                e.nameText.Color = TIER_COLORS[e.tier] or COLOR_TEXT
+                e.nameText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
                 e.nameText.Position = Vector2.new(nameLeft + pad, textY)
 
                 for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = true end
@@ -6375,6 +6434,7 @@ local function ESPLoop()
             end
 
             if ACTOR_ESP.Enabled then
+                ACTOR_ESP.guard("step", ACTOR_ESP.step)
                 ACTOR_ESP.guard("update", ACTOR_ESP.update)
                 wasOn.actorEsp = true
             elseif wasOn.actorEsp then
@@ -6411,7 +6471,6 @@ local function ESPLoop()
                     playerEspScan(); playerEspCleanup()
                     playerEspDeadScan(); playerEspDeadCleanup()
                 end
-                if ACTOR_ESP.Enabled then ACTOR_ESP.guard("scan", actorEspScan) end
                 if GUI.CounterVisible then
                     pcall(function()
                         local titans = Workspace:FindFirstChild("Titans")
@@ -6463,6 +6522,8 @@ saveConfig = function()
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
             staffEsp     = STAFF_ESP.Enabled,
+            actorNearby  = ACTOR_ESP.NearbyOnly,
+            actorRadius  = ACTOR_ESP.ScanRadius,
         },
         ores = oresOn,
         titan = {
@@ -6547,6 +6608,8 @@ loadConfig = function()
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
         if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
+        if type(f.actorNearby)  == "boolean" then ACTOR_ESP.NearbyOnly     = f.actorNearby  end
+        if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
         if type(f.deathLog)     == "boolean" then
             DEATHLOG.Enabled    = f.deathLog
             -- Re-seed so ragdolls already on the ground when the script
@@ -10765,6 +10828,12 @@ end)()
                 uiNotify("Staff ESP", "Turn on Actors first", 4)
             end
         end):Tooltip("shows players on staff data (StaffState set, no actor flags) on the ESP overlay. Actors must be enabled first")
+        secEnt:Toggle("Nearby Only", ACTOR_ESP.NearbyOnly, function(v)
+            ACTOR_ESP.NearbyOnly = v
+        end):Tooltip("only scan and show actors/staff within Scan Radius of the camera. Cheaper in full servers")
+        secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
+            ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
+        end):Tooltip("studs from the camera that Nearby Only covers")
     end)
 
     -- ===== Tab: Style =====
