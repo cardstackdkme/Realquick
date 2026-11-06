@@ -5894,31 +5894,29 @@ local function staffEspRegister(name, roleName)
 end
 
 staffEspScan = function()
-    local Players = game:GetService("Players")
-    local localPlayer
-    pcall(function() localPlayer = Players.LocalPlayer end)
     local allPlayers
-    pcall(function() allPlayers = Players:GetPlayers() end)
+    pcall(function() allPlayers = game:GetService("Players"):GetPlayers() end)
     if not allPlayers then return end
 
     local activePlayers = {}
     for i = 1, #allPlayers do
         local p = allPlayers[i]
-        if p ~= localPlayer then
-            local pName, staffState
-            pcall(function() pName = p.Name end)
-            pcall(function() staffState = p:GetAttribute("StaffState") end)
-            if pName and type(staffState) == "number" and STAFF_ROLE_NAMES[staffState] then
-                activePlayers[pName] = true
-                staffEspRegister(pName, STAFF_ROLE_NAMES[staffState])
-                local data = STAFF_ESP.Objects[pName]
-                local prevChar = data.character
-                local char
-                pcall(function() char = p.Character end)
-                data.character = char
-                if char ~= prevChar then
-                    data.cachedPart = nil
-                end
+        local pName, staffState
+        pcall(function() pName = p.Name end)
+        pcall(function() staffState = tonumber(p:GetAttribute("StaffState")) end)
+        if pName and staffState and staffState > 0 then
+            activePlayers[pName] = true
+            staffEspRegister(pName, STAFF_ROLE_NAMES[staffState] or "Staff")
+            local data = STAFF_ESP.Objects[pName]
+            local char
+            pcall(function() char = p.Character end)
+            local prevAddr = data.charAddr
+            local addr
+            if char then pcall(function() addr = tostring(char.Address) end) end
+            data.character = char
+            data.charAddr = addr
+            if addr ~= prevAddr then
+                data.cachedPart = nil
             end
         end
     end
@@ -6014,6 +6012,17 @@ local function staffEspCleanup()
             pcall(function() data.nameTag:Remove() end)
             STAFF_ESP.Objects[name] = nil
         end
+    end
+end
+
+-- Keeps a staff ESP failure from killing the shared ESP loop, and reports
+-- the first error of each stage on screen so it can be fixed.
+local staffEspReported = {}
+local function staffEspGuard(stage, fn)
+    local ok, err = pcall(fn)
+    if not ok and not staffEspReported[stage] then
+        staffEspReported[stage] = true
+        pcall(function() uiNotify("Staff ESP error (" .. stage .. ")", tostring(err), 10) end)
     end
 end
 
@@ -6368,7 +6377,7 @@ local function ESPLoop()
 
             if ACTOR_ESP.Enabled then
                 actorEspUpdate()
-                if STAFF_ESP.Enabled then staffEspUpdate() end
+                if STAFF_ESP.Enabled then staffEspGuard("update", staffEspUpdate) end
                 wasOn.actorEsp = true
             elseif wasOn.actorEsp then
                 for _, data in pairs(ACTOR_ESP.Objects) do
@@ -6413,7 +6422,10 @@ local function ESPLoop()
                 end
                 if ACTOR_ESP.Enabled then
                     actorEspScan(); actorEspCleanup()
-                    if STAFF_ESP.Enabled then staffEspScan(); staffEspCleanup() end
+                    if STAFF_ESP.Enabled then
+                        staffEspGuard("scan", staffEspScan)
+                        staffEspGuard("cleanup", staffEspCleanup)
+                    end
                 end
                 if GUI.CounterVisible then
                     pcall(function()
@@ -10760,10 +10772,16 @@ end)()
         secEnt:Toggle("Show Staff", STAFF_ESP.Enabled, function(v)
             STAFF_ESP.Enabled = v
             if v and ACTOR_ESP.Enabled and staffEspScan then
-                pcall(staffEspScan)
-                local staffCount = 0
-                for _ in pairs(STAFF_ESP.Objects) do staffCount = staffCount + 1 end
-                uiNotify("Staff ESP", staffCount .. " staff detected", 4)
+                local ok, err = pcall(staffEspScan)
+                local names, withChar = {}, 0
+                for name, data in pairs(STAFF_ESP.Objects) do
+                    names[#names + 1] = name
+                    if data.character then withChar = withChar + 1 end
+                end
+                local msg = #names .. " staff detected, " .. withChar .. " with character"
+                if #names > 0 then msg = msg .. ": " .. table.concat(names, ", ") end
+                if not ok then msg = msg .. " | scan error: " .. tostring(err) end
+                uiNotify("Staff ESP", msg, 8)
             elseif v and not ACTOR_ESP.Enabled then
                 uiNotify("Staff ESP", "Turn on Actors first", 4)
             end
