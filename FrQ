@@ -437,6 +437,28 @@ local ACTOR_ESP = {
     Objects     = {},
 }
 
+-- Staff ESP: tracks players whose StaffState attribute maps to a staff
+-- role (Trial Moderator through Developer). Piggybacks on the Actor ESP
+-- toggle — when Actors ESP is on, staff members are shown too.
+local STAFF_ROLE_NAMES = {
+    [4]  = "Trial Mod",
+    [5]  = "Moderator",
+    [6]  = "Senior Mod",
+    [7]  = "Management",
+    [8]  = "Sr. Lore Team",
+    [9]  = "Developer",
+    [10] = "Lore Team",
+    [11] = "Lore Exec",
+    [12] = "Lore Helper",
+    [13] = "Economy Team",
+    [14] = "Research Team",
+    [17] = "Dept. Head",
+    [18] = "Actor Mgmt",
+}
+local STAFF_ESP = {
+    Objects = {},   -- [playerName] = { character, cachedPart, prefixTag, nameTag, roleName }
+}
+
 -- Branch tag prefix shown before player names in the ESP (e.g. "[SL] Name").
 -- Branch attribute is a number 1..4 (see BRANCH_NAMES). Unknown branch → no tag.
 -- `abbrev` is the inner letters only — the brackets are rendered separately
@@ -473,6 +495,9 @@ local deathFetchAllNow
 -- of waiting for ESPLoop's ~1s scan tick. Body is assigned later in
 -- the ACTOR ESP ENGINE section.
 local actorEspScan
+
+-- Forward-declared for the staff ESP engine (same toggle as Actors).
+local staffEspScan
 
 local DEATHLOG = {
     Enabled       = false,
@@ -4873,6 +4898,11 @@ UnloadScript = function()
         pcall(function() data.nameTag:Remove() end)
     end
     ACTOR_ESP.Objects = {}
+    for _, data in pairs(STAFF_ESP.Objects) do
+        pcall(function() data.prefixTag:Remove() end)
+        pcall(function() data.nameTag:Remove() end)
+    end
+    STAFF_ESP.Objects = {}
     uiNotify("Menu", "Unloaded!", 3)
 end
 
@@ -5816,6 +5846,176 @@ local function actorEspCleanup()
     end
 end
 
+-- ============================================================
+-- STAFF ESP ENGINE
+-- ============================================================
+-- Tracks players whose StaffState attribute is a recognized staff role
+-- (Trial Moderator through Developer). Shares the ACTOR_ESP.Enabled
+-- toggle so both NPC actors and staff are shown together.
+--
+-- Hot-path design mirrors Actor ESP:
+--   * staffEspScan runs at the slow cadence (~1s), walks Players once,
+--     registers/refreshes character refs.
+--   * staffEspUpdate runs every frame, touches only cached refs.
+--   * staffEspCleanup drops entries for players who left.
+
+local function staffEspRegister(name, roleName)
+    if STAFF_ESP.Objects[name] then
+        STAFF_ESP.Objects[name].roleName = roleName
+        return
+    end
+
+    local prefixTag = Drawing.new("Text")
+    prefixTag.Color = Color3.fromRGB(255, 150, 241)
+    prefixTag.Size = ACTOR_ESP.TextSize
+    prefixTag.Font = TITAN_FONTS[ACTOR_ESP.FontIndex].font
+    prefixTag.Center = false
+    prefixTag.Outline = true
+    prefixTag.Visible = false
+    prefixTag.ZIndex = 53
+
+    local nameTag = Drawing.new("Text")
+    nameTag.Color = Color3.fromRGB(220, 220, 225)
+    nameTag.Size = ACTOR_ESP.TextSize
+    nameTag.Font = TITAN_FONTS[ACTOR_ESP.FontIndex].font
+    nameTag.Center = false
+    nameTag.Outline = true
+    nameTag.Visible = false
+    nameTag.ZIndex = 53
+
+    STAFF_ESP.Objects[name] = {
+        character  = nil,
+        cachedPart = nil,
+        prefixTag  = prefixTag,
+        nameTag    = nameTag,
+        roleName   = roleName,
+    }
+end
+
+staffEspScan = function()
+    local Players = game:GetService("Players")
+    local localPlayer
+    pcall(function() localPlayer = Players.LocalPlayer end)
+    local allPlayers
+    pcall(function() allPlayers = Players:GetPlayers() end)
+    if not allPlayers then return end
+
+    local activePlayers = {}
+    for i = 1, #allPlayers do
+        local p = allPlayers[i]
+        if p ~= localPlayer then
+            local pName, staffState
+            pcall(function() pName = p.Name end)
+            pcall(function() staffState = p:GetAttribute("StaffState") end)
+            if pName and type(staffState) == "number" and STAFF_ROLE_NAMES[staffState] then
+                activePlayers[pName] = true
+                staffEspRegister(pName, STAFF_ROLE_NAMES[staffState])
+                local data = STAFF_ESP.Objects[pName]
+                local prevChar = data.character
+                local char
+                pcall(function() char = p.Character end)
+                data.character = char
+                if char ~= prevChar then
+                    data.cachedPart = nil
+                end
+            end
+        end
+    end
+
+    -- Mark entries whose player left so cleanup can drop them
+    for name, data in pairs(STAFF_ESP.Objects) do
+        if not activePlayers[name] then
+            data.character = nil
+            data.cachedPart = nil
+        end
+    end
+end
+
+local function staffEspHide(data)
+    data.prefixTag.Visible = false
+    data.nameTag.Visible = false
+end
+
+local function staffEspUpdate()
+    if not ACTOR_ESP.Enabled then
+        for _, data in pairs(STAFF_ESP.Objects) do staffEspHide(data) end
+        return
+    end
+
+    local playerPos = getPlayerPos()
+    if not playerPos then return end
+
+    for name, data in pairs(STAFF_ESP.Objects) do
+        local char = data.character
+        if char then
+            local valid = false
+            pcall(function() valid = char.Parent ~= nil end)
+            if not valid then char = nil end
+        end
+
+        if not char then
+            staffEspHide(data)
+        else
+            local part = data.cachedPart
+            if part then
+                local valid = false
+                pcall(function() valid = part.Parent ~= nil end)
+                if not valid then part = nil end
+            end
+            if not part then
+                part = actorResolvePart(char)
+                data.cachedPart = part
+            end
+
+            local pos
+            if part then pcall(function() pos = part.Position end) end
+            if not pos then
+                staffEspHide(data)
+            else
+                local dx = playerPos.X - pos.X
+                local dy = playerPos.Y - pos.Y
+                local dz = playerPos.Z - pos.Z
+                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                if dist > ACTOR_ESP.MaxDistance then
+                    staffEspHide(data)
+                else
+                    local headTop = Vector3.new(pos.X, pos.Y + 3, pos.Z)
+                    local screenPos, onScreen = WorldToScreen(headTop)
+                    if not (screenPos and onScreen) then
+                        staffEspHide(data)
+                    else
+                        local approxChar = ACTOR_ESP.TextSize * 0.55
+                        local prefixStr  = "(" .. data.roleName .. ") "
+                        local prefixW = #prefixStr * approxChar
+                        local nameW   = #name * approxChar
+                        local totalW  = prefixW + nameW
+                        local leftX   = screenPos.X - totalW / 2
+                        local y       = screenPos.Y - 20
+
+                        data.prefixTag.Position = Vector2.new(leftX, y)
+                        data.prefixTag.Text     = "(" .. data.roleName .. ")"
+                        data.prefixTag.Visible  = true
+
+                        data.nameTag.Position = Vector2.new(leftX + prefixW, y)
+                        data.nameTag.Text     = name
+                        data.nameTag.Visible  = true
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function staffEspCleanup()
+    for name, data in pairs(STAFF_ESP.Objects) do
+        if not data.character then
+            pcall(function() data.prefixTag:Remove() end)
+            pcall(function() data.nameTag:Remove() end)
+            STAFF_ESP.Objects[name] = nil
+        end
+    end
+end
+
 -- Helper: hide all labels for a simple ESP type
 local function hideESPLabels(objects)
     for _, data in pairs(objects) do data.label.Visible = false end
@@ -6167,9 +6367,14 @@ local function ESPLoop()
 
             if ACTOR_ESP.Enabled then
                 actorEspUpdate()
+                staffEspUpdate()
                 wasOn.actorEsp = true
             elseif wasOn.actorEsp then
                 for _, data in pairs(ACTOR_ESP.Objects) do
+                    data.prefixTag.Visible = false
+                    data.nameTag.Visible = false
+                end
+                for _, data in pairs(STAFF_ESP.Objects) do
                     data.prefixTag.Visible = false
                     data.nameTag.Visible = false
                 end
@@ -6207,6 +6412,7 @@ local function ESPLoop()
                 end
                 if ACTOR_ESP.Enabled then
                     actorEspScan(); actorEspCleanup()
+                    staffEspScan(); staffEspCleanup()
                 end
                 if GUI.CounterVisible then
                     pcall(function()
@@ -10539,12 +10745,15 @@ end)()
             ACTOR_ESP.Enabled = v
             if v and actorEspScan then
                 pcall(actorEspScan)
+                pcall(staffEspScan)
                 local registered, alive = 0, 0
                 for _, data in pairs(ACTOR_ESP.Objects) do
                     registered = registered + 1
                     if data.liveModel then alive = alive + 1 end
                 end
-                uiNotify("Actors", registered .. " registered, " .. alive .. " alive", 4)
+                local staffCount = 0
+                for _ in pairs(STAFF_ESP.Objects) do staffCount = staffCount + 1 end
+                uiNotify("Actors", registered .. " registered, " .. alive .. " alive | " .. staffCount .. " staff", 4)
             end
         end)
     end)
