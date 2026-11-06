@@ -5612,6 +5612,7 @@ end)()  -- /Music
 --   HIGH  civilian      - Branch attribute is 0
 --   HIGH  hidden name   - DisplayName is only "?"-style symbols
 --   HIGH  Player name   - DisplayName contains the word "Player"
+--   HIGH  Player char   - Name attribute contains the word "Player"
 --   LOW   low health    - MaxHealth under 150
 --   LOW   gen 1 gear    - GearBoxes holds ODMBoxes (gen 2 holds Canisters)
 -- StaffState only exists on staff and actor slots, so a player who has it
@@ -5807,6 +5808,7 @@ do
                     name       = name,
                     char       = char,
                     display    = attr(p, "DisplayName"),
+                    charName   = attr(p, "Name"),
                     slot       = attr(p, "Character"),
                     staffState = attr(p, "StaffState"),
                     branch     = attr(p, "Branch"),
@@ -5873,6 +5875,9 @@ do
             if isHiddenName(r.display) then high[#high + 1] = "hidden name" end
             if type(r.display) == "string" and r.display:lower():find("%f[%a]player%f[%A]") then
                 high[#high + 1] = "Player name"
+            end
+            if type(r.charName) == "string" and r.charName:lower():find("%f[%a]player%f[%A]") then
+                high[#high + 1] = "Player character"
             end
             if type(r.maxHp) == "number" and r.maxHp < 150 then low[#low + 1] = "low health" end
             if r.char and hasGen1Gear(r.char) then low[#low + 1] = "gen 1 gear" end
