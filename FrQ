@@ -429,6 +429,7 @@ local ACTOR_ESP = {
     Enabled     = false,
     NearbyOnly  = false,
     ScanRadius  = 500,
+    MaxLabels   = 25,
     MaxDistance = 5000,
     TextSize    = 17,
     FontIndex   = 3,
@@ -5762,7 +5763,10 @@ end)()  -- /Music
 
     local DRAW_KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
 
+    -- Visibility is tracked so hidden labels aren't rewritten every frame.
     local function hideEntry(e)
+        if e.shown == false then return end
+        e.shown = false
         for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = false end
     end
 
@@ -5998,6 +6002,30 @@ end)()  -- /Music
         ACTOR_ESP.step(0.3)
     end
 
+    local function entryPos(e)
+        local char = e.char
+        if not char then return nil end
+        local pos
+        if e.part then pcall(function() pos = e.part.Position end) end
+        if not pos then
+            e.part = resolvePart(char)
+            if e.part then pcall(function() pos = e.part.Position end) end
+        end
+        return pos
+    end
+
+    local function distTo(origin, pos)
+        local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+    end
+
+    -- Label cap: when more players are tagged than MaxLabels, only the
+    -- nearest get drawn. Selected labels refresh their distance as they
+    -- draw; a few others are re-measured per frame, and the nearest set
+    -- is re-picked a few times a second.
+    local SELECT_EVERY, REFRESH_PER_FRAME = 0.25, 8
+    local distCursor, selectAt = 0, -1e9
+
     function ACTOR_ESP.update()
         if not ACTOR_ESP.Enabled then ACTOR_ESP.hideAll(); return end
         ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
@@ -6006,34 +6034,69 @@ end)()  -- /Music
         ACTOR_ESP.state = "ok"
         local showStaff = STAFF_ESP.Enabled
         local limit = ACTOR_ESP.NearbyOnly and ACTOR_ESP.ScanRadius or ACTOR_ESP.MaxDistance
+        local cap = ACTOR_ESP.MaxLabels
         local size = ACTOR_ESP.TextSize
         local cw = size * 0.55
         local h = size + 6
         local pad = 6
 
+        local cands = {}
         for name, e in pairs(ACTOR_ESP.Objects) do
-            local char = e.char
-            local pos
-            if char and (e.role == "actor" or showStaff) then
-                if e.part then pcall(function() pos = e.part.Position end) end
-                if not pos then
-                    e.part = resolvePart(char)
-                    if e.part then pcall(function() pos = e.part.Position end) end
+            if e.role == "actor" or showStaff then
+                cands[#cands + 1] = name
+            else
+                e.selected = false
+                e.state = "staff hidden"
+                hideEntry(e)
+            end
+        end
+
+        local n = #cands
+        if n <= cap then
+            for i = 1, n do ACTOR_ESP.Objects[cands[i]].selected = true end
+        else
+            for _ = 1, math.min(REFRESH_PER_FRAME, n) do
+                distCursor = distCursor % n + 1
+                local e = ACTOR_ESP.Objects[cands[distCursor]]
+                if not e.selected then
+                    local pos = entryPos(e)
+                    e.dist = pos and distTo(origin, pos) or math.huge
                 end
             end
+            local now = os.clock()
+            if now - selectAt >= SELECT_EVERY then
+                selectAt = now
+                local order = {}
+                for i = 1, n do order[i] = cands[i] end
+                table.sort(order, function(a, b)
+                    return (ACTOR_ESP.Objects[a].dist or math.huge) < (ACTOR_ESP.Objects[b].dist or math.huge)
+                end)
+                for i = 1, n do
+                    local e = ACTOR_ESP.Objects[order[i]]
+                    e.selected = i <= cap and (e.dist or math.huge) <= limit
+                end
+            end
+        end
 
-            local screenPos, onScreen, dist
-            if pos then
-                local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
-                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                if dist <= limit then
-                    screenPos, onScreen = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z))
+        for i = 1, n do
+            local name = cands[i]
+            local e = ACTOR_ESP.Objects[name]
+            local pos, screenPos, onScreen, dist
+            if e.selected then
+                pos = entryPos(e)
+                if pos then
+                    dist = distTo(origin, pos)
+                    e.dist = dist
+                    if dist <= limit then
+                        screenPos, onScreen = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z))
+                    end
                 end
             end
 
             if not (screenPos and onScreen) then
-                e.state = not char and "no character" or not e.part and "no part"
-                    or not pos and "no position" or not screenPos and "too far" or "off screen"
+                e.state = not e.selected and "over label cap" or not e.char and "no character"
+                    or not e.part and "no part" or not pos and "no position"
+                    or not screenPos and "too far" or "off screen"
                 hideEntry(e)
             else
                 e.state = "shown"
@@ -6055,11 +6118,16 @@ end)()  -- /Music
                 local nameLeft = left + distW + 4
                 e.nameBg.Position = Vector2.new(nameLeft, top)
                 e.nameBg.Size = Vector2.new(nameW, h)
-                e.nameText.Text = name
-                e.nameText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
                 e.nameText.Position = Vector2.new(nameLeft + pad, textY)
-
-                for i = 1, #DRAW_KEYS do e[DRAW_KEYS[i]].Visible = true end
+                if not e.shown or e.drawnRole ~= e.role then
+                    e.nameText.Text = name
+                    e.nameText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
+                    e.drawnRole = e.role
+                end
+                if not e.shown then
+                    e.shown = true
+                    for k = 1, #DRAW_KEYS do e[DRAW_KEYS[k]].Visible = true end
+                end
             end
         end
     end
@@ -6534,6 +6602,7 @@ saveConfig = function()
             staffEsp     = STAFF_ESP.Enabled,
             actorNearby  = ACTOR_ESP.NearbyOnly,
             actorRadius  = ACTOR_ESP.ScanRadius,
+            actorLabels  = ACTOR_ESP.MaxLabels,
         },
         ores = oresOn,
         titan = {
@@ -6620,6 +6689,7 @@ loadConfig = function()
         if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
         if type(f.actorNearby)  == "boolean" then ACTOR_ESP.NearbyOnly     = f.actorNearby  end
         if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
+        if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
         if type(f.deathLog)     == "boolean" then
             DEATHLOG.Enabled    = f.deathLog
             -- Re-seed so ragdolls already on the ground when the script
@@ -10844,6 +10914,9 @@ end)()
         secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
             ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
         end):Tooltip("studs from the camera that Nearby Only covers")
+        secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 5, 5, 150, "", function(v)
+            ACTOR_ESP.MaxLabels = math.floor(tonumber(v) or ACTOR_ESP.MaxLabels)
+        end):Tooltip("most actor/staff labels drawn at once - the nearest win. Keeps big events smooth; raising it costs frames")
     end)
 
     -- ===== Tab: Style =====
