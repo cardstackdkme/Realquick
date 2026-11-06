@@ -5686,15 +5686,17 @@ do
         return found
     end
 
+    -- Named parts first: Matcha's PrimaryPart on player characters is a
+    -- broken shim with no Position, so it's only a last resort.
     local function resolvePart(model)
-        local pp
-        pcall(function() pp = model.PrimaryPart end)
-        if pp then return pp end
         for i = 1, #PART_NAMES do
             local part
             pcall(function() part = model:FindFirstChild(PART_NAMES[i]) end)
             if part then return part end
         end
+        local pp, pos
+        pcall(function() pp = model.PrimaryPart; pos = pp.Position end)
+        if pos then return pp end
         return nil
     end
 
