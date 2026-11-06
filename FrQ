@@ -3276,6 +3276,103 @@ local function ragdollPosition(model)
     return nil
 end
 
+-- DEAD BODIES for the Player List's Dead tab. While that tab is open, Workspace's top level is read
+-- in chunks (it can hold 700+ children) for <Name>_ragdoll models; each body's death attributes
+-- (Reason, Category, Damage, Timestamp, Actor) are read once. GUI.PLBodies is the result.
+-- GUI.PLMarkBody (set from the details pane) keeps a world label on one body, list open or not.
+;(function()
+    local checked = {}
+    task.spawn(function()
+        while GUI.Running do
+            if GUI.PlayerListOpen and GUI.PlayerListTab == "Dead" then
+                local kids = nil
+                pcall(function() kids = Workspace:GetChildren() end)
+                local found = {}
+                if kids then
+                    local i = 1
+                    while i <= #kids do
+                        local stop = math.min(#kids, i + 99)
+                        for j = i, stop do
+                            local c, nm = kids[j], nil
+                            pcall(function() nm = c.Name end)
+                            if type(nm) == "string" and #nm > 8 and nm:sub(-8) == "_ragdoll" then
+                                found[#found + 1] = { nm = nm, model = c }
+                            end
+                        end
+                        i = stop + 1
+                        task.wait()
+                    end
+                end
+                local list, keep = {}, {}
+                for _, b in ipairs(found) do
+                    local info = checked[b.nm]
+                    if not info or info.model ~= b.model then
+                        info = { name = b.nm:sub(1, -9), model = b.model, firstSeen = os.time() }
+                        pcall(function()
+                            local m = b.model
+                            info.reason = m:GetAttribute("Reason")
+                            info.category = m:GetAttribute("Category")
+                            info.damage = m:GetAttribute("Damage")
+                            info.timestamp = tonumber(m:GetAttribute("Timestamp"))
+                            info.actor = m:GetAttribute("Actor") == true
+                        end)
+                        checked[b.nm] = info
+                        task.wait()
+                    end
+                    keep[b.nm] = info
+                    list[#list + 1] = info
+                end
+                checked = keep
+                GUI.PLBodies = list
+                task.wait(2)
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+
+    -- marker on the body picked in the details pane
+    task.spawn(function()
+        local label = Drawing.new("Text")
+        label.Center, label.Outline, label.Size, label.ZIndex, label.Visible = true, true, 14, 55, false
+        label.Color = Color3.fromRGB(255, 70, 70)
+        pcall(function() label.Font = Drawing.Fonts.SystemBold end)
+        local partOf, part = nil, nil
+        while GUI.Running do
+            local b = GUI.PLMarkBody
+            local shown = false
+            if b and b.model then
+                if partOf ~= b.model then
+                    partOf, part = b.model, nil
+                    for _, n in ipairs({ "HumanoidRootPart", "Torso", "UpperTorso", "Head" }) do
+                        pcall(function() part = part or b.model:FindFirstChild(n) end)
+                    end
+                end
+                local pos = nil
+                if part then pcall(function() pos = part.Position end) end
+                if not pos then
+                    local alive = false
+                    pcall(function() alive = b.model.Parent ~= nil end)
+                    if not alive then GUI.PLMarkBody = nil end
+                else
+                    local cam = nil
+                    pcall(function() cam = Workspace.CurrentCamera.CFrame.Position end)
+                    local s, on = WorldToScreen(Vector3.new(pos.X, pos.Y + 2.5, pos.Z))
+                    if s and on then
+                        local d = cam and math.floor((cam - pos).Magnitude) or 0
+                        label.Text = "BODY  " .. tostring(b.name) .. "  " .. d
+                        label.Position = Vector2.new(s.X, s.Y - 16)
+                        shown = true
+                    end
+                end
+            end
+            label.Visible = shown
+            task.wait(1 / 60)
+        end
+        pcall(function() label:Remove() end)
+    end)
+end)()
+
 local function playerEspDeadRegister(model)
     pcall(function()
         local cls
@@ -7238,15 +7335,34 @@ local function drawPlayers()
     local src=GUI.PLCachedPlayers or {}
     local tab,search=GUI.PlayerListTab or "Players",string.lower(GUI.PLSearchText or "")
     local list={}
-    for _,p in ipairs(src) do
-        local ok
-        if tab=="Dead" then ok=p.Dead==true elseif tab=="Staff" then ok=(not p.Dead) and (p.StaffState or 0)>0 else ok=(not p.Dead) and (p.StaffState or 0)<=0 end
-        if ok and search~="" then ok=string.find(string.lower(tostring(p.Name).." "..tostring(p.DisplayName or "")),search,1,true)~=nil end
-        if ok then list[#list+1]=p end
+    if tab=="Dead" then
+        -- dead BODIES (ragdolls still in the world), named after their owner when online
+        local dn={}
+        for _,p in ipairs(src) do dn[p.Name]=p.DisplayName end
+        for _,b in ipairs(GUI.PLBodies or {}) do
+            local q={Name=b.name,DisplayName=dn[b.name] or b.name,Dead=true,Body=b,Health=0,MaxHealth=0,Rank=0,Online=dn[b.name]~=nil}
+            local ok=search=="" or string.find(string.lower(q.Name.." "..q.DisplayName),search,1,true)~=nil
+            if ok then list[#list+1]=q end
+        end
+        table.sort(list,function(a,b) return (a.Body.timestamp or a.Body.firstSeen or 0)>(b.Body.timestamp or b.Body.firstSeen or 0) end)
+    else
+        for _,p in ipairs(src) do
+            local ok
+            if tab=="Staff" then ok=(not p.Dead) and (p.StaffState or 0)>0 else ok=(not p.Dead) and (p.StaffState or 0)<=0 end
+            if ok and search~="" then ok=string.find(string.lower(tostring(p.Name).." "..tostring(p.DisplayName or "")),search,1,true)~=nil end
+            if ok then list[#list+1]=p end
+        end
+        if GUI.PLSortMode=="Rank" then table.sort(list,function(a,b) return (a.Rank or 0)>(b.Rank or 0) end)
+        elseif GUI.PLSortMode=="Health" then table.sort(list,function(a,b) return (a.Health or 0)<(b.Health or 0) end)
+        else table.sort(list,function(a,b) return tostring(a.Name)<tostring(b.Name) end) end
     end
-    if GUI.PLSortMode=="Rank" then table.sort(list,function(a,b) return (a.Rank or 0)>(b.Rank or 0) end)
-    elseif GUI.PLSortMode=="Health" then table.sort(list,function(a,b) return (a.Health or 0)<(b.Health or 0) end)
-    else table.sort(list,function(a,b) return tostring(a.Name)<tostring(b.Name) end) end
+    local function ago(b)
+        local t=b and (b.timestamp or b.firstSeen)
+        if not t then return "?" end
+        local s=maxf(0,os.time()-t)
+        if s<60 then return floor(s).."s ago" elseif s<3600 then return floor(s/60).."m ago" end
+        return floor(s/3600).."h ago"
+    end
 
     local cx,cy,cw=window("pl",x,y,w,h,"Player List","("..#list..")",function() GUI.PlayerListOpen=false end)
     local listW=floor(cw*0.52); local detX=x+14+listW+16; local detW=w-28-listW-16
@@ -7283,14 +7399,22 @@ local function drawPlayers()
     for i,p in ipairs(list) do
         local rY=listY+(i-1)*rowH-off
         if rY+rowH>listY-2 and rY<y+h-12 then
-            local sel=GUI.PlayerListSelected==p.Name
-            local hv=hot("plrow"..i,x+14,rY,listW-12,rowH-6,function() GUI.PlayerListSelected=p.Name end)
+            local key=p.Body and ("body:"..p.Name) or p.Name
+            local sel=GUI.PlayerListSelected==key
+            local hv=hot("plrow"..i,x+14,rY,listW-12,rowH-6,function() GUI.PlayerListSelected=key end)
             card(x+14,rY,listW-12,rowH-6,63,sel,T.red,hv)
             txt(trim(p.DisplayName or p.Name,20),x+26,rY+7,13,sel and T.red or T.text,66,false,Drawing.Fonts.SystemBold)
-            healthbar(x+26,rY+26,listW-150,p.Health,p.MaxHealth,65)
-            local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
-            local hs=p.Dead and "DEAD" or (floor(p.Health or 0).."/"..floor(mh))
-            txt(hs,x+14+listW-20-tw(hs,12),rY+14,12,p.Dead and T.red or T.muted,66,false,p.Dead and Drawing.Fonts.SystemBold or Drawing.Fonts.System)
+            if p.Body then
+                local cause=tostring(p.Body.reason or p.Body.category or "unknown")
+                txt(trim(cause,16).."  -  "..ago(p.Body),x+26,rY+24,11,T.muted,66)
+                local tag=p.Body.actor and "ACTOR" or "BODY"
+                txt(tag,x+14+listW-20-tw(tag,12),rY+14,12,p.Body.actor and T.green or T.red,66,false,Drawing.Fonts.SystemBold)
+            else
+                healthbar(x+26,rY+26,listW-150,p.Health,p.MaxHealth,65)
+                local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
+                local hs=p.Dead and "DEAD" or (floor(p.Health or 0).."/"..floor(mh))
+                txt(hs,x+14+listW-20-tw(hs,12),rY+14,12,p.Dead and T.red or T.muted,66,false,p.Dead and Drawing.Fonts.SystemBold or Drawing.Fonts.System)
+            end
         end
     end
     R.clipTop=nil; R.clipBot=nil
@@ -7298,7 +7422,40 @@ local function drawPlayers()
     local dH=h-(cy-y)-14
     card(detX,cy,detW,dH,61,false)
     local p; for _,q in ipairs(src) do if q.Name==GUI.PlayerListSelected then p=q break end end
-    if p then
+    local body; for _,q in ipairs(list) do if q.Body and ("body:"..q.Name)==GUI.PlayerListSelected then body=q break end end
+    if body then
+        local b=body.Body
+        local chipC=b.actor and T.green or T.red
+        txt(trim(body.DisplayName or body.Name,16),detX+16,cy+14,18,T.text,64,false,Drawing.Fonts.SystemBold)
+        txt("@"..trim(body.Name,18)..(body.Online and "" or "  (left)"),detX+16,cy+37,12,T.muted,64)
+        rect(detX+detW-72,cy+16,56,20,mixc(T.panel,chipC,0.22),64,0.9,6)
+        rect(detX+detW-72,cy+16,56,20,chipC,65,0.55,6,false,1)
+        txt(b.actor and "ACTOR" or "BODY",detX+detW-44,cy+21,11,chipC,66,true,Drawing.Fonts.SystemBold)
+        local dist="?"
+        pcall(function()
+            local pos=ragdollPosition(b.model)
+            local cam=Workspace.CurrentCamera.CFrame.Position
+            if pos and cam then dist=tostring(floor((cam-pos).Magnitude)).." studs" end
+        end)
+        local info={
+            {"Cause",tostring(b.reason or "unknown"),T.text},
+            {"Category",tostring(b.category or "-"),T.muted},
+            {"Damage",b.damage and tostring(floor((tonumber(b.damage) or 0)+0.5)) or "-",T.text},
+            {"Died",ago(b),T.muted},
+            {"Distance",dist,T.blue},
+        }
+        for i,rw in ipairs(info) do
+            local rY=cy+64+(i-1)*30
+            rect(detX+16,rY,detW-32,24,T.panel,63,0.55,5)
+            txt(rw[1],detX+26,rY+5,12,T.muted,64)
+            local v=trim(rw[2],20)
+            txt(v,detX+detW-26-tw(v,13),rY+5,13,rw[3] or T.text,64,false,Drawing.Fonts.SystemBold)
+        end
+        local marked=GUI.PLMarkBody and GUI.PLMarkBody.model==b.model
+        button("plmark",detX+16,cy+dH-44,detW-32,30,marked and "Unmark Body" or "Mark Body",function()
+            if GUI.PLMarkBody and GUI.PLMarkBody.model==b.model then GUI.PLMarkBody=nil else GUI.PLMarkBody=b end
+        end,true,T.red)
+    elseif p then
         local mh=(p.MaxHealth and p.MaxHealth>0) and p.MaxHealth or maxf(100,p.Health or 0)
         local alive=not p.Dead; local chipC=alive and T.green or T.red
         txt(trim(p.DisplayName or p.Name,16),detX+16,cy+14,18,T.text,64,false,Drawing.Fonts.SystemBold)
