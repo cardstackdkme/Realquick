@@ -6078,9 +6078,22 @@ end)()  -- /Music
         local h = size + 4
         local pad = 4
 
+        -- On death the character model is renamed <name>_ragdoll and becomes the corpse (the
+        -- Player still points at it until respawn), so a twice-a-second name check hides the dead.
+        local now = os.clock()
         local cands = {}
         for name, e in pairs(ACTOR_ESP.Objects) do
-            if e.role == "actor" or showStaff then
+            if e.char and (e.deadAt == nil or now - e.deadAt > 0.5 or e.deadChar ~= e.char) then
+                local nm = nil
+                pcall(function() nm = e.char.Name end)
+                e.dead = type(nm) == "string" and nm:sub(-8) == "_ragdoll"
+                e.deadAt, e.deadChar = now, e.char
+            end
+            if e.dead then
+                e.selected = false
+                e.state = "dead"
+                hideEntry(e)
+            elseif e.role == "actor" or showStaff then
                 cands[#cands + 1] = name
             else
                 e.selected = false
@@ -6101,7 +6114,6 @@ end)()  -- /Music
                     e.dist = pos and distTo(origin, pos) or math.huge
                 end
             end
-            local now = os.clock()
             if now - selectAt >= SELECT_EVERY then
                 selectAt = now
                 local order = {}
