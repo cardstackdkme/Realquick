@@ -456,6 +456,7 @@ local STAFF_ROLE_NAMES = {
     [18] = "Actor Mgmt",
 }
 local STAFF_ESP = {
+    Enabled = false,
     Objects = {},   -- [playerName] = { character, cachedPart, prefixTag, nameTag, roleName }
 }
 
@@ -5937,7 +5938,7 @@ local function staffEspHide(data)
 end
 
 local function staffEspUpdate()
-    if not ACTOR_ESP.Enabled then
+    if not ACTOR_ESP.Enabled or not STAFF_ESP.Enabled then
         for _, data in pairs(STAFF_ESP.Objects) do staffEspHide(data) end
         return
     end
@@ -6367,7 +6368,7 @@ local function ESPLoop()
 
             if ACTOR_ESP.Enabled then
                 actorEspUpdate()
-                staffEspUpdate()
+                if STAFF_ESP.Enabled then staffEspUpdate() end
                 wasOn.actorEsp = true
             elseif wasOn.actorEsp then
                 for _, data in pairs(ACTOR_ESP.Objects) do
@@ -6412,7 +6413,7 @@ local function ESPLoop()
                 end
                 if ACTOR_ESP.Enabled then
                     actorEspScan(); actorEspCleanup()
-                    staffEspScan(); staffEspCleanup()
+                    if STAFF_ESP.Enabled then staffEspScan(); staffEspCleanup() end
                 end
                 if GUI.CounterVisible then
                     pcall(function()
@@ -6464,6 +6465,7 @@ saveConfig = function()
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
+            staffEsp     = STAFF_ESP.Enabled,
         },
         ores = oresOn,
         titan = {
@@ -6547,6 +6549,7 @@ loadConfig = function()
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
+        if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
         if type(f.deathLog)     == "boolean" then
             DEATHLOG.Enabled    = f.deathLog
             -- Re-seed so ragdolls already on the ground when the script
@@ -10745,17 +10748,26 @@ end)()
             ACTOR_ESP.Enabled = v
             if v and actorEspScan then
                 pcall(actorEspScan)
-                pcall(staffEspScan)
+                if STAFF_ESP.Enabled then pcall(staffEspScan) end
                 local registered, alive = 0, 0
                 for _, data in pairs(ACTOR_ESP.Objects) do
                     registered = registered + 1
                     if data.liveModel then alive = alive + 1 end
                 end
-                local staffCount = 0
-                for _ in pairs(STAFF_ESP.Objects) do staffCount = staffCount + 1 end
-                uiNotify("Actors", registered .. " registered, " .. alive .. " alive | " .. staffCount .. " staff", 4)
+                uiNotify("Actors", registered .. " registered, " .. alive .. " alive", 4)
             end
         end)
+        secEnt:Toggle("Show Staff", STAFF_ESP.Enabled, function(v)
+            STAFF_ESP.Enabled = v
+            if v and ACTOR_ESP.Enabled and staffEspScan then
+                pcall(staffEspScan)
+                local staffCount = 0
+                for _ in pairs(STAFF_ESP.Objects) do staffCount = staffCount + 1 end
+                uiNotify("Staff ESP", staffCount .. " staff detected", 4)
+            elseif v and not ACTOR_ESP.Enabled then
+                uiNotify("Staff ESP", "Turn on Actors first", 4)
+            end
+        end):Tooltip("shows staff members (Trial Mod \226\128\147 Developer) on the ESP overlay. Actors must be enabled first")
     end)
 
     -- ===== Tab: Style =====
