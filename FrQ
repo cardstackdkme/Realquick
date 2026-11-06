@@ -6045,8 +6045,10 @@ end)()  -- /Music
         return pos
     end
 
+    -- Camera to their feet (3 studs under the root part), to match Matcha's own ESP readout:
+    -- in a side-by-side frame it read 16 where camera-to-root read 14, with the camera above.
     local function distTo(origin, pos)
-        local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
+        local dx, dy, dz = origin.X - pos.X, origin.Y - (pos.Y - 3), origin.Z - pos.Z
         return math.sqrt(dx * dx + dy * dy + dz * dz)
     end
 
