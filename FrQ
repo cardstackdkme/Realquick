@@ -6019,7 +6019,7 @@ end)()  -- /Music
         return math.sqrt(dx * dx + dy * dy + dz * dz)
     end
 
-    -- Label cap: when more players are tagged than MaxLabels, only the
+    -- Label cap (MaxLabels 0 = no cap): when more players are tagged than it, only the
     -- nearest get drawn. Selected labels refresh their distance as they
     -- draw; a few others are re-measured per frame, and the nearest set
     -- is re-picked a few times a second.
@@ -6035,6 +6035,7 @@ end)()  -- /Music
         local showStaff = STAFF_ESP.Enabled
         local limit = ACTOR_ESP.NearbyOnly and ACTOR_ESP.ScanRadius or ACTOR_ESP.MaxDistance
         local cap = ACTOR_ESP.MaxLabels
+        if cap <= 0 then cap = math.huge end
         local size = ACTOR_ESP.TextSize
         local cw = size * 0.55
         local h = size + 6
@@ -10914,9 +10915,9 @@ end)()
         secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
             ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
         end):Tooltip("studs from the camera that Nearby Only covers")
-        secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 5, 5, 150, "", function(v)
-            ACTOR_ESP.MaxLabels = math.floor(tonumber(v) or ACTOR_ESP.MaxLabels)
-        end):Tooltip("most actor/staff labels drawn at once - the nearest win. Keeps big events smooth; raising it costs frames")
+        secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 1, 0, 1000, "", function(v)
+            ACTOR_ESP.MaxLabels = math.max(0, math.floor(tonumber(v) or ACTOR_ESP.MaxLabels))
+        end):Tooltip("most actor/staff labels drawn at once - the nearest win. 0 = no cap. Click the number to type one")
     end)
 
     -- ===== Tab: Style =====
