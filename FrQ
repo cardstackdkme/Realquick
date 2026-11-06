@@ -5913,8 +5913,10 @@ do
     end
 
     function ACTOR_ESP.update()
+        ACTOR_ESP.frames = (ACTOR_ESP.frames or 0) + 1
         local playerPos = getPlayerPos()
-        if not playerPos then return end
+        if not playerPos then ACTOR_ESP.state = "no local position"; return end
+        ACTOR_ESP.state = "ok"
         local showStaff = STAFF_ESP.Enabled
         local size = ACTOR_ESP.TextSize
         local cw = size * 0.55
@@ -5948,8 +5950,11 @@ do
             end
 
             if not (screenPos and onScreen) then
+                e.state = not char and "no character" or not e.part and "no part"
+                    or not pos and "no position" or not screenPos and "too far" or "off screen"
                 hideEntry(e)
             else
+                e.state = "shown"
                 local roleStr = e.role == "staff" and "STAFF" or "ACTOR"
                 local distStr = tostring(math.floor(dist))
                 local distW = pad + #distStr * cw + 5 + 9 + pad
@@ -5993,6 +5998,7 @@ do
     -- error of each stage is shown on screen.
     function ACTOR_ESP.guard(stage, fn)
         local ok, err = pcall(fn)
+        if not ok then ACTOR_ESP.lastError = stage .. ": " .. tostring(err) end
         if not ok and not reported[stage] then
             reported[stage] = true
             pcall(function() uiNotify("Actor ESP error (" .. stage .. ")", tostring(err), 10) end)
@@ -6009,6 +6015,7 @@ do
     end
 
     loadKnownSlots()
+    _G.__RQ_ACTOR_ESP = ACTOR_ESP
 end
 
 -- Helper: hide all labels for a simple ESP type
