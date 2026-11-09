@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.4"
+GUI.Version = "v8.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7612,6 +7612,80 @@ end
 -- Load saved config BEFORE building the menu so the first paint reflects on-disk state
 pcall(loadConfig)
 
+-- GUI layout cache (Settings > Layout). "Save GUI Positions" snapshots every panel's spot plus the
+-- menu window's into RQLayout.json; it is applied right here, after the config, so the saved layout
+-- wins on every load until it is cleared. On GUI rather than chunk locals: the main chunk is close
+-- to Lua's 200-local limit.
+GUI.LayoutPath = CONFIG_DIR .. "/RQLayout.json"
+GUI.LayoutFields = {
+    "PlayerListX", "PlayerListY", "PlayerListW", "PlayerListH",
+    "EnchantsX", "EnchantsY", "EnchantsW", "EnchantsH",
+    "RSDiffX", "RSDiffY", "RSDiffW", "RSDiffH",
+    "VeloX", "VeloY", "HealthBarX", "HealthBarY", "GasBarX", "GasBarY",
+    "CounterX", "CounterY", "AGKeyX", "AGKeyY", "AGPanelX", "AGPanelY",
+}
+function GUI.SaveLayout()
+    if type(writefile) ~= "function" then return false, "writefile not available" end
+    local out = { v = 1, panels = {} }
+    for _, k in ipairs(GUI.LayoutFields) do
+        local v = GUI[k]
+        if type(v) == "number" then out.panels[k] = math.floor(v + 0.5) end
+    end
+    -- The lib publishes the window rect as a fresh _G.RQGeo every frame it renders, and the
+    -- button that calls this is inside that window, so it is current.
+    local g = _G.RQGeo
+    if type(g) == "table" and tonumber(g.wx) and tonumber(g.wy) then
+        out.menu = { x = math.floor(g.wx + 0.5), y = math.floor(g.wy + 0.5), w = tonumber(g.ww), h = tonumber(g.wh) }
+    end
+    local ok, err = pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then
+            makefolder(CONFIG_DIR)
+        end
+        writefile(GUI.LayoutPath, HttpService:JSONEncode(out))
+    end)
+    if not ok then return false, tostring(err) end
+    return true
+end
+function GUI.LoadLayout()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
+    if not isfile(GUI.LayoutPath) then return end
+    local ok, raw = pcall(readfile, GUI.LayoutPath)
+    if not (ok and type(raw) == "string") then return end
+    local okJ, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not (okJ and type(data) == "table") then return end
+    -- A layout saved on a bigger screen must not strand anything off this one.
+    local vw, vh = 1920, 1080
+    pcall(function() local vp = Workspace.CurrentCamera.ViewportSize; vw, vh = vp.X, vp.Y end)
+    local panels = type(data.panels) == "table" and data.panels or {}
+    for _, k in ipairs(GUI.LayoutFields) do
+        local v = tonumber(panels[k])
+        if v then
+            local axis = k:sub(-1)
+            if axis == "X" then v = math.max(0, math.min(v, vw - 40))
+            elseif axis == "Y" then v = math.max(0, math.min(v, vh - 20)) end
+            GUI[k] = v
+        end
+    end
+    local m = data.menu
+    if type(m) == "table" and tonumber(m.x) and tonumber(m.y) then
+        local w, h = tonumber(m.w), tonumber(m.h)
+        GUI.LayoutMenu = {
+            x = math.max(0, math.min(tonumber(m.x), vw - 80)),
+            y = math.max(0, math.min(tonumber(m.y), vh - 40)),
+            w = (w and w >= 400 and w <= vw) and w or nil,
+            h = (h and h >= 300 and h <= vh) and h or nil,
+        }
+    end
+end
+function GUI.ClearLayout()
+    GUI.LayoutMenu = nil
+    return pcall(function()
+        if type(isfile) == "function" and not isfile(GUI.LayoutPath) then return end
+        if type(delfile) == "function" then delfile(GUI.LayoutPath) else writefile(GUI.LayoutPath, "{}") end
+    end)
+end
+pcall(GUI.LoadLayout)
+
 -- NOTE: we intentionally do NOT auto-load the RS snapshot here.
 -- The decode pass for a large saved snapshot is single-threaded and
 -- noticeably stalls startup. Users now load it explicitly via the
@@ -12092,10 +12166,12 @@ end)()
             end
         end
     end)
+    local lay = GUI.LayoutMenu
     local window = Lib:CreateWindow({
         title     = "Requiem",
         subtitle  = "Bro you don't go 290 velo",
-        size      = Vector2.new(640, 580),
+        size      = (lay and lay.w and lay.h) and Vector2.new(lay.w, lay.h) or Vector2.new(640, 580),
+        position  = lay and Vector2.new(lay.x, lay.y) or nil,   -- nil = the lib centres it
         -- Deliberately NO `badge` here. The fork was patched to draw one and it could never work:
         -- the lib scales every ZIndex by 10000 (so the patch's 629997 asked for 6,299,970,000, past
         -- int32) and it multiplies the badge alpha by the sidebar hover spring, which sits at 0
@@ -14127,6 +14203,23 @@ end)()
         secLook:Slider("Rainbow Speed", math.floor((RUITHEME.rainbowSpeed or 0.35) * 100), 1, 5, 150, "", function(v) RUITHEME.rainbowSpeed = (tonumber(v) or 35) / 100 end)
         pcall(function() secLook:Colorpicker("Accent", RUITHEME.baseAccent, function(c) RUITHEME.baseAccent = c; RUITHEME.baseAccentB = c end) end)
         secLook:Slider("Opacity", math.floor((RUITHEME.opacity or 1) * 100), 1, 30, 100, "%", function(v) RUITHEME.opacity = (tonumber(v) or 100) / 100 end)
+
+        local secLay = setTab:Section("Layout", "Left", "Where the menu and panels open")
+        secLay:Button("Save GUI Positions", function()
+            local ok, err = GUI.SaveLayout()
+            if ok then
+                uiNotify("Layout", "Saved - the menu and panels open here next time", 4)
+            else
+                uiNotify("Layout", "Could not save: " .. tostring(err), 5, "warning")
+            end
+        end)
+        secLay:Button("Clear Saved Positions", function()
+            if GUI.ClearLayout() then
+                uiNotify("Layout", "Cleared - next load uses the default spots", 4)
+            else
+                uiNotify("Layout", "Could not clear the layout file", 5, "warning")
+            end
+        end)
 
         -- Unload key. InputLoop just polls iskeypressed(GUI.CloseKey), so rebinding is only a
         -- matter of moving that number; End is the default, not a hardcoded rule. Persisted as
