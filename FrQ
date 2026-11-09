@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.15"
+GUI.Version = "v8.16"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -10409,10 +10409,18 @@ end)()
     pcall(function() getgenv().RequiemUI = RUITHEME end)
     RUITHEME.opacity, RUITHEME.rainbow = 1, false
     GUI._theme = RUITHEME   -- shared with the Requiem UI engine (robust cross-IIFE bridge)
+    -- SetTheme alone only changes what is drawn. The lib also keeps a BASE accent that its own
+    -- config saves and auto-loads (Settings > Configs), and only its Theme section's Color 1 /
+    -- Color 2 set that, so they are driven too (the section itself is hidden, see Settings).
     GUI.SetAccent = function(c)
         local b = Color3.fromRGB(math.floor(c.R * 204 + 0.5), math.floor(c.G * 204 + 0.5), math.floor(c.B * 204 + 0.5))
         RUITHEME.baseAccent, RUITHEME.baseAccentB, RUITHEME.accent, RUITHEME.accentB = c, b, c, b
         pcall(function() Lib:SetTheme({ accentA = c, accentB = b }) end)
+        local th = GUI._libTheme
+        for _, it in ipairs(th and th.items or {}) do
+            if it.label == "Color 1" and it.callback then it.value = c; pcall(it.callback, c)
+            elseif it.label == "Color 2" and it.callback then it.value = b; pcall(it.callback, b) end
+        end
     end
     do
         local sa = GUI.AccentRGB
@@ -12464,7 +12472,12 @@ end)()
             local secs = setTab._tab.sections
             for i = #secs, 1, -1 do
                 local s = secs[i]
-                if s.name == "Theme" then table.remove(secs, i) elseif s.name == "Appearance" then look = s end
+                if s.name == "Theme" then
+                    GUI._libTheme = s   -- kept: GUI.SetAccent drives its Color 1 / Color 2 (see there)
+                    table.remove(secs, i)
+                elseif s.name == "Appearance" then
+                    look = s
+                end
             end
         end)
         GUI.MenuLook = function()
@@ -12488,11 +12501,23 @@ end)()
                 GUI.AccentRGB = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
                 -- the picker fires while you drag it: save once it has been still for a second
                 GUI._accSaveAt = os.clock()
-                task.delay(1, function()
+                task.spawn(function()
+                    task.wait(1)
                     if os.clock() - (GUI._accSaveAt or 0) >= 0.95 then pcall(saveConfig) end
                 end)
             end)
             accPick:Tooltip("the menu's and the panels' accent colour. Saved with your config")
+        end)
+        -- The lib auto-loads its own config a moment after the window is ready, in the background,
+        -- and that file carries an accent of its own. Put Requiem's saved accent back on top of it
+        -- over the first seconds (the newest pick, so a change made meanwhile is kept).
+        task.spawn(function()
+            for _, d in ipairs({ 0.5, 1.5, 3, 6 }) do
+                task.wait(d)
+                local sa = GUI.AccentRGB
+                if not GUI.Running then return end
+                if type(sa) == "table" and tonumber(sa[1]) then GUI.SetAccent(Color3.fromRGB(sa[1], sa[2], sa[3])) end
+            end
         end)
         -- Both belong inside Appearance: move them to its top and drop the helper section.
         pcall(function()
