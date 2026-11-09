@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.11"
+GUI.Version = "v8.12"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -98,7 +98,6 @@ GUI.PLScrollDragLastY = 0
 GUI.PLCachedPlayers = {}    -- cached player data, fetched on open
 GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
-GUI.PowerDouble = false     -- Tools -> Admin -> "Hide admin Panel": hide the staff Editor (windows, top panel, ping pop-ups)
 
 -- Personal gas + health bars (self only, Tools -> Indicators). Both are the slim HUD bar: text
 -- inside a 14 px bar. X/Y nil = not placed yet: the first build puts gas centred above the
@@ -178,25 +177,9 @@ GUI.RSDiffScrollDragLastY = 0
 GUI.RSDiffStatus        = ""    -- text shown next to title
 GUI.RSOverwriteConfirmAt = nil  -- tick() of first overwrite click; 2nd click within 3s commits
 
--- Velocity Indicator popup (Tools toggle). Reads the game's own PlayerGui.Velocity.Velocity.Speed
--- label as the live max velo, then projects it through the Character-tab Max Velocity multiplier.
-GUI.VeloOpen            = false
-GUI.VeloX               = 40
-GUI.VeloY               = 300
-GUI.VeloMult            = 1.11   -- kept in sync with the Character tab's Max Velocity slider
-GUI.VeloPeak            = 0
-GUI.VeloPeakHiAt        = nil    -- os.clock() when peak first exceeded 400 (drives the 5s auto-reset)
 
 -- Monitor bars (per-player, from player list)
 GUI.MonitorBars = {}  -- { [playerName] = { elements={}, x=, y=, w=, h=, dragging=, dragOX=, dragOY= } }
-GUI.PlayerListKey = 0x63         -- default Numpad3 (VK_NUMPAD3)
-GUI.ListeningForPLKey = false
-GUI.WasPLKeyDown = false
-
--- Player ESP toggle key
-GUI.PlayerEspKey = 0x70          -- default F1 (VK_F1)
-GUI.ListeningForPEKey = false
-GUI.WasPEKeyDown = false
 
 -- Counter panel (independent of main GUI)
 GUI.CounterVisible = false
@@ -309,18 +292,6 @@ local RESUPPLY = {
 }
 
 -- ============================================================
--- FLINTLOCK ESP CONFIG
--- ============================================================
-
-local FLINTLOCK = {
-    Enabled = false,
-    MaxDistance = 50000,
-    ESPColor = Color3.fromRGB(255, 50, 50),
-    TextSize = 18,
-    Objects = {},
-}
-
--- ============================================================
 -- TITAN ESP CONFIG
 -- ============================================================
 
@@ -404,23 +375,6 @@ local ANIMAL_SKIP_PARTS = {
 }
 
 -- ============================================================
--- PLAYER ESP CONFIG
--- ============================================================
-
-local PLAYER_ESP = {
-    Enabled = false,
-    MaxDistance = 5000,
-    ESPColor = Color3.fromRGB(255, 255, 255),
-    TextSize = 17,
-    FontIndex = 3,
-    Objects = {},
-    -- Ragdoll ESP: [<Player>_ragdoll modelName] = { model, deadTag, nameTag, cleanName }
-    -- Same toggle as live Player ESP — when on, dead bodies in Workspace
-    -- get a red "(DEAD)" + white name label above them.
-    DeadObjects = {},
-}
-
--- ============================================================
 -- ACTOR ESP CONFIG
 -- ============================================================
 -- Actor ESP: players flagged as actors (or staff) from public signals —
@@ -428,19 +382,12 @@ local PLAYER_ESP = {
 -- Objects shape: [playerName] = { role, flags, char, part, <drawings> }
 local ACTOR_ESP = {
     Enabled     = false,
-    NearbyOnly  = false,
-    ScanRadius  = 500,
     MaxLabels   = 25,
     Opacity     = 1,       -- pill opacity (lower lets you see the player under the label)
     MaxDistance = 100000,
     TextSize    = 13,
     FontIndex   = 3,
     Objects     = {},
-}
-
--- Staff toggle: also show players classified as staff. Needs Actors on.
-local STAFF_ESP = {
-    Enabled = false,
 }
 
 -- Branch tag prefix shown before player names in the ESP (e.g. "[SL] Name").
@@ -2043,125 +1990,6 @@ local function gearCleanup()
 end
 
 -- ============================================================
--- FLINTLOCK ESP ENGINE
--- ============================================================
-
-local function flintlockResolvePart(obj)
-    local part = nil
-    pcall(function() part = obj:FindFirstChild("Handle") end)
-    if part then return part end
-    pcall(function() part = obj:FindFirstChild("Part") end)
-    if part then return part end
-    -- Fall back to first child that has a Position (i.e. a BasePart)
-    pcall(function()
-        for _, child in pairs(obj:GetChildren()) do
-            local ok, _ = pcall(function() return child.Position end)
-            if ok and child.Position then part = child; return end
-        end
-    end)
-    if part then return part end
-    -- Object itself may be a BasePart
-    local okSelf = false
-    pcall(function() if obj.Position then okSelf = true end end)
-    if okSelf then return obj end
-    return nil
-end
-
-local function flintlockRegisterObj(obj)
-    if obj.Name ~= "Flintlock" then return end
-    local id = tostring(obj.Address)
-    if FLINTLOCK.Objects[id] then return end
-    local part = flintlockResolvePart(obj)
-    if not part then return end
-    local label = Drawing.new("Text")
-    label.Text = "Flintlock"
-    label.Color = FLINTLOCK.ESPColor
-    label.Size = FLINTLOCK.TextSize
-    label.Center = true
-    label.Outline = true
-    label.Visible = false
-    label.ZIndex = 50
-    FLINTLOCK.Objects[id] = {
-        label = label,
-        obj = obj,
-        part = part,
-    }
-end
-
-local function flintlockScan()
-    for _, obj in pairs(Workspace:GetChildren()) do
-        flintlockRegisterObj(obj)
-    end
-end
-
-local function flintlockUpdate()
-    if not FLINTLOCK.Enabled then
-        for _, data in pairs(FLINTLOCK.Objects) do
-            data.label.Visible = false
-        end
-        return
-    end
-
-    local playerPos = getPlayerPos()
-    if not playerPos then return end
-
-    for id, data in pairs(FLINTLOCK.Objects) do
-        local obj = data.obj
-        local part = data.part
-        if not obj or not obj.Parent then
-            data.label.Visible = false
-        else
-            -- If the cached part is gone, try to re-resolve once
-            if not part or not part.Parent then
-                part = flintlockResolvePart(obj)
-                data.part = part
-            end
-            if not part then
-                data.label.Visible = false
-            else
-                local pos = nil
-                pcall(function() pos = part.Position end)
-                if not pos then
-                    data.label.Visible = false
-                else
-                    local dx = playerPos.X - pos.X
-                    local dy = playerPos.Y - pos.Y
-                    local dz = playerPos.Z - pos.Z
-                    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-
-                    if dist > FLINTLOCK.MaxDistance then
-                        data.label.Visible = false
-                    else
-                        local screenPos, onScreen = WorldToScreen(pos)
-                        if onScreen and screenPos then
-                            local fd = math.floor(dist)
-                            if data.lastDist ~= fd then
-                                data.label.Text = "Flintlock [" .. fd .. "m]"
-                                data.lastDist = fd
-                            end
-                            data.label.Position = Vector2.new(screenPos.X, screenPos.Y)
-                            data.label.Visible = true
-                        else
-                            data.label.Visible = false
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
-local function flintlockCleanup()
-    for id, data in pairs(FLINTLOCK.Objects) do
-        local obj = data.obj
-        if not obj or not obj.Parent then
-            data.label:Remove()
-            FLINTLOCK.Objects[id] = nil
-        end
-    end
-end
-
--- ============================================================
 -- RESUPPLY CART ESP ENGINE
 -- ============================================================
 
@@ -2192,9 +2020,9 @@ local function resupplyRegisterObj(obj)
         local t = Drawing.new("Text")
         t.Color = RESUPPLY.ESPColor
         t.Size = RESUPPLY.TextSize
-        -- Match the Player ESP font (SystemBold) so all "world-overlay"
-        -- text reads as belonging to the same set of indicators.
-        t.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
+        -- SystemBold, the font every world-overlay label uses, so all of them
+        -- read as belonging to the same set of indicators.
+        t.Font = TITAN_FONTS[3].font
         t.Center = true
         t.Outline = true
         t.Visible = false
@@ -3022,232 +2850,10 @@ local function animalCleanup()
 end
 
 -- ============================================================
--- PLAYER ESP ENGINE
+-- DEAD BODIES (ragdolls in Workspace)
 -- ============================================================
-
-local function playerEspRegister(player)
-    pcall(function()
-        if player == LocalPlayer then return end
-        local id = player.Name
-        if PLAYER_ESP.Objects[id] then return end
-
-        local nameTag = Drawing.new("Text")
-        nameTag.Color = PLAYER_ESP.ESPColor
-        nameTag.Size = PLAYER_ESP.TextSize
-        nameTag.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        nameTag.Center = false
-        nameTag.Outline = true
-        nameTag.Visible = false
-        nameTag.ZIndex = 52
-
-        -- The branch tag is two stacked Text drawings: a white "[XX]" base
-        -- (so brackets+letters are spaced by the font's natural kerning) and
-        -- a colored "XX" overlay drawn on top, positioned over the inner
-        -- letters so only those pick up the branch color. The brackets in
-        -- the base remain visible (white).
-        local tagBase = Drawing.new("Text")
-        tagBase.Color = Color3.fromRGB(255, 255, 255)
-        tagBase.Size = PLAYER_ESP.TextSize
-        tagBase.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        tagBase.Center = false
-        tagBase.Outline = true
-        tagBase.Visible = false
-        tagBase.ZIndex = 52
-
-        local branchTag = Drawing.new("Text")
-        branchTag.Size = PLAYER_ESP.TextSize
-        branchTag.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        branchTag.Center = false
-        branchTag.Outline = true
-        branchTag.Visible = false
-        branchTag.ZIndex = 53
-
-        local hpTag = Drawing.new("Text")
-        hpTag.Color = Color3.fromRGB(255, 255, 255)
-        hpTag.Size = PLAYER_ESP.TextSize - 1
-        hpTag.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        hpTag.Center = true
-        hpTag.Outline = true
-        hpTag.Visible = false
-        hpTag.ZIndex = 52
-
-        PLAYER_ESP.Objects[id] = {
-            player = player,
-            nameTag = nameTag,
-            tagBase = tagBase,
-            branchTag = branchTag,
-            hpTag = hpTag,
-        }
-    end)
-end
-
-local function playerEspScan()
-    local plist = nil
-    pcall(function() plist = game:GetService("Players"):GetPlayers() end)
-    if not plist then return end
-    for _, p in ipairs(plist) do
-        playerEspRegister(p)
-    end
-end
-
-local function readPlayerHpFast(player)
-    local hp, maxHp = 100, 100
-    local sawMax = false
-    pcall(function()
-        local h = player:GetAttribute("Health")
-        if h then hp = tonumber(h) or hp end
-        local m = player:GetAttribute("Maximum health")
-        if not m then m = player:GetAttribute("MaxHealth") end
-        if not m then m = player:GetAttribute("MaximumHealth") end
-        if m then maxHp = tonumber(m) or maxHp; sawMax = true end
-    end)
-    if not sawMax then
-        pcall(function()
-            local char = player.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    local m = tonumber(hum.MaxHealth)
-                    if m and m > 0 then maxHp = m; sawMax = true end
-                    local h = tonumber(hum.Health)
-                    if h then hp = h end
-                end
-            end
-        end)
-    end
-    if not sawMax then maxHp = math.max(100, hp) end
-    if maxHp <= 0 then maxHp = 100 end
-    if hp < 0 then hp = 0 end
-    if hp > maxHp then hp = maxHp end
-    return hp, maxHp
-end
-
-local function playerEspUpdate()
-    if not PLAYER_ESP.Enabled then
-        for _, data in pairs(PLAYER_ESP.Objects) do
-            data.nameTag.Visible = false
-            data.tagBase.Visible = false
-            data.branchTag.Visible = false
-            data.hpTag.Visible = false
-        end
-        return
-    end
-
-    local playerPos = getPlayerPos()
-    if not playerPos then return end
-
-    for id, data in pairs(PLAYER_ESP.Objects) do
-        local player = data.player
-        local hide = false
-
-        if not player or not player.Parent then
-            hide = true
-        else
-            local char = nil
-            pcall(function() char = player.Character end)
-            if not char then
-                hide = true
-            else
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                    or char:FindFirstChild("Torso")
-                    or char:FindFirstChild("UpperTorso")
-                    or char:FindFirstChild("Head")
-                if not hrp then
-                    hide = true
-                else
-                    local pos = nil
-                    pcall(function() pos = hrp.Position end)
-                    if not pos then
-                        hide = true
-                    else
-                        local dx = playerPos.X - pos.X
-                        local dy = playerPos.Y - pos.Y
-                        local dz = playerPos.Z - pos.Z
-                        local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                        if dist > PLAYER_ESP.MaxDistance then
-                            hide = true
-                        else
-                            local headTop = Vector3.new(pos.X, pos.Y + 3, pos.Z)
-                            local screenPos, onScreen = WorldToScreen(headTop)
-                            if not (screenPos and onScreen) then
-                                hide = true
-                            else
-                                local hp, maxHp = readPlayerHpFast(player)
-                                local branch = nil
-                                pcall(function() branch = tonumber(player:GetAttribute("Branch")) end)
-                                local btInfo = branch and BRANCH_ESP_TAGS[branch] or nil
-                                local approxChar = PLAYER_ESP.TextSize * 0.55
-                                local nameW = #player.Name * approxChar
-                                local nameY = screenPos.Y - 40
-                                if btInfo then
-                                    -- Base text "[XX]" rendered in white; colored "XX" overlay
-                                    -- sits on top of the inner letters. bracketAdvance is the
-                                    -- offset from the base's left edge to where the inner
-                                    -- letters start (i.e. width of "[" glyph in this font).
-                                    local tagStr = "[" .. btInfo.abbrev .. "]"
-                                    local bracketAdvance = PLAYER_ESP.TextSize * 0.30
-                                    local tagW = #tagStr * approxChar
-                                    local gap = approxChar * -0.3
-                                    local totalW = tagW + gap + nameW
-                                    local leftX = screenPos.X - totalW / 2
-                                    data.tagBase.Position = Vector2.new(leftX, nameY)
-                                    data.tagBase.Text = tagStr
-                                    data.tagBase.Visible = true
-                                    data.branchTag.Position = Vector2.new(leftX + bracketAdvance, nameY)
-                                    data.branchTag.Text = btInfo.abbrev
-                                    data.branchTag.Color = btInfo.color
-                                    data.branchTag.Visible = true
-                                    data.nameTag.Position = Vector2.new(leftX + tagW + gap, nameY)
-                                else
-                                    data.tagBase.Visible = false
-                                    data.branchTag.Visible = false
-                                    data.nameTag.Position = Vector2.new(screenPos.X - nameW / 2, nameY)
-                                end
-                                data.nameTag.Text = player.Name
-                                data.nameTag.Visible = true
-                                data.hpTag.Position = Vector2.new(screenPos.X, screenPos.Y - 10)
-                                data.hpTag.Text = "(" .. tostring(math.floor(hp + 0.5)) .. " / " .. tostring(math.floor(maxHp + 0.5)) .. ")"
-                                data.hpTag.Visible = true
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if hide then
-            data.nameTag.Visible = false
-            data.tagBase.Visible = false
-            data.branchTag.Visible = false
-            data.hpTag.Visible = false
-        end
-    end
-end
-
-local function playerEspCleanup()
-    local alive = {}
-    pcall(function()
-        for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
-            alive[p.Name] = true
-        end
-    end)
-    for id, data in pairs(PLAYER_ESP.Objects) do
-        if not alive[id] then
-            pcall(function() data.nameTag:Remove() end)
-            pcall(function() data.tagBase:Remove() end)
-            pcall(function() data.branchTag:Remove() end)
-            pcall(function() data.hpTag:Remove() end)
-            PLAYER_ESP.Objects[id] = nil
-        end
-    end
-end
-
--- ============================================================
--- DEAD PLAYER ESP (ragdolls in Workspace)
--- ============================================================
--- Same toggle as live Player ESP. When a player dies the game spawns
--- "<Name>_ragdoll" Models in Workspace; we scan for those and draw a
--- red "(DEAD)" + white player name above each one.
+-- When a player dies the game spawns "<Name>_ragdoll" Models in Workspace. The Player List's
+-- Dead tab and its Body ESP button read them.
 
 local function ragdollPosition(model)
     -- Try PrimaryPart, then common rig parts, then the first BasePart child.
@@ -3427,127 +3033,6 @@ end
     end)
 end)()
 
-local function playerEspDeadRegister(model)
-    pcall(function()
-        local cls
-        pcall(function() cls = model.ClassName end)
-        if cls ~= "Model" then return end
-        local nm = model.Name
-        if type(nm) ~= "string" then return end
-        local len = #nm
-        if len <= 8 or nm:sub(len - 7) ~= "_ragdoll" then return end
-        if PLAYER_ESP.DeadObjects[nm] then return end
-
-        -- "Player_ragdoll" → "Player"
-        local clean = nm:sub(1, len - 8)
-        if clean == "" then clean = nm end
-
-        local deadTag = Drawing.new("Text")
-        deadTag.Color = Color3.fromRGB(255, 60, 60)
-        deadTag.Size = PLAYER_ESP.TextSize
-        deadTag.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        deadTag.Center = false
-        deadTag.Outline = true
-        deadTag.Visible = false
-        deadTag.ZIndex = 52
-
-        local nameTag = Drawing.new("Text")
-        nameTag.Color = Color3.fromRGB(220, 220, 225)
-        nameTag.Size = PLAYER_ESP.TextSize
-        nameTag.Font = TITAN_FONTS[PLAYER_ESP.FontIndex].font
-        nameTag.Center = false
-        nameTag.Outline = true
-        nameTag.Visible = false
-        nameTag.ZIndex = 52
-
-        PLAYER_ESP.DeadObjects[nm] = {
-            model     = model,
-            deadTag   = deadTag,
-            nameTag   = nameTag,
-            cleanName = clean,
-        }
-    end)
-end
-
-local function playerEspDeadScan()
-    local kids
-    pcall(function() kids = Workspace:GetChildren() end)
-    if not kids then return end
-    for _, c in ipairs(kids) do
-        playerEspDeadRegister(c)
-    end
-end
-
-local function playerEspDeadHide(data)
-    data.deadTag.Visible = false
-    data.nameTag.Visible = false
-end
-
-local function playerEspDeadUpdate()
-    if not PLAYER_ESP.Enabled then
-        for _, data in pairs(PLAYER_ESP.DeadObjects) do playerEspDeadHide(data) end
-        return
-    end
-    local playerPos = getPlayerPos()
-    if not playerPos then return end
-
-    for nm, data in pairs(PLAYER_ESP.DeadObjects) do
-        local model = data.model
-        if not model or not model.Parent then
-            playerEspDeadHide(data)
-        else
-            local pos = ragdollPosition(model)
-            if not pos then
-                playerEspDeadHide(data)
-            else
-                local dx = playerPos.X - pos.X
-                local dy = playerPos.Y - pos.Y
-                local dz = playerPos.Z - pos.Z
-                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                if dist > PLAYER_ESP.MaxDistance then
-                    playerEspDeadHide(data)
-                else
-                    local headTop = Vector3.new(pos.X, pos.Y + 3, pos.Z)
-                    local screenPos, onScreen = WorldToScreen(headTop)
-                    if not (screenPos and onScreen) then
-                        playerEspDeadHide(data)
-                    else
-                        -- Center "(DEAD) Name" horizontally above the body.
-                        -- Approx glyph width = TextSize * 0.55 matches the
-                        -- live player ESP's centering math.
-                        local approxChar = PLAYER_ESP.TextSize * 0.55
-                        local deadStr = "(DEAD) "
-                        local deadW = #deadStr * approxChar
-                        local nameW = #data.cleanName * approxChar
-                        local totalW = deadW + nameW
-                        local leftX = screenPos.X - totalW / 2
-                        local y = screenPos.Y - 20
-
-                        data.deadTag.Position = Vector2.new(leftX, y)
-                        data.deadTag.Text = "(DEAD)"
-                        data.deadTag.Visible = true
-
-                        data.nameTag.Position = Vector2.new(leftX + deadW, y)
-                        data.nameTag.Text = data.cleanName
-                        data.nameTag.Visible = true
-                    end
-                end
-            end
-        end
-    end
-end
-
-local function playerEspDeadCleanup()
-    for nm, data in pairs(PLAYER_ESP.DeadObjects) do
-        local model = data.model
-        if not model or not model.Parent then
-            pcall(function() data.deadTag:Remove() end)
-            pcall(function() data.nameTag:Remove() end)
-            PLAYER_ESP.DeadObjects[nm] = nil
-        end
-    end
-end
-
 -- ============================================================
 -- MAIN LOOP (polling Mouse.X/Y + ismouse1pressed)
 -- ============================================================
@@ -3601,54 +3086,6 @@ local function InputLoop()
             end
         end
         GUI.WasCloseDown = closeDown
-
-        -- Player list toggle key
-        local plKeyDown = iskeypressed(GUI.PlayerListKey)
-        if plKeyDown and not GUI.WasPLKeyDown and not (GUI.PLTyping and GUI.PLTyping(GUI.PlayerListKey)) then
-            GUI.PlayerListOpen = not GUI.PlayerListOpen
-            if GUI.PlayerListOpen then
-                GUI.PLScrollOffset = 0
-                BuildPlayerList()
-            else
-                ClearPlayerList()
-            end
-            if GUI._uiPL then pcall(function() GUI._uiPL:Set(GUI.PlayerListOpen) end) end
-        end
-        GUI.WasPLKeyDown = plKeyDown
-
-        -- Player ESP toggle key
-        local peKeyDown = iskeypressed(GUI.PlayerEspKey)
-        if peKeyDown and not GUI.WasPEKeyDown and not (GUI.PLTyping and GUI.PLTyping(GUI.PlayerEspKey)) then
-            PLAYER_ESP.Enabled = not PLAYER_ESP.Enabled
-            if GUI._uiPE then pcall(function() GUI._uiPE:Set(PLAYER_ESP.Enabled) end) end
-        end
-        GUI.WasPEKeyDown = peKeyDown
-
-        -- Keybind listening mode: scan for any key press (GUI toggle or PL key)
-        -- PL keybind listening (independent, always runs)
-        if GUI.ListeningForPLKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.PlayerListKey = vk
-                    GUI.ListeningForPLKey = false
-                    BuildPlayerList()
-                    task.wait(0.2)
-                    break
-                end
-            end
-        end
-
-        -- PE keybind listening (independent, always runs)
-        if GUI.ListeningForPEKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.PlayerEspKey = vk
-                    GUI.ListeningForPEKey = false
-                    task.wait(0.2)
-                    break
-                end
-            end
-        end
 
         -- Close keybind listening (independent, always runs). After capture
         -- we reset CloseKeyReady so the just-captured key — which is by
@@ -4314,7 +3751,7 @@ local function InputLoop()
         local interactive = GUI.Visible
             or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
             or GUI.CounterVisible or GUI.HealthBarVisible or GUI.GasBarVisible
-            or GUI.ListeningForKey or GUI.ListeningForPLKey or GUI.ListeningForPEKey or GUI.ListeningForCloseKey
+            or GUI.ListeningForKey or GUI.ListeningForCloseKey
             or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging or GUI.GasBarDragging
             or GUI.PlayerListDragging or GUI.EnchantsDragging or GUI.RSDiffDragging
             or next(GUI.MonitorBars) ~= nil
@@ -5304,8 +4741,6 @@ UnloadScript = function()
     -- landmine engine, so naming LANDMINE here would resolve to a nil global.
     if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
     if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
-    -- never leave the staff Editor hidden behind us (see the POWERDOUBLE block)
-    if GUI.PowerDoubleCleanup then pcall(GUI.PowerDoubleCleanup) end
     -- nor the game's speed number (see the HIDDENS block)
     if GUI.HiddensCleanup then pcall(GUI.HiddensCleanup) end
     for _, data in pairs(GEAR.Objects) do
@@ -5318,10 +4753,6 @@ UnloadScript = function()
         pcall(function() data.distText:Remove() end)
     end
     RESUPPLY.Objects = {}
-    for _, data in pairs(FLINTLOCK.Objects) do
-        pcall(function() data.label:Remove() end)
-    end
-    FLINTLOCK.Objects = {}
     for _, data in pairs(TITAN.Objects) do
         pcall(function()
             for _, ln in ipairs(data.boneLines) do ln:Remove() end
@@ -5339,18 +4770,6 @@ UnloadScript = function()
         end)
     end
     ANIMAL.Objects = {}
-    for _, data in pairs(PLAYER_ESP.Objects) do
-        pcall(function() data.nameTag:Remove() end)
-        pcall(function() data.tagBase:Remove() end)
-        pcall(function() data.branchTag:Remove() end)
-        pcall(function() data.hpTag:Remove() end)
-    end
-    PLAYER_ESP.Objects = {}
-    for _, data in pairs(PLAYER_ESP.DeadObjects) do
-        pcall(function() data.deadTag:Remove() end)
-        pcall(function() data.nameTag:Remove() end)
-    end
-    PLAYER_ESP.DeadObjects = {}
     pcall(ACTOR_ESP.destroyAll)
     uiNotify("Menu", "Unloaded!", 3)
 end
@@ -6097,7 +5516,7 @@ end)()  -- /Music
 --                   staff can hide the whole server at once. Anyone already
 --                   tagged before being hidden keeps their tag while their
 --                   character stays in the world.
--- A player with StaffState but no flag is staff (pink, Show Staff on).
+-- A player with StaffState but no flag is staff (listed in the Player List's Staff tab, never drawn).
 --
 -- Measured Matcha costs: GetAttribute ~1.5ms, Workspace:FindFirstChild
 -- ~2.6ms, reading .Character ~0.07ms. So work runs each frame under a
@@ -6308,20 +5727,6 @@ end)()  -- /Music
             c.part = char and resolvePart(char) or nil
             c.readAt = nil
             changed = true
-        end
-
-        if ACTOR_ESP.NearbyOnly and origin and c.part then
-            local pos
-            pcall(function() pos = c.part.Position end)
-            if not pos and c.char then
-                c.part = resolvePart(c.char)
-                if c.part then pcall(function() pos = c.part.Position end) end
-            end
-            if pos then
-                local dx, dy, dz = origin.X - pos.X, origin.Y - pos.Y, origin.Z - pos.Z
-                local r = ACTOR_ESP.ScanRadius
-                if dx * dx + dy * dy + dz * dz > r * r then return changed end
-            end
         end
 
         if c.readAt and now - c.readAt < REREAD_EVERY then return changed end
@@ -6544,8 +5949,7 @@ end)()  -- /Music
         local origin = originPos()
         if not origin then ACTOR_ESP.state = "no camera position"; return end
         ACTOR_ESP.state = "ok"
-        local showStaff = STAFF_ESP.Enabled
-        local limit = ACTOR_ESP.NearbyOnly and ACTOR_ESP.ScanRadius or ACTOR_ESP.MaxDistance
+        local limit = ACTOR_ESP.MaxDistance
         local cap = ACTOR_ESP.MaxLabels
         if cap <= 0 then
             ACTOR_ESP.state = "labels set to 0"
@@ -6572,7 +5976,7 @@ end)()  -- /Music
                 e.selected = false
                 e.state = "dead"
                 hideEntry(e)
-            elseif e.role == "actor" or showStaff then
+            elseif e.role == "actor" then
                 cands[#cands + 1] = name
             else
                 e.selected = false
@@ -7211,8 +6615,8 @@ local function ESPLoop()
     while GUI.Running do
         -- Check what's active
         local oreOn = anyOreEnabled()
-        local anyActive = oreOn or MARCS.Enabled or GEAR.Enabled or RESUPPLY.Enabled or FLINTLOCK.Enabled
-            or TITAN.Enabled or ANIMAL.Enabled or PLAYER_ESP.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
+        local anyActive = oreOn or MARCS.Enabled or GEAR.Enabled or RESUPPLY.Enabled
+            or TITAN.Enabled or ANIMAL.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
             or LANDMINE.Enabled or GUI.CounterVisible or ACTOR_ESP.Classify
 
         -- If nothing is active, sleep longer
@@ -7223,7 +6627,6 @@ local function ESPLoop()
             if wasOn.marcs then hideESPLabels(MARCS.Objects); wasOn.marcs = false end
             if wasOn.gear then hideESPLabels(GEAR.Objects); wasOn.gear = false end
             if wasOn.resupply then hideResupplyLabels(); wasOn.resupply = false end
-            if wasOn.flintlock then hideESPLabels(FLINTLOCK.Objects); wasOn.flintlock = false end
             if wasOn.landmine then LANDMINE.hide(); wasOn.landmine = false end
             if wasOn.titan then
                 for _, data in pairs(TITAN.Objects) do
@@ -7241,19 +6644,6 @@ local function ESPLoop()
                     data.nameTag.Visible = false
                 end
                 wasOn.animal = false
-            end
-            if wasOn.playerEsp then
-                for _, data in pairs(PLAYER_ESP.Objects) do
-                    data.nameTag.Visible = false
-                    data.tagBase.Visible = false
-                    data.branchTag.Visible = false
-                    data.hpTag.Visible = false
-                end
-                for _, data in pairs(PLAYER_ESP.DeadObjects) do
-                    data.deadTag.Visible = false
-                    data.nameTag.Visible = false
-                end
-                wasOn.playerEsp = false
             end
             if wasOn.actorEsp then
                 ACTOR_ESP.hideAll()
@@ -7274,8 +6664,6 @@ local function ESPLoop()
             if RESUPPLY.Enabled then resupplyUpdate(); wasOn.resupply = true
             elseif wasOn.resupply then hideResupplyLabels(); wasOn.resupply = false end
 
-            if FLINTLOCK.Enabled then flintlockUpdate(); wasOn.flintlock = true
-            elseif wasOn.flintlock then hideESPLabels(FLINTLOCK.Objects); wasOn.flintlock = false end
 
             if LANDMINE.Enabled then LANDMINE.update(); wasOn.landmine = true
             elseif wasOn.landmine then LANDMINE.hide(); wasOn.landmine = false end
@@ -7301,23 +6689,6 @@ local function ESPLoop()
                 wasOn.animal = false
             end
 
-            if PLAYER_ESP.Enabled then
-                playerEspUpdate()
-                playerEspDeadUpdate()
-                wasOn.playerEsp = true
-            elseif wasOn.playerEsp then
-                for _, data in pairs(PLAYER_ESP.Objects) do
-                    data.nameTag.Visible = false
-                    data.tagBase.Visible = false
-                    data.branchTag.Visible = false
-                    data.hpTag.Visible = false
-                end
-                for _, data in pairs(PLAYER_ESP.DeadObjects) do
-                    data.deadTag.Visible = false
-                    data.nameTag.Visible = false
-                end
-                wasOn.playerEsp = false
-            end
 
             if ACTOR_ESP.Enabled then
                 ACTOR_ESP.guard("step", ACTOR_ESP.step)
@@ -7353,14 +6724,9 @@ local function ESPLoop()
                 if GEAR.Enabled then gearScan(); gearCleanup() end
                 if RESUPPLY.Enabled or GUI.CounterVisible then resupplyScan(); resupplyCleanup() end
                 if RESUPPLY.Enabled or GUI.CounterVisible then updateResupplyCounter() end
-                if FLINTLOCK.Enabled then flintlockScan(); flintlockCleanup() end
                 if LANDMINE.Enabled then LANDMINE.scan(); LANDMINE.cleanup() end
                 if TITAN.Enabled then titanScan(); titanCleanup() end
                 if ANIMAL.Enabled then animalScan(); animalCleanup() end
-                if PLAYER_ESP.Enabled then
-                    playerEspScan(); playerEspCleanup()
-                    playerEspDeadScan(); playerEspDeadCleanup()
-                end
                 if GUI.CounterVisible then
                     pcall(function()
                         local titans = Workspace:FindFirstChild("Titans")
@@ -7389,8 +6755,6 @@ saveConfig = function()
         binds = {
             toggle     = GUI.ToggleKey,
             close      = GUI.CloseKey,
-            playerList = GUI.PlayerListKey,
-            playerEsp  = GUI.PlayerEspKey,
         },
         settings = {
             maxDistance        = ESP.MaxDistance,
@@ -7400,11 +6764,9 @@ saveConfig = function()
             marcs        = MARCS.Enabled,
             gear         = GEAR.Enabled,
             resupply     = RESUPPLY.Enabled,
-            flintlock    = FLINTLOCK.Enabled,
             landmine     = LANDMINE.Enabled,
             titan        = TITAN.Enabled,
             animal       = ANIMAL.Enabled,
-            playerEsp    = PLAYER_ESP.Enabled,
             plAutoUpdate = GUI.PLAutoUpdate,
             healthBar    = GUI.HealthBarVisible,
             gasBar       = GUI.GasBarVisible,
@@ -7413,9 +6775,6 @@ saveConfig = function()
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
-            staffEsp     = STAFF_ESP.Enabled,
-            actorNearby  = ACTOR_ESP.NearbyOnly,
-            actorRadius  = ACTOR_ESP.ScanRadius,
             actorLabels  = ACTOR_ESP.MaxLabels,
             actorRange   = ACTOR_ESP.MaxDistance,
             actorOpacity = ACTOR_ESP.Opacity,
@@ -7447,7 +6806,6 @@ saveConfig = function()
             playerListX = GUI.PlayerListX, playerListY = GUI.PlayerListY, playerListW = GUI.PlayerListW, playerListH = GUI.PlayerListH,
             enchantsX   = GUI.EnchantsX,   enchantsY   = GUI.EnchantsY,   enchantsW   = GUI.EnchantsW,   enchantsH   = GUI.EnchantsH,
             rsDiffX     = GUI.RSDiffX,     rsDiffY     = GUI.RSDiffY,     rsDiffW     = GUI.RSDiffW,     rsDiffH     = GUI.RSDiffH,
-            veloX       = GUI.VeloX,       veloY       = GUI.VeloY,
             menu        = GUI.MenuRect and GUI.MenuRect() or nil,
         },
         -- HUD bar gradients (Style -> Health / Gas Gradient): 2-5 {r,g,b} stops each, empty end first,
@@ -7476,8 +6834,6 @@ loadConfig = function()
     if type(data.binds) == "table" then
         if type(data.binds.toggle)     == "number" then GUI.ToggleKey     = data.binds.toggle     end
         if type(data.binds.close)      == "number" then GUI.CloseKey      = data.binds.close      end
-        if type(data.binds.playerList) == "number" then GUI.PlayerListKey = data.binds.playerList end
-        if type(data.binds.playerEsp)  == "number" then GUI.PlayerEspKey  = data.binds.playerEsp  end
     end
     if type(data.settings) == "table" then
         if type(data.settings.maxDistance) == "number" then
@@ -7486,10 +6842,8 @@ loadConfig = function()
             MARCS.MaxDistance     = v
             GEAR.MaxDistance      = v
             RESUPPLY.MaxDistance  = v
-            FLINTLOCK.MaxDistance = v
             TITAN.MaxDistance     = v
             ANIMAL.MaxDistance    = v
-            PLAYER_ESP.MaxDistance = v
         end
         if type(data.settings.dmgIndicatorRadius) == "number" then
             GUI.DmgIndicatorRadius = data.settings.dmgIndicatorRadius
@@ -7500,14 +6854,12 @@ loadConfig = function()
         if type(f.marcs)        == "boolean" then MARCS.Enabled            = f.marcs        end
         if type(f.gear)         == "boolean" then GEAR.Enabled             = f.gear         end
         if type(f.resupply)     == "boolean" then RESUPPLY.Enabled         = f.resupply     end
-        if type(f.flintlock)    == "boolean" then FLINTLOCK.Enabled        = f.flintlock    end
         if type(f.landmine)     == "boolean" then
             LANDMINE.Enabled    = f.landmine
             LANDMINE.NeedFull   = f.landmine    -- restored ON: sweep once so it paints immediately
         end
         if type(f.titan)        == "boolean" then TITAN.Enabled            = f.titan        end
         if type(f.animal)       == "boolean" then ANIMAL.Enabled           = f.animal       end
-        if type(f.playerEsp)    == "boolean" then PLAYER_ESP.Enabled       = f.playerEsp    end
         if type(f.plAutoUpdate) == "boolean" then GUI.PLAutoUpdate         = f.plAutoUpdate end
         if type(f.healthBar)    == "boolean" then GUI.HealthBarVisible     = f.healthBar    end
         if type(f.gasBar)       == "boolean" then GUI.GasBarVisible        = f.gasBar       end
@@ -7515,9 +6867,6 @@ loadConfig = function()
         if type(f.snapDrag)     == "boolean" then GUI.SnapOn               = f.snapDrag     end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
-        if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
-        if type(f.actorNearby)  == "boolean" then ACTOR_ESP.NearbyOnly     = f.actorNearby  end
-        if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
         if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
         if type(f.actorRange)   == "number"  then ACTOR_ESP.MaxDistance    = math.max(100, math.floor(f.actorRange)) end
         if type(f.actorOpacity) == "number"  then ACTOR_ESP.Opacity        = math.max(0.1, math.min(1, f.actorOpacity)) end
@@ -7569,8 +6918,6 @@ loadConfig = function()
         if type(data.panels.rsDiffY)     == "number" then GUI.RSDiffY     = data.panels.rsDiffY     end
         if type(data.panels.rsDiffW)     == "number" then GUI.RSDiffW     = math.max(560, data.panels.rsDiffW) end
         if type(data.panels.rsDiffH)     == "number" then GUI.RSDiffH     = math.max(400, data.panels.rsDiffH) end
-        if type(data.panels.veloX)       == "number" then GUI.VeloX       = data.panels.veloX       end
-        if type(data.panels.veloY)       == "number" then GUI.VeloY       = data.panels.veloY       end
         if type(data.panels.menu)        == "table"  then GUI.LayoutMenu  = data.panels.menu        end
     end
     -- Gradients: a stop list is used only if it is 2-5 {r,g,b} triples; anything else keeps the default.
@@ -7620,26 +6967,20 @@ end
 resetConfigToDefaults = function()
     GUI.ToggleKey     = 0x72   -- F3
     GUI.CloseKey      = 0x23   -- End
-    GUI.PlayerListKey = 0x63   -- Numpad3
-    GUI.PlayerEspKey  = 0x70   -- F1
 
     ESP.MaxDistance       = 50000
     MARCS.MaxDistance     = 50000
     GEAR.MaxDistance      = 50000
     RESUPPLY.MaxDistance  = 50000
-    FLINTLOCK.MaxDistance = 50000
     TITAN.MaxDistance     = 5000
     ANIMAL.MaxDistance    = 5000
-    PLAYER_ESP.MaxDistance = 5000
     GUI.DmgIndicatorRadius = 25
 
     MARCS.Enabled            = false
     GEAR.Enabled             = false
     RESUPPLY.Enabled         = false
-    FLINTLOCK.Enabled        = false
     TITAN.Enabled            = false
     ANIMAL.Enabled           = false
-    PLAYER_ESP.Enabled       = false
     ACTOR_ESP.Enabled        = false
     GUI.PLAutoUpdate         = false
     GUI.HealthBarVisible     = false
@@ -7693,7 +7034,6 @@ GUI.LayoutKeys = {   -- config key -> GUI field
     playerListX = "PlayerListX", playerListY = "PlayerListY", playerListW = "PlayerListW", playerListH = "PlayerListH",
     enchantsX = "EnchantsX", enchantsY = "EnchantsY", enchantsW = "EnchantsW", enchantsH = "EnchantsH",
     rsDiffX = "RSDiffX", rsDiffY = "RSDiffY", rsDiffW = "RSDiffW", rsDiffH = "RSDiffH",
-    veloX = "VeloX", veloY = "VeloY",
 }
 -- The menu window's rect. The lib publishes it as a fresh _G.RQGeo every frame it renders; before
 -- the first frame, keep the spot that was loaded.
@@ -7795,7 +7135,6 @@ GUI.SnapPanels = {   -- key -> x, y, w, h while it is on screen
     pl = function() if GUI.PlayerListOpen then return GUI.PlayerListX, GUI.PlayerListY, GUI.PlayerListW, GUI.PlayerListH end end,
     en = function() if GUI.EnchantsOpen then return GUI.EnchantsX, GUI.EnchantsY, GUI.EnchantsW, GUI.EnchantsH end end,
     rs = function() if GUI.RSDiffOpen then return GUI.RSDiffX, GUI.RSDiffY, GUI.RSDiffW, GUI.RSDiffH end end,
-    velo = function() if GUI.VeloOpen then return GUI.VeloX, GUI.VeloY, 314, 220 end end,
     -- The lib rebuilds _G.RQGeo every frame it draws the window, so one that stopped changing is a
     -- minimised menu, not a target.
     menu = function()
@@ -8511,69 +7850,6 @@ local function drawRS()
     R.fade=1; R.yoff=0
 end
 
--- Velocity Indicator popup. PlayerGui.Velocity.Velocity.Speed IS the character's real velocity
--- (verified: the Velocity route shows HumanoidRootPart.AssemblyLinearVelocity.Magnitude).
--- The ODM top-speed cap is applied by a server-side momentum sim (dumped ~760 client scripts —
--- GearMaxVelocityMultiplier is NOT read anywhere client-side, so there's no exact formula to copy).
--- BUT your real runs fit a straight line: 235@x1.11, 267@x1.3, 330@x1.75  ->  top ~= VELO_B + VELO_M*mult.
--- So EST. TOP VELOCITY uses that line (NOT peak*mult); your live PEAK validates it. If it drifts as you
--- upgrade gear, just retune VELO_B / VELO_M. Also: live CURRENT; ignore <50 (walking); a peak >400 is a
--- glitch and auto-clears after 5s; manual Reset.
-local VELO_B, VELO_M = 74, 147   -- intercept + slope fitted to your real velocity/multiplier runs
-local function drawVelo()
-    if not GUI.VeloOpen then anim.veloopen=0; return end
-    local op=av("veloopen",1,14); R.fade=op; R.yoff=(1-op)*12
-    local w,h=314,220
-    local x,y=GUI.VeloX,GUI.VeloY
-    local cx,cy,cw=window("velo",x,y,w,h,"Velocity",nil,function() GUI.VeloOpen=false end,true)
-
-    -- read the game's own live velocity readout (actual velocity)
-    local raw=0
-    pcall(function()
-        local pg=LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-        local root=pg and pg:FindFirstChild("Velocity")
-        local frame=root and root:FindFirstChild("Velocity")
-        local speed=frame and frame:FindFirstChild("Speed")
-        if speed then local num=tostring(speed.Text or ""):match("[%d%.]+"); raw=tonumber(num) or 0 end
-    end)
-    local grappling = raw >= 50            -- below 50 = walking, not grappling — ignore
-    local cur = grappling and raw or 0
-    local mult = tonumber(GUI.VeloMult) or 1.11
-    if cur > (GUI.VeloPeak or 0) then GUI.VeloPeak = cur end
-    -- peak > 400 is a glitch spike (unreachable normally) — auto-clear it 5s after it appears
-    local nowc = os.clock()
-    if (GUI.VeloPeak or 0) > 400 then
-        if not GUI.VeloPeakHiAt then GUI.VeloPeakHiAt = nowc
-        elseif nowc - GUI.VeloPeakHiAt >= 5 then GUI.VeloPeak = 0; GUI.VeloPeakHiAt = nil end
-    else
-        GUI.VeloPeakHiAt = nil
-    end
-
-    local peak = GUI.VeloPeak or 0
-    local est = maxf(0, VELO_B + VELO_M * mult)   -- EST from the fitted line, NOT peak*mult
-
-    -- EST. TOP VELOCITY  (the "how much am I gonna go" headline)
-    txt(string.format("EST. TOP VELOCITY     x%.2f", mult), cx, cy, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
-    local es = string.format("~%.0f", est)
-    txt(es, cx, cy+14, 34, T.red, 64, false, Drawing.Fonts.SystemBold)
-    txt("velocity", cx+tw(es,34)+8, cy+36, 12, T.muted, 63)
-    ln(cx, cy+60, cx+cw, cy+60, T.soft, 62, 1, 0.4)
-
-    -- CURRENT (live) + PEAK (measured) + Reset
-    txt("CURRENT", cx, cy+68, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
-    if grappling then txt(string.format("%.0f", cur), cx, cy+82, 22, T.text, 64, false, Drawing.Fonts.SystemBold)
-    else txt("walking", cx, cy+84, 15, T.dim, 64, false, Drawing.Fonts.SystemBold) end
-
-    txt("PEAK", cx+cw*0.40, cy+68, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
-    txt(string.format("%.0f", peak), cx+cw*0.40, cy+82, 22, T.blue, 64, false, Drawing.Fonts.SystemBold)
-    button("veloreset", cx+cw-68, cy+80, 68, 26, "Reset", function() GUI.VeloPeak=0; GUI.VeloPeakHiAt=nil end, false, T.red)
-
-    -- the formula, spelled out so it's not a black box
-    txt(string.format("est = %d + %d x %.2f", VELO_B, VELO_M, mult), cx, cy+118, 12, T.green, 63, false, Drawing.Fonts.SystemBold)
-
-    R.fade=1; R.yoff=0
-end
-
 -- Character-tab lock overlay: dims ONLY the Character panel (rect from _G.RQGeo, published by the
 -- patched INS-ui fork) + a centered "Load Values" popup with ONE button. Shows only while the menu
 -- is open, the Character tab is active, and Values aren't loaded. Drawn last so its button click wins.
@@ -8707,10 +7983,10 @@ task.spawn(function()
         elseif not down then R.resizeKey=nil end
 
         if R.dragKey and down then
-            local kx = R.dragKey=="pl" and "PlayerListX" or R.dragKey=="en" and "EnchantsX" or R.dragKey=="velo" and "VeloX" or "RSDiffX"
-            local ky = R.dragKey=="pl" and "PlayerListY" or R.dragKey=="en" and "EnchantsY" or R.dragKey=="velo" and "VeloY" or "RSDiffY"
-            local sw = R.dragKey=="pl" and GUI.PlayerListW or R.dragKey=="en" and GUI.EnchantsW or R.dragKey=="velo" and 314 or GUI.RSDiffW
-            local sh = R.dragKey=="pl" and GUI.PlayerListH or R.dragKey=="en" and GUI.EnchantsH or R.dragKey=="velo" and 220 or GUI.RSDiffH
+            local kx = R.dragKey=="pl" and "PlayerListX" or R.dragKey=="en" and "EnchantsX" or "RSDiffX"
+            local ky = R.dragKey=="pl" and "PlayerListY" or R.dragKey=="en" and "EnchantsY" or "RSDiffY"
+            local sw = R.dragKey=="pl" and GUI.PlayerListW or R.dragKey=="en" and GUI.EnchantsW or GUI.RSDiffW
+            local sh = R.dragKey=="pl" and GUI.PlayerListH or R.dragKey=="en" and GUI.EnchantsH or GUI.RSDiffH
             GUI[kx], GUI[ky] = GUI.Snap(R.dragKey, R.mx-R.dragOX, R.my-R.dragOY, sw, sh)
         elseif not down then
             if R.dragKey then GUI.SnapGuides(nil, nil) end
@@ -8740,7 +8016,7 @@ task.spawn(function()
         local geoLive=type(g)=="table" and g.open==true and (nowc-(R.geoAt or 0))<=0.25
         R.geoLive=geoLive
         pcall(drawBadge)
-        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS(); drawVelo() end)
+        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS() end)
         -- Its OWN pcall, still drawn last (on top): if a panel throws, the lock popup must not vanish
         -- and _G.RQBlockInput must not freeze at whatever it was last frame.
         local okL,errL=pcall(drawCharLock)
@@ -8794,8 +8070,8 @@ task.spawn(function()
                     R.scrollOff=s.key; R.scrollMax=s.maxScroll; R.scrollTrackH=s.track; R.scrollLastY=R.my; handled=true; break end end end
             if not handled then for i=#drags,1,-1 do local d=drags[i]
                 if R.mx>=d.x and R.mx<=d.x+d.w and R.my>=d.y and R.my<=d.y+d.h then
-                    local kx=d.key=="pl" and "PlayerListX" or d.key=="en" and "EnchantsX" or d.key=="velo" and "VeloX" or "RSDiffX"
-                    local ky=d.key=="pl" and "PlayerListY" or d.key=="en" and "EnchantsY" or d.key=="velo" and "VeloY" or "RSDiffY"
+                    local kx=d.key=="pl" and "PlayerListX" or d.key=="en" and "EnchantsX" or "RSDiffX"
+                    local ky=d.key=="pl" and "PlayerListY" or d.key=="en" and "EnchantsY" or "RSDiffY"
                     R.dragKey=d.key; R.dragOX=R.mx-GUI[kx]; R.dragOY=R.my-GUI[ky]; handled=true; break end end end
             if not handled then for i=#clicks,1,-1 do local c=clicks[i]
                 if R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end end
@@ -8809,674 +8085,10 @@ end)
 end)()  -- /Requiem UI smooth engine
 
 
--- ============================================================
--- POWERDOUBLE  --  hide the staff Editor from your own screen
--- ============================================================
--- For an account that has the staff Editor GUI. One toggle (Tools -> Admin -> "Hide admin Panel")
--- hides, at once:
---   * the Logs and Pings windows   * the Editor's top panel   * the ping pop-ups on the left
--- while the game still considers the windows OPEN, so the server keeps sending their rows.
---
--- HOW: the game keeps "is this window open" in its own state and tells the server only when you
--- click the window's icon on the top panel. What is DRAWN is a separate Visible flag on each
--- Frame, which the game writes when that state changes and never reads back. We flip only that
--- flag, in memory. Nothing is sent to the server.
---
--- MEASURED LIVE (2026-10-09) -- every rule below comes from these:
---   * A hide or a show does NOT land when it is written. Roblox keeps drawing its last picture
---     until the Editor's layout changes: a new ROW arriving in any Editor list, or a page being
---     opened / closed from the top panel. Only then is "hidden" true, so only then do we say so.
---   * Ping pop-ups live in a different ScreenGui whose container is empty when idle, so a pop-up
---     that arrives after the write is not drawn (seen twice; a one-frame flash was not ruled out).
---   * Writing a ScreenGui's Enabled flag CRASHED the game. Only Frame Visible flags are written.
---   * The flag's position moves with Roblox updates, so it is located at runtime from evidence,
---     and nothing is written unless exactly one byte fits.
--- Wrapped in an IIFE for its own local budget. It talks to the menu only through GUI.PowerDouble
--- (the toggle), GUI.PDStatus (the two status lines) and GUI.PowerDoubleCleanup (unload).
-;(function()
-local WINDOWS = { "Logs", "Pings" }   -- Editor windows that are kept open-but-hidden
-local HIDE_TOOLBAR, HIDE_POPUPS = true, true
-
-local function say(msg, secs)
-    pcall(function() uiNotify("Admin", msg, secs or 4) end)
-end
-
--- ---- shared engine: identical in Menu.lua (Admin block) and in EditorGhost.lua ----
--- Instance.Address is a hex string on some builds and a number on others.
-local function addrOf(inst)
-    local a = inst and inst.Address
-    if type(a) == "number" then return a end
-    if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
-    return nil
-end
-
-local function readByte(a)
-    local ok, v = pcall(memory_read, "byte", a)
-    if ok and type(v) == "number" then return v end
-    return nil
-end
-
--- Always a FRESH lookup: never keep an instance reference across passes.
-local function statesProvider()
-    local sp
-    pcall(function() sp = Players.LocalPlayer.PlayerGui.Editor.StatesProvider end)
-    return sp
-end
-
-local function selections(sp)
-    local tools = sp:FindFirstChild("Tools")
-    return tools and tools:FindFirstChild("Selections") or nil
-end
-
--- Does the GAME think this window is open? A selected icon on the top panel gets a "Background"
--- child, so this needs no Visible read (Matcha cannot read Visible) and is independent of what
--- we hide.
-local function logicallyOpen(sel, name)
-    local ic = sel and sel:FindFirstChild(name)
-    local cont = ic and ic:FindFirstChild("IconContainer")
-    return cont ~= nil and cont:FindFirstChild("Background") ~= nil
-end
-
--- Everything the game has selected on the top panel right now, as a set { Name = true }.
-local function openPages(sel)
-    local t = {}
-    if sel then
-        for _, ic in ipairs(sel:GetChildren()) do
-            local cont = ic:FindFirstChild("IconContainer")
-            if cont and cont:FindFirstChild("Background") then t[ic.Name] = true end
-        end
-    end
-    return t
-end
-
--- Find where the Visible flag lives in a GUI object, on THIS Roblox build. Evidence used:
---   * the panel's icon row and every icon's container are always shown        -> must read 1
---   * every window the game says is closed                                    -> must read 0
---   * the Editor root (Editor on / off) and the top panel (we may have hidden it) -> 0 or 1
---   * the parts INSIDE closed windows are still declared visible              -> mostly 1
--- Exactly one byte may satisfy all of it, or we refuse to write anything. The root and the panel
--- are NOT required to read 1: with the Editor off, or after we hid the panel, the real flag reads
--- 0 there. Open windows are not used: one we already hid reads 0 while open.
-local function findVisibleOffset(sp)
-    local sel = selections(sp)
-    local spA = addrOf(sp)
-    local toolsA = addrOf(sp:FindFirstChild("Tools"))
-    if not sel or not spA or not toolsA then return nil, "Editor top panel not found - turn the Editor on" end
-    local shown, closed, kids = {}, {}, {}
-    local sa = addrOf(sel)
-    if sa then shown[#shown + 1] = sa end
-    for _, ic in ipairs(sel:GetChildren()) do
-        local cont = ic:FindFirstChild("IconContainer")
-        local ca = cont and addrOf(cont)
-        if ca then shown[#shown + 1] = ca end
-        local w = sp:FindFirstChild(ic.Name)
-        if w and w.ClassName == "Frame" and not logicallyOpen(sel, ic.Name) then
-            local a = addrOf(w)
-            if a then
-                closed[#closed + 1] = a
-                for _, ch in ipairs(w:GetChildren()) do
-                    local cn = ch.ClassName
-                    if cn == "Frame" or cn == "TextLabel" or cn == "TextButton" or cn == "ImageLabel"
-                        or cn == "ImageButton" or cn == "ScrollingFrame" or cn == "TextBox" then
-                        local ka = addrOf(ch)
-                        if ka then kids[#kids + 1] = ka end
-                    end
-                end
-            end
-        end
-    end
-    if #shown < 5 then return nil, "Editor not ready" end
-    if #closed < 3 then return nil, "close some Editor windows (need 3 closed, have " .. #closed .. ")" end
-    local cands = {}
-    -- Search only the region where a GUI object keeps its basic properties (Position is at +1280
-    -- on this build, Visible at +1437; in June they were +1304 / +1461). Further out there are
-    -- sizing markers that stay 0 on a window until it has been opened once: on a fresh session
-    -- they fit the evidence too (seen on another PC at +2173 and +2181), so they are out of range.
-    for off = 0x300, 0x700 do
-        local v = readByte(spA + off)
-        local tv = readByte(toolsA + off)
-        local ok = (v == 0 or v == 1) and (tv == 0 or tv == 1)
-        if ok then
-            for i = 1, #shown do
-                if readByte(shown[i] + off) ~= 1 then ok = false break end
-            end
-        end
-        if ok then
-            for i = 1, #closed do
-                if readByte(closed[i] + off) ~= 0 then ok = false break end
-            end
-        end
-        if ok then cands[#cands + 1] = off end
-    end
-    -- The counts are in the messages on purpose: they are the only clue when this fails on a PC
-    -- we cannot look at.
-    if #cands == 0 then
-        return nil, "flag not found on this Roblox version (" .. #shown .. " shown, " .. #closed .. " closed)"
-    end
-    -- CHILD CHECK. The parts inside a closed window are still DECLARED visible (the game hides only
-    -- the window), so the real flag reads 1 on most of them; a byte that merely tracks what is
-    -- being drawn reads 0 there. It is applied even to a single candidate: if the real flag was
-    -- ruled out for some reason, a lone look-alike must not be accepted by default.
-    local pcts = {}
-    local function spotList()
-        local t = {}
-        for i, off in ipairs(cands) do t[#t + 1] = tostring(off) .. (pcts[i] and ("(" .. pcts[i] .. "%)") or "") end
-        return table.concat(t, " ")
-    end
-    if #kids >= 5 then
-        local strong, weak = {}, 0
-        for i, off in ipairs(cands) do
-            local ones = 0
-            for k = 1, #kids do
-                if readByte(kids[k] + off) == 1 then ones = ones + 1 end
-            end
-            local pct = math.floor(ones * 100 / #kids + 1 / 2)
-            pcts[i] = pct
-            if pct >= 60 then strong[#strong + 1] = off elseif pct <= 20 then weak = weak + 1 end
-        end
-        if #cands == 1 then
-            if pcts[1] < 60 then return nil, "only candidate fails the child check: " .. spotList() end
-        elseif #strong == 1 and weak == #cands - 1 then
-            return strong[1]
-        end
-    end
-    if #cands > 1 then return nil, #cands .. " possible spots: " .. spotList() end
-    return cands[1]
-end
-
--- The newest row id in each Editor list, as { ["Logs/Chat"] = 3225, ... }. Row frames are named
--- by a running number, so a list's newest id only goes UP when a row ARRIVES -- the layout change
--- measured to make Roblox redraw, i.e. the moment a pending hide or show really lands.
-local function rowHeads(sp)
-    local heads = {}
-    for _, wname in ipairs(WINDOWS) do
-        local w = sp:FindFirstChild(wname)
-        if w then
-            for _, panel in ipairs(w:GetChildren()) do
-                local c1 = panel:FindFirstChild("Content")
-                local c2 = c1 and c1:FindFirstChild("Content")
-                local sc = c2 and c2:FindFirstChild("Scroll")
-                if sc then
-                    local hi = 0
-                    for _, r in ipairs(sc:GetChildren()) do
-                        local k = tonumber(r.Name)
-                        if k and k > hi then hi = k end
-                    end
-                    heads[wname .. "/" .. panel.Name] = hi
-                end
-            end
-        end
-    end
-    return heads
-end
-
--- True only when some list has a HIGHER newest id than it had in the baseline. A row being
--- removed, a search narrowing a list, or a list that could not be read never counts: only an
--- arrival was measured to cause the redraw, so only an arrival may confirm a hide.
-local function rowArrived(base, now)
-    for k, hi in pairs(now) do
-        local b = base[k]
-        if b ~= nil and hi > b then return true end
-    end
-    return false
-end
-
--- Is there anything in this table? Written with pairs on purpose: the built-in for stepping a
--- table by hand is not confirmed to exist in every Matcha build, and a missing function here
--- would stop the whole pass.
-local function hasAny(t)
-    if t then
-        for _ in pairs(t) do return true end
-    end
-    return false
-end
-
-local OFF = nil            -- the Visible flag's position, once found
-local findWhy = nil        -- why OFF could not be found yet (shown in the status)
-local told = {}            -- last message per topic, so nothing is repeated every pass
-local nextFind = 0         -- the search for OFF is ~2000 reads: at most once a second
-local nextCheck = 0        -- "did a row arrive?" walks every list: at most twice a second
-
--- Per window:  want = "hide" once we wrote it, base = newest row ids when we wrote it (nil once
---              the hide is confirmed on screen), open = what the game last said.
--- "@toolbar": the same, plus sel = the pages open when we wrote, lost = the panel may be gone
---             with no way for a row to bring it back.
--- "@popups" : want, ids = cards present last pass, stale = cards that were already on screen when
---             the container was switched off (they stay until they expire), blocked = cards that
---             arrived while it was off, missing = the container was not found.
-local st = { ["@toolbar"] = {}, ["@popups"] = { blocked = 0 } }
-for _, name in ipairs(WINDOWS) do st[name] = {} end
-
--- The ping pop-ups: PlayerGui.Notifications is a ScreenGui holding ONE Frame, also named
--- "Notifications"; each pop-up is a child Frame of that Frame. Only the Frame is ever touched --
--- never the ScreenGui (writing a ScreenGui's flag crashed the game).
-local function popupContainer()
-    local c
-    pcall(function()
-        local g = Players.LocalPlayer.PlayerGui:FindFirstChild("Notifications")
-        c = g and g:FindFirstChild("Notifications")
-    end)
-    if c and c.ClassName == "Frame" then return c end
-    return nil
-end
-
--- Write the flag on one Frame. Refuses unless the target is a Frame whose byte currently holds a
--- plain 0 or 1, so a wrong spot can never be overwritten. Returns "same", "written" or nil.
-local function setFrame(w, drawn)
-    if not w or w.ClassName ~= "Frame" then return nil end
-    local a = addrOf(w)
-    if not a or a <= 4096 then return nil end
-    local cur = readByte(a + OFF)
-    if cur ~= 0 and cur ~= 1 then return nil end
-    local want = drawn and 1 or 0
-    if cur == want then return "same" end
-    pcall(memory_write, "byte", a + OFF, want)
-    if readByte(a + OFF) == want then return "written" end
-    return nil
-end
-
--- Make everything visible again. Returns true only if every write that was needed landed.
-local function restoreAll()
-    local sp = statesProvider()
-    if not OFF and sp then OFF = findVisibleOffset(sp) end
-    if not OFF then return false end
-    local ok = true
-    -- Pop-ups first: they live in a different ScreenGui, so they must come back even if the
-    -- Editor GUI is missing right now.
-    local pp = st["@popups"]
-    local pc = popupContainer()
-    if pc and setFrame(pc, true) == nil then ok = false end
-    pp.want, pp.ids, pp.stale, pp.missing = nil, nil, nil, nil
-    if not sp then return false end
-    local sel = selections(sp)
-    for _, name in ipairs(WINDOWS) do
-        -- Only a window the game still has OPEN: one closed from the top panel is hidden by the
-        -- game itself and must stay that way.
-        if logicallyOpen(sel, name) then
-            local r = setFrame(sp:FindFirstChild(name), true)
-            if r == nil then ok = false end
-            -- The game may have closed it between our check and our write. A closed window left
-            -- at "visible" would be drawn at the next row, so take the write back.
-            if r == "written" and not logicallyOpen(sel, name) then
-                setFrame(sp:FindFirstChild(name), false)
-            end
-        end
-        st[name].want, st[name].base = nil, nil
-    end
-    if setFrame(sp:FindFirstChild("Tools"), true) == nil then ok = false end
-    local tb = st["@toolbar"]
-    tb.want, tb.base, tb.sel, tb.lost = nil, nil, nil, nil
-    return ok
-end
-
--- Keep the pop-up container switched off. Separate from the Editor work on purpose: it is another
--- ScreenGui, so it must keep running even when the Editor GUI is missing, and Editor rows prove
--- nothing about it. The container is empty when idle, so a card that arrives while it is off is
--- not drawn (measured twice, ~3s after arrival; a one-frame flash was not ruled out). A card that
--- was already on screen when the container went off stays until it expires.
-local function popupStep()
-    local pp = st["@popups"]
-    if not HIDE_POPUPS then return end
-    local cont = popupContainer()
-    if not cont then
-        pp.want, pp.ids, pp.stale = nil, nil, nil
-        pp.missing = true
-        if told["@popups"] ~= "missing" then
-            told["@popups"] = "missing"
-            say("Ping pop-ups: container not found - treat them as VISIBLE", 6)
-        end
-        return
-    end
-    pp.missing = nil
-    local pres = setFrame(cont, false)
-    if pres == nil then
-        -- Never leave a stale "hidden" standing, and warn again if it fails again later.
-        pp.want, pp.ids, pp.stale = nil, nil, nil
-        if told["@popups"] ~= "fail" then
-            told["@popups"] = "fail"
-            say("Ping pop-ups: could not set the flag - treat them as VISIBLE", 6)
-        end
-        return
-    end
-    told["@popups"] = nil
-    local ids = {}
-    for _, ch in ipairs(cont:GetChildren()) do
-        if tonumber(ch.Name) then ids[ch.Name] = true end
-    end
-    if pres == "written" or pp.want ~= "hide" then
-        -- The container was on (or may have been) until this pass: any card present now was drawn.
-        pp.want = "hide"
-        pp.stale = {}
-        for id in pairs(ids) do pp.stale[id] = true end
-    else
-        -- The flag was already off when these arrived (their ids are not in order: compare sets).
-        if pp.ids then
-            for id in pairs(ids) do
-                if not pp.ids[id] then pp.blocked = (pp.blocked or 0) + 1 end
-            end
-        end
-        if pp.stale then
-            for id in pairs(pp.stale) do
-                if not ids[id] then pp.stale[id] = nil end
-            end
-        end
-    end
-    pp.ids = ids
-end
-
--- One pass with hiding ON: hide everything, and work out what has actually landed.
-local function step(now)
-    local sp = statesProvider()
-    if not sp then
-        if OFF then popupStep() end     -- the pop-ups do not depend on the Editor being there
-        return
-    end
-    if not OFF then
-        if now < nextFind then return end
-        nextFind = now + 1
-        -- Can Matcha read game memory at all on this PC? Its "Unsafe LuaU" setting gates
-        -- memory_read, and without this check a blocked read just looks like "flag not found".
-        local off, why = nil, nil
-        local pa = addrOf(Players.LocalPlayer)
-        if type(memory_read) ~= "function" or type(memory_write) ~= "function" then
-            why = "memory access is off - enable Unsafe LuaU in Matcha"
-        elseif not pa then
-            why = "this Matcha build gives no instance addresses"
-        elseif readByte(pa) == nil then
-            why = "memory read failed - enable Unsafe LuaU in Matcha"
-        else
-            off, why = findVisibleOffset(sp)
-        end
-        if not off then
-            findWhy = why
-            if told.find ~= why then told.find = why; say("Cannot start: " .. tostring(why), 7) end
-            return
-        end
-        OFF = off
-        findWhy = nil
-    end
-    -- The Editor root is hidden as a whole when you switch the Editor off with its keybind. The
-    -- game then tells the server so, and rows may stop: nothing pending can be confirmed until
-    -- it is back on.
-    local rootOn = readByte((addrOf(sp) or 0) + OFF) == 1
-    if told.editor ~= rootOn then
-        if not rootOn then say("Editor is OFF - rows may have stopped until you turn it back on", 5) end
-        told.editor = rootOn
-    end
-    local sel = selections(sp)
-    local due = now >= nextCheck
-    local heads = nil    -- current newest row ids; read at most once per pass, and only when due
-    local anyOpen = false
-    for _, name in ipairs(WINDOWS) do
-        local s = st[name]
-        local open = logicallyOpen(sel, name)
-        s.open = open
-        if not open then
-            if s.want == "hide" and s.base ~= nil then
-                -- Closed before our hide had landed. The game's own "hide" then wrote the value
-                -- that was already there, which gives Roblox no reason to redraw: the old picture
-                -- can stay up. Keep watching for the row that clears it.
-                if told[name] ~= "closed-pending" then
-                    told[name] = "closed-pending"
-                    say(name .. " closed before its hide landed: it may STAY ON SCREEN until a row arrives in another open list", 8)
-                end
-                if due then
-                    heads = heads or rowHeads(sp)
-                    if rowArrived(s.base, heads) then s.want, s.base = nil, nil end
-                end
-            else
-                s.want, s.base = nil, nil
-                told[name] = "closed"     -- no toast: the status shows it
-            end
-        else
-            anyOpen = true
-            if told[name] == "closed" or told[name] == "closed-pending" then told[name] = nil end
-            local res = setFrame(sp:FindFirstChild(name), false)
-            if res == "written" then
-                -- Either our first write, or the game re-drew the window (it was re-opened) and
-                -- we just hid it again. Neither is on screen yet. The baseline is read fresh,
-                -- AFTER this window's own write: a row that arrived before the write redrew the
-                -- window while it was still visible, and must not count as its confirmation.
-                local reopened = (s.want == "hide")
-                local base = rowHeads(sp)
-                s.want = "hide"
-                s.base = base
-                told[name] = "pending"
-                -- Only the surprising case gets a toast; a normal hide shows in the status.
-                if reopened then say(name .. " was re-opened: it is VISIBLE until the next row arrives", 6) end
-            elseif res == "same" then
-                if s.want == nil then
-                    -- Already hidden when we first looked (left so by an earlier run). We cannot
-                    -- know whether that landed, so treat it as pending.
-                    s.want = "hide"
-                    s.base = rowHeads(sp)
-                end
-                if s.base ~= nil and due then
-                    heads = heads or rowHeads(sp)
-                    if rowArrived(s.base, heads) then
-                        s.base = nil     -- a row arrived after our write: the hide is on screen
-                        told[name] = "hidden"
-                    end
-                end
-            else
-                -- Could not read or set the flag. Never leave a stale "hidden" standing.
-                s.want, s.base = nil, nil
-                if told[name] ~= "fail" then
-                    told[name] = "fail"
-                    say(name .. ": could not set the flag - treat it as VISIBLE", 6)
-                end
-            end
-        end
-    end
-
-    -- ---- the top panel ----
-    -- Hidden only while one of the windows is open in the game: rows from an open list are what
-    -- make a hide or a show land, and a hidden panel cannot be clicked to open one.
-    local tb = st["@toolbar"]
-    if HIDE_TOOLBAR then
-        local wasHide = (tb.want == "hide")
-        local tres = setFrame(sp:FindFirstChild("Tools"), not anyOpen)
-        if tres == "written" then
-            if anyOpen then
-                -- Baseline read fresh, AFTER this write (same reason as for a window).
-                local base = rowHeads(sp)
-                tb.want, tb.base, tb.sel, tb.lost = "hide", base, openPages(sel), nil
-                told["@toolbar"] = "pending"
-            else
-                -- We just asked for the panel back because no window is open any more. If its
-                -- hide had been written, your click on the last window may have landed that hide:
-                -- then the panel is gone, and with no list open no row will bring it back.
-                tb.want, tb.base, tb.sel = nil, nil, nil
-                tb.lost = wasHide
-                told["@toolbar"] = "showing"
-            end
-        elseif tres == "same" then
-            if anyOpen then
-                tb.lost = nil
-                if tb.want == nil then
-                    tb.want, tb.base, tb.sel = "hide", rowHeads(sp), openPages(sel)
-                end
-            end
-            if tb.base ~= nil and due then
-                heads = heads or rowHeads(sp)
-                -- A row arriving lands it. So does a page being OPENED (measured: the panel
-                -- vanished the instant a page was clicked open). A page being CLOSED is not
-                -- counted: closing a window we already hid writes the value that is already
-                -- there, which was never seen to cause a redraw.
-                local opened = false
-                for pname in pairs(openPages(sel)) do
-                    if not tb.sel[pname] then opened = true end
-                end
-                if rowArrived(tb.base, heads) or opened then
-                    tb.base, tb.sel = nil, nil
-                    told["@toolbar"] = "hidden"
-                end
-            end
-        else
-            tb.want, tb.base, tb.sel = nil, nil, nil
-            if told["@toolbar"] ~= "fail" then
-                told["@toolbar"] = "fail"
-                say("Top panel: could not set the flag - treat it as VISIBLE", 6)
-            end
-        end
-    end
-
-    popupStep()
-
-    -- ---- the only routine toasts: one when hiding starts, one when it has actually landed ----
-    local pp = st["@popups"]
-    if not anyOpen then
-        told.on = nil
-        if told.all ~= nil then say("NOT hidden any more - no window is open", 5) end
-        told.all = nil
-        if tb.lost then
-            if told["@tbwait"] ~= "lost" then
-                told["@tbwait"] = "lost"
-                say("Top panel may be INVISIBLE now: switch the Editor off and on to get it back", 8)
-            end
-        elseif told["@tbwait"] ~= "open" then
-            told["@tbwait"] = "open"
-            say("Open Logs or Pings from the top panel first (panel missing? switch the Editor off and on)", 6)
-        end
-    else
-        told["@tbwait"] = nil
-        if told.on ~= true then
-            told.on = true
-            say("On - everything vanishes at the next row (the status shows when)", 5)
-        end
-        local editorDone = (not HIDE_TOOLBAR) or (tb.want == "hide" and tb.base == nil)
-        for _, name in ipairs(WINDOWS) do
-            local s = st[name]
-            -- not done while a hide is pending (also for a window closed before it landed), or
-            -- while an open window is not hidden at all
-            if s.base ~= nil or (s.open and s.want ~= "hide") then editorDone = false end
-        end
-        if editorDone then
-            local popsDone = (not HIDE_POPUPS)
-                or (pp.want == "hide" and not hasAny(pp.stale))
-            -- Other Editor pages (Statistics, ...) are not managed: say so if one is showing.
-            local others = {}
-            for pname in pairs(openPages(sel)) do
-                if st[pname] == nil then
-                    local w = sp:FindFirstChild(pname)
-                    if w and w.ClassName == "Frame" then others[#others + 1] = pname end
-                end
-            end
-            table.sort(others)
-            local key = (popsDone and "all" or "editor") .. ":" .. table.concat(others, ",")
-            if told.all ~= key then
-                told.all = key
-                local msg = popsDone and "Everything hidden" or "Windows and top panel hidden - a ping pop-up may still be showing"
-                if #others > 0 then msg = msg .. " (still showing: " .. table.concat(others, ", ") .. ")" end
-                say(msg, 4)
-            end
-        else
-            if told.all ~= nil then say("NOT fully hidden any more - wait for the next confirmation", 6) end
-            told.all = nil
-        end
-    end
-
-    if due then nextCheck = now + 1 / 2 end
-end
-
--- Two short lines describing what is hidden right now (valid while hiding is on).
-local function status()
-    if not OFF then return "cannot start yet:", tostring(findWhy or "locating...") end
-    local parts = {}
-    for _, name in ipairs(WINDOWS) do
-        local s = st[name]
-        local w
-        if s.open == false then w = (s.base ~= nil) and "closed (may show)" or "closed"
-        elseif s.want == "hide" then w = s.base and "hiding..." or "hidden"
-        else w = "visible" end
-        parts[#parts + 1] = name .. " " .. w
-    end
-    local tb, pp = st["@toolbar"], st["@popups"]
-    local panel
-    if not HIDE_TOOLBAR then panel = "not managed"
-    elseif tb.lost then panel = "may be gone (Editor off/on)"
-    elseif tb.want == "hide" then panel = tb.base and "hiding..." or "hidden"
-    else panel = "visible" end
-    local pops
-    if not HIDE_POPUPS then pops = "not managed"
-    elseif pp.missing then pops = "not found"
-    elseif pp.want == "hide" then
-        if hasAny(pp.stale) then pops = "card still showing"
-        else pops = "hidden (" .. tostring(pp.blocked or 0) .. ")" end
-    else pops = "visible" end
-    return table.concat(parts, "  |  "), "Panel " .. panel .. "  |  Pop-ups " .. pops
-end
-
--- Forget everything said so far, so the next "on" announces itself again.
-local function resetTold()
-    for k in pairs(told) do told[k] = nil end
-end
--- ---- /shared engine ----
-
-local engaged = false      -- we may have hidden something that needs putting back
-local noEditor = false
-
--- Two short lines for the Tools tab, so "is it actually hidden yet?" is one glance.
-GUI.PDStatus = function()
-    if GUI.PowerDouble ~= true then return "off", " " end
-    if noEditor then return "no staff Editor on this account", " " end
-    return status()
-end
-
--- Reached from UnloadScript, which is defined above this block.
-GUI.PowerDoubleCleanup = function()
-    if engaged then pcall(restoreAll); engaged = false end
-end
-
-task.spawn(function()
-    -- A re-run of the menu starts a new copy of this loop; the old one sees the token change and
-    -- stops WITHOUT restoring (the new copy owns the windows now).
-    local gen = {}
-    _G.__RQ_POWERDOUBLE = gen
-    -- A re-run starts with the toggle off while windows may still be hidden by the previous copy.
-    -- So for the first seconds an "off" toggle also sweeps: a window the game has open can only
-    -- read "not visible" because a copy of this engine hid it.
-    local sweepUntil = os.clock() + 15
-    while GUI.Running and _G.__RQ_POWERDOUBLE == gen do
-        local on = GUI.PowerDouble == true
-        if on then
-            engaged = true
-            sweepUntil = 0
-            local had = statesProvider() ~= nil
-            noEditor = (not had) and (OFF == nil)
-            if noEditor then
-                if told.noed ~= true then told.noed = true; say("No staff Editor found on this account", 5) end
-            else
-                told.noed = nil
-            end
-            -- step() also runs with the Editor missing, so the pop-ups stay off once we know how.
-            local ok, err = pcall(step, os.clock())
-            if not ok and told.err ~= tostring(err) then
-                told.err = tostring(err)
-                say("Error: " .. tostring(err), 6)
-            end
-        elseif engaged or os.clock() < sweepUntil then
-            local ok, restored = pcall(restoreAll)
-            if engaged then
-                if ok and restored then
-                    say("Off - everything comes back at the next row (or switch the Editor off and on)", 6)
-                else
-                    say("Off, but could NOT restore everything - turn it on and off again (rejoin if that fails)", 8)
-                end
-            end
-            if ok and restored then sweepUntil = 0 end
-            engaged = false
-            resetTold()
-        end
-        task.wait(on and 1 / 10 or 1 / 2)
-    end
-end)
-end)()  -- /PowerDouble
-
 -- ============================ HIDDENS ============================
 -- Hide Velocity: stops the game's own speed number (PlayerGui.Velocity.Velocity.Speed) being DRAWN
 -- on your screen. It does not touch the talent that grants the readout, the label's text, or
--- anything the server sees -- the Velocity Indicator reads that same text and keeps working.
+-- anything the server sees.
 --
 -- MEASURED LIVE (2026-10-09) -- every rule below comes from these:
 --   * The Visible flag is no use here. The game rewrites this label's text whenever the speed
@@ -11845,7 +10457,6 @@ end)()
         secTools:Toggle("Marcs", MARCS.Enabled, function(v) MARCS.Enabled = v end)
         secTools:Toggle("Gear", GEAR.Enabled, function(v) GEAR.Enabled = v end)
         secTools:Toggle("Resupply", RESUPPLY.Enabled, function(v) RESUPPLY.Enabled = v end)
-        secTools:Toggle("Flintlock", FLINTLOCK.Enabled, function(v) FLINTLOCK.Enabled = v end)
         secTools:Toggle("Landmines", LANDMINE.Enabled, function(v)
             LANDMINE.Enabled = v
             -- Full sweep on the way ON so every mine appears at once; hide on the
@@ -11862,7 +10473,6 @@ end)()
         local secEnt = tab:Section("Entity ESP", "Right", "Living things")
         secEnt:Toggle("Titan", TITAN.Enabled, function(v) TITAN.Enabled = v end)
         secEnt:Toggle("Animals", ANIMAL.Enabled, function(v) ANIMAL.Enabled = v end)
-        GUI._uiPE = secEnt:Toggle("Players", PLAYER_ESP.Enabled, function(v) PLAYER_ESP.Enabled = v end)
         secEnt:Toggle("Actors", ACTOR_ESP.Enabled, function(v)
             ACTOR_ESP.Enabled = v
             if v and actorEspScan then
@@ -11874,28 +10484,9 @@ end)()
                 uiNotify("Actors", msg, 8)
             end
         end)
-        secEnt:Toggle("Show Staff", STAFF_ESP.Enabled, function(v)
-            STAFF_ESP.Enabled = v
-            if v and ACTOR_ESP.Enabled and actorEspScan then
-                local ok, err = pcall(actorEspScan)
-                local n, list = ACTOR_ESP.summary("staff")
-                local msg = n .. " staff"
-                if n > 0 then msg = msg .. ": " .. list end
-                if not ok then msg = msg .. " | scan error: " .. tostring(err) end
-                uiNotify("Staff ESP", msg, 8)
-            elseif v and not ACTOR_ESP.Enabled then
-                uiNotify("Staff ESP", "Turn on Actors first", 4)
-            end
-        end):Tooltip("shows players on staff data (StaffState set, no actor flags) on the ESP overlay. Actors must be enabled first")
-        secEnt:Toggle("Nearby Only", ACTOR_ESP.NearbyOnly, function(v)
-            ACTOR_ESP.NearbyOnly = v
-        end):Tooltip("only scan and show actors/staff within Scan Radius of the camera. Cheaper in full servers")
-        secEnt:Slider("Scan Radius", ACTOR_ESP.ScanRadius, 10, 50, 5000, "", function(v)
-            ACTOR_ESP.ScanRadius = math.floor(tonumber(v) or ACTOR_ESP.ScanRadius)
-        end):Tooltip("studs from the camera that Nearby Only covers")
         secEnt:Slider("Actor Range", ACTOR_ESP.MaxDistance, 100, 100, 100000, "", function(v)
             ACTOR_ESP.MaxDistance = math.max(100, math.floor(tonumber(v) or ACTOR_ESP.MaxDistance))
-        end):Tooltip("studs from the camera that actor/staff labels are drawn to (Nearby Only overrides it with Scan Radius). Click the number to type one")
+        end):Tooltip("studs from the camera that actor/staff labels are drawn to. Click the number to type one")
         secEnt:Slider("Actor Opacity", math.floor((ACTOR_ESP.Opacity or 1) * 100 + 0.5), 5, 10, 100, "%", function(v)
             local n = tonumber(v)
             if n then ACTOR_ESP.Opacity = math.max(0.1, math.min(1, n / 100)) end
@@ -11989,8 +10580,8 @@ end)()
         secDist:Slider("Max Distance", math.floor(ESP.MaxDistance), 1, 1, 100000, "", function(v)
             local val = math.floor(tonumber(v) or ESP.MaxDistance)
             ESP.MaxDistance = val; MARCS.MaxDistance = val; GEAR.MaxDistance = val
-            RESUPPLY.MaxDistance = val; FLINTLOCK.MaxDistance = val; TITAN.MaxDistance = val
-            ANIMAL.MaxDistance = val; PLAYER_ESP.MaxDistance = val
+            RESUPPLY.MaxDistance = val; TITAN.MaxDistance = val
+            ANIMAL.MaxDistance = val
         end)
 
         -- ---------- HUD bars (Tools -> Indicators turns them on) ----------
@@ -12365,7 +10956,6 @@ end)()
             GUI.GasBarVisible = v; BuildGasBar()
         end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. Drag to move; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
-        secInd:Toggle("Velocity Indicator", GUI.VeloOpen, function(v) GUI.VeloOpen = v end)
 
         -- ---------- Skillcheck auto-play (QTE minigame) ----------
         -- Legit auto-tapper: reads the spinner + target-zone angle straight from memory
@@ -12766,44 +11356,9 @@ end)()
             epInterval = tonumber(v) or epInterval
         end):Tooltip("seconds between E taps while waiting for the next minigame. 0.10 = ten a second")
 
-        -- ---------- Admin: hide the staff Editor from your own screen ----------
-        -- One switch for the whole POWERDOUBLE engine (its internal name): the Logs + Pings
-        -- windows, the Editor's top panel and the ping pop-ups, all hidden while the game still
-        -- treats the windows as open. Off puts everything back. Does nothing on an account that
-        -- has no staff Editor. Created AFTER Skillcheck on purpose: sections stack in the order
-        -- they are created, and this one belongs below it.
-        local secPD = tab:Section("Admin", "Left", "Hide the staff Editor from your screen")
-        -- The label names what the switch does NEXT: while it is on the panel is hidden, so it
-        -- reads "Show Admin Panel"; while off, "Hide Admin Panel". SetText is a fork method, hence
-        -- the pcall (the upstream fallback library has none and simply keeps the first label).
-        GUI._uiPD = secPD:Toggle("Hide Admin Panel", GUI.PowerDouble == true, function(v)
-            GUI.PowerDouble = v == true
-            pcall(function()
-                GUI._uiPD:SetText(GUI.PowerDouble and "Show Admin Panel" or "Hide Admin Panel")
-            end)
-        end):Tooltip("Staff accounts only. Open Logs and/or Pings from the Editor's top panel first, then turn this on. Hides those windows, the top panel and the ping pop-ups while they keep receiving rows. A hide lands when the next row arrives (or when you open / close a page), so wait for 'hidden' below before sharing your screen. Off brings everything back.")
-        -- Never written to a saved config: the library keys a saved value by the control's label,
-        -- and this label changes, so a saved "on" could not be found again anyway. It always
-        -- starts off, which is also the safe state for something that hides your own UI.
-        pcall(function() GUI._uiPD.item.noSave = true end)
-        pcall(function()
-            GUI._uiPD:SetText(GUI.PowerDouble == true and "Show Admin Panel" or "Hide Admin Panel")
-        end)
-        pcall(function()
-            secPD:Label(function()
-                local a = GUI.PDStatus and GUI.PDStatus()
-                return tostring(a or "off")
-            end)
-            secPD:Label(function()
-                if not GUI.PDStatus then return " " end
-                local _, b = GUI.PDStatus()
-                return tostring(b or " ")
-            end)
-        end)
-
         -- ---------- Hiddens: stop the game's own readouts being drawn on your screen ----------
-        -- One switch per readout, each driven by the HIDDENS engine. Same label rule as the Admin
-        -- switch: it names what the switch does NEXT ("Hide Velocity" while the number shows,
+        -- One switch per readout, each driven by the HIDDENS engine. Its label names what the
+        -- switch does NEXT ("Hide Velocity" while the number shows,
         -- "Show Velocity" while it is hidden), so it is never written to a saved config either
         -- and always starts off.
         local secHid = tab:Section("Hiddens", "Right", "Hide the game's own readouts")
@@ -12812,7 +11367,7 @@ end)()
             pcall(function()
                 GUI._uiHV:SetText(GUI.HideVelocity and "Show Velocity" or "Hide Velocity")
             end)
-        end):Tooltip("Stops the game's own speed number (bottom of the screen) being drawn. Only your screen changes: the talent, the real speed and the Velocity Indicator are untouched. Takes effect the next time the number changes, so the moment you move. Off brings it back the same way.")
+        end):Tooltip("Stops the game's own speed number (bottom of the screen) being drawn. Only your screen changes: the talent and the real speed are untouched. Takes effect the next time the number changes, so the moment you move. Off brings it back the same way.")
         pcall(function() GUI._uiHV.item.noSave = true end)
         pcall(function()
             GUI._uiHV:SetText(GUI.HideVelocity == true and "Show Velocity" or "Hide Velocity")
@@ -12830,7 +11385,7 @@ end)()
         local tab = window:Tab("Character", "sword")
         -- Row-locked columns: each Left section opens a ROW at max(both cursors) and the next
         -- Right section starts level with it, so Grapple/Velocity, Dash/Parry and
-        -- Firearm Auto/Firearm Manual line up exactly. Costs whitespace under the shorter card
+        -- Firearm Auto/Thunderspears line up exactly. Costs whitespace under the shorter card
         -- of each pair, which is the trade we want here.
         -- OPT-IN per tab on purpose: with two Left sections in a row (ESP, Style, Tools) it would
         -- push the first Right section down to the second Left's row instead of letting it start
@@ -12875,10 +11430,6 @@ end)()
             -- silently no-ops.
             BASE_INACCURACY_OFFSET              = { lo = 0, hi = 20,     fb = 0   },
             BASE_RECOIL_IMPULSE                 = { lo = 0, hi = 20,     fb = 0   },
-            -- BlunderBuss pellet cone (Firearm Manual). pelletCount + spreadReferenceDistance are
-            -- the write-NEVER fingerprint that picks the BlunderBuss's own config out of the gun
-            -- templates (TrenchShotgun is 9 / 60, BlunderBuss is 10 / 45); they are scanned here
-            -- only so the ONE Load Values sweep covers them too -- no second freeze.
             -- Thunderspear aim lever. MUST be listed here or entriesFor() bails at its
             -- `if not cfg then return {} end` guard and every write silently no-ops. Exactly two
             -- numeric entries exist in the whole game (both 100, both spears), so the accept
@@ -12896,10 +11447,6 @@ end)()
             -- is still NaN, so a zeroed Amplitude does NOT save it. The NaN lands in
             -- Camera.CFrame. Listed only so the restore path can REPAIR it back to stock.
             FIRE_SHAKE_FREQUENCY                = { lo = 0, hi = 30,     fb = 12/100 },
-            -- lowercase since the handler rewrite (the old UPPER_CASE keys no longer exist)
-            pelletSpreadOffset                  = { lo = 0, hi = 40,     fb = 835/100 },
-            pelletCount                         = { lo = 2, hi = 40,     fb = 10  },
-            spreadReferenceDistance             = { lo = 10, hi = 500,   fb = 45  },
             -- Spyglass (Client.User.Equipment.Tools.Exploration.Spyglass). Live getgc 2026-10-21:
             -- exactly TWO numeric entries per key (the config is loaded twice), both 200; every
             -- other entry under these names is a string or a function, excluded by type. lo=0 so
@@ -13133,13 +11680,12 @@ end)()
         -- Column layout is paired by row, and the ORDER OF THESE Section() CALLS is what sets it:
         --   Grapple      | Velocity
         --   Dash         | Parry
-        --   Firearm Auto | Firearm Manual
-        --                | Thunderspears
+        --   Firearm Auto | Thunderspears
+        --   Gas Bar      |
         -- Move a section by changing its "Left"/"Right" AND its position in this file.
         local secVe = tab:Section("Velocity", "Right", "ODM speed build-up")
         local veMax, veInc = CFG.GearMaxVelocityMultiplier.fb, CFG.GearVelocityIncreaseRate.fb
-        GUI.VeloMult = veMax   -- feed the Tools "Velocity Indicator" popup
-        secVe:Slider("Max Velocity", veMax, 0.01, 0.5, 5, "x", function(v) veMax = tonumber(v) or veMax; GUI.VeloMult = veMax end)
+        secVe:Slider("Max Velocity", veMax, 0.01, 0.5, 5, "x", function(v) veMax = tonumber(v) or veMax end)
         secVe:Slider("Increase Rate", veInc, 0.05, 0.5, 5, "x", function(v) veInc = tonumber(v) or veInc end)
         secVe:Button("Apply Velocity", function()
             applyMany("Velocity", { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }, { veMax, veInc })
@@ -13473,266 +12019,12 @@ end)()
                 notif("Firearms", ok and "Every gun: no spread, no recoil (from your next shot)"
                     or ("Failed - " .. tostring(why)), ok and 4 or 5)
             end)
-        end):Tooltip("Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half; see Firearm Manual). Restore Default puts your own values back.")
+        end):Tooltip("Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half). Restore Default puts your own values back.")
         secFire:Button("Restore Default", function()
             if not gateOK() then return end
             task.spawn(function()
                 local n = faRestore() + fireRestore()
                 notif("Firearms", n > 0 and ("Restored " .. n .. " value(s)") or "Nothing to restore - no writes recorded", 3)
-            end)
-        end)
-
-        -- ---------- Blunderbuss: pellet cone ----------
-        -- Spread and recoil live in the Firearms stats above. What's left here is pelletSpreadOffset,
-        -- the pellet CONE, which only the two pellet guns have. The game scales it by
-        -- max(pelletPrecisionFloor, 1 - accuracy), so even with Apply Firearms the BlunderBuss keeps
-        -- half its cone (floor 0.5) until this slider shrinks it.
-        --
-        -- Since the CharacterFirearmHandler rewrite the gun numbers are lowercase fields of each gun
-        -- module's table TEMPLATE, copied into a fresh table every time you draw the gun. So a write
-        -- here lands the NEXT time you equip the BlunderBuss, and then sticks for the whole server.
-        --
-        -- WHY THIS ISN'T JUST "getgc the key and write it": pelletSpreadOffset is shared with the
-        -- TrenchShotgun, AND getgc also returns look-alike entries from the gun modules' constant
-        -- lists, where each name sits on the PREVIOUS field's value (live 2026-11-01: a BlunderBuss
-        -- look-alike reads pelletCount 3000 and spreadReferenceDistance 8.35). Writing one of those
-        -- rewrites gun code. So we FINGERPRINT the real template: pelletCount 10 with
-        -- spreadReferenceDistance 45 within BB_WINDOW bytes (the TrenchShotgun is 9 / 60, the
-        -- look-alikes fail both), and the spread slot must be the ONLY one of its key in that window.
-        -- The anchor keys are never written, so our own edits can't destroy the fingerprint.
-        --
-        -- Writes go through applygc on a ONE-entry list = that single address only, range-checked
-        -- first and read back after, so a stale address reports instead of writing somewhere random.
-        -- pelletCount is deliberately NOT tunable here.
-        local BB_STOCK  = { spread = 835/100 }   -- integer fraction: Matcha's parser has choked on
-                                                 -- some decimal literals
-        local BB_KEY    = { spread = "pelletSpreadOffset" }
-        local BB_ORDER  = { "spread" }
-        local BB_LABEL  = { spread = "Spread" }
-        local BB_SCAN   = { "pelletCount", "spreadReferenceDistance", "pelletSpreadOffset" }
-        local BB_WINDOW = 2048        -- max bytes from the anchor. Live 2026-11-01: the template's own
-                                      -- slots are within ~1 KB; the TrenchShotgun's is ~22 KB away.
-        local BB_EPS    = 1/1000000   -- NOT 1e-6: sci-notation literals can trip Matcha's parser
-                                      -- ("Malformed number"), which would kill the whole chunk
-        local BB_STEP   = 5/100       -- 0.05: the lib derives display precision from step MAGNITUDE,
-                                      -- so 0.05 is exact but 0.25 would render as 0.3
-        if bbState.ver ~= 2 then
-            -- pre-v8.0 resolutions point at the removed UPPER_CASE keys; start clean
-            bbState.ok, bbState.slots, bbState.live, bbState.lastScan = nil, nil, nil, nil
-            bbState.ver = 2
-        end
-        local bbStatus  = bbState.ok and "Slot resolved - press Apply" or "Idle - press Apply"
-        -- Last value written, persisted per-server so a script RE-RUN seeds the slider from what is
-        -- actually in memory instead of snapping the UI back to stock while the tune is still live.
-        local bbLive    = bbState.live or { spread = BB_STOCK.spread }
-        bbState.live    = bbLive
-        local bbVal     = { spread = bbLive.spread or BB_STOCK.spread }
-
-        -- getgc reports .addr as a number in-VM but as a hex string on some builds -> take both.
-        local function bbAddr(e)
-            if type(e) ~= "table" then return nil end
-            local a = e.addr
-            if type(a) == "number" then return a end
-            if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
-            return nil
-        end
-        local function bbNum(v) local n = tonumber(v); if n and n == n then return n end return nil end
-        local function bbNear(a, b) return a ~= nil and b ~= nil and math.abs(a - b) <= BB_EPS end
-
-        -- ONE snapshot for all three keys. This is load-bearing: entriesFor() re-scans a key whose
-        -- cache list is EMPTY and never re-scans one that is populated, so the anchor keys could
-        -- come from a fresh sweep while the spread key came from an older one. In that split the
-        -- BlunderBuss's own spread slot may be absent from the candidate list entirely and the
-        -- nearest survivor belongs to the other pellet gun -- an invisible mis-resolve that no later
-        -- check could catch. Reading one snapshot makes that impossible.
-        -- Prefer the Load Values sweep (already paid for); only if the BlunderBuss wasn't resident
-        -- then do we spend one dedicated getgc, rate-limited so a retry can't become a scan loop.
-        local function bbSnapshot()
-            local snap = {}
-            for _, k in ipairs(BB_SCAN) do
-                snap[k] = {}
-                for _, e in ipairs(cache[k] or {}) do
-                    if e and e.key == k and e.type == "number" and bbAddr(e) and bbNum(e.value) then
-                        local t = snap[k]; t[#t + 1] = e
-                    end
-                end
-            end
-            if #snap.pelletCount > 0 and #snap.pelletSpreadOffset > 0 then return snap end
-            local now = os.clock()
-            if bbState.lastScan and (now - bbState.lastScan) < 20 then return snap end
-            bbState.lastScan = now
-            local ok, raw = pcall(function() return getgc(BB_SCAN) end)
-            if not ok or type(raw) ~= "table" then return snap end
-            local fresh = {}
-            for _, k in ipairs(BB_SCAN) do fresh[k] = {} end
-            for _, e in pairs(raw) do
-                if type(e) == "table" and e.type == "number" and fresh[e.key]
-                    and bbAddr(e) and bbNum(e.value) then
-                    local t = fresh[e.key]; t[#t + 1] = e
-                end
-            end
-            return fresh
-        end
-
-        -- Anchor = a pelletCount==10 slot with a spreadReferenceDistance==45 slot beside it
-        -- (the TrenchShotgun, the only other pellet gun, is 9 / 60).
-        --
-        -- There can be more than one. Old builds had two identical BlunderBuss configs (~763 MB
-        -- apart); live 2026-11-01 there is one template. Return every anchor and write them all;
-        -- leaving one stale would make the result depend on which copy the game happens to read.
-        local function bbAnchors(snap)
-            local seen, hits = {}, {}
-            for _, pc in ipairs(snap.pelletCount) do
-                if bbNear(bbNum(pc.value), 10) then
-                    local pa = bbAddr(pc)
-                    for _, sr in ipairs(snap.spreadReferenceDistance) do
-                        local sa = bbAddr(sr)
-                        if bbNear(bbNum(sr.value), 45) and pa and sa and math.abs(pa - sa) <= BB_WINDOW then
-                            local k = string.format("%.0f", pa)   -- %.0f, not tostring: big addresses
-                            if not seen[k] then                   -- would render in scientific notation
-                                seen[k] = true
-                                hits[#hits + 1] = pa
-                            end
-                        end
-                    end
-                end
-            end
-            if #hits == 0 then return nil, "BlunderBuss not in memory - equip one, then retry" end
-            return hits
-        end
-
-        -- Per anchor, the slot must be the ONLY entry of its key inside the window — a moat: a
-        -- second one means another gun's table is co-located and we cannot tell them apart.
-        -- NOTE there is deliberately no "still at stock" test any more. Identity comes from the
-        -- anchor pair, which this panel never writes; testing a value we DO write is self-erasing
-        -- and was what made the old resolver a one-shot.
-        local function bbResolveFresh()
-            local snap = bbSnapshot()
-            local anchors, why = bbAnchors(snap)
-            if not anchors then return nil, why end
-            local out = {}
-            for _, slot in ipairs(BB_ORDER) do
-                local key, list = BB_KEY[slot], {}
-                for _, anchor in ipairs(anchors) do
-                    local cands = {}
-                    for _, e in ipairs(snap[key]) do
-                        local ea = bbAddr(e)
-                        if ea and math.abs(ea - anchor) <= BB_WINDOW then cands[#cands + 1] = e end
-                    end
-                    if #cands ~= 1 then
-                        return nil, key .. ": " .. #cands .. " candidates near an anchor - wrote nothing"
-                    end
-                    list[#list + 1] = cands[1]
-                end
-                out[slot] = list
-            end
-            return out
-        end
-
-        -- Resolve once per server, then reuse: after the first write the stock-value test can never
-        -- pass again. Same Lua VM = same addresses (Luau's GC never moves objects); a rejoin makes a
-        -- new JobId, which rebuilds the whole cache against a freshly-stock game. NOTE: the latch is
-        -- set by bbApply only after the write verifies, so a bad resolve is never made sticky.
-        local function bbResolve()
-            if bbState.ok and bbState.slots then return bbState.slots end
-            return bbResolveFresh()
-        end
-
-        -- One slot: sanity-check the address still reads a plausible value for this key, write via a
-        -- ONE-entry applygc, then read back to prove it landed. The check is a RANGE not an equality:
-        -- identity was already established at resolve time, so its only job here is catching a
-        -- dangling pointer -- an equality check would refuse every write after the first one.
-        local function bbWriteSlot(slot, e, value)
-            local a = bbAddr(e)
-            if not a then return false, "no address" end
-            if type(applygc) ~= "function" then return false, "applygc unavailable" end
-            -- fail closed: without a read-back we cannot prove anything, so we refuse rather than
-            -- report a green "Applied" for a write that may never have happened
-            if type(memory_read) ~= "function" then return false, "Unsafe LuaU off" end
-            local cfg = CFG[e.key]
-            local ok, cur = pcall(memory_read, "double", a)
-            cur = ok and bbNum(cur) or nil
-            if cur == nil then return false, "unreadable" end
-            if not (cfg and cur >= cfg.lo and cur <= cfg.hi) then
-                return false, "slot moved (" .. tostring(cur) .. ") - rejoin"
-            end
-            pcall(function() applygc({ e }, e.key, value) end)
-            local ok2, now = pcall(memory_read, "double", a)
-            now = ok2 and bbNum(now) or nil
-            if not bbNear(now, value) then return false, "write rejected" end
-            bbLive[slot] = value
-            return true
-        end
-
-        local function bbApply(vals, tag, quiet)
-            local slots, why = bbResolve()
-            if not slots then
-                bbStatus = "FAILED: " .. tostring(why)
-                if not quiet then notif("Blunderbuss", bbStatus, 5) end
-                return
-            end
-            local okAll, parts = true, {}
-            for _, slot in ipairs(BB_ORDER) do
-                local list = slots[slot] or {}
-                local wrote, failed = 0, nil
-                -- write EVERY instance of the config, not just the first
-                for _, e in ipairs(list) do
-                    local ok, err = bbWriteSlot(slot, e, vals[slot])
-                    if ok then wrote = wrote + 1 else failed = failed or err end
-                end
-                if wrote == #list and wrote > 0 then
-                    parts[#parts + 1] = string.format("%s %.2f", BB_LABEL[slot], vals[slot])
-                else
-                    okAll = false
-                    parts[#parts + 1] = string.format("%s %s (%d/%d)", BB_LABEL[slot],
-                        tostring(failed or "no slots"), wrote, #list)
-                end
-            end
-            -- only make the resolution sticky once the write has been verified
-            if okAll then bbState.ok, bbState.slots = true, slots end
-            bbStatus = (okAll and tag or "PARTIAL") .. ": " .. table.concat(parts, " | ")
-            if not quiet then notif("Blunderbuss", bbStatus, okAll and 3 or 5) end
-        end
-
-        -- ---------- Firearm Manual: tune by hand instead of going all-zero ----------
-        --   Spread Kept / Recoil Kept -> every gun, through the two stats (faApply above), as a
-        --                                share of YOUR value: 100% = unchanged, 0% = none
-        --   Pellet Spread             -> BlunderBuss ONLY, via the template fingerprint above
-        -- New slider labels on purpose: the lib saves values by label, and the old "Inaccuracy" /
-        -- "Recoil" sliders saved stud values (0-8.5 / 0-4) that would load as nonsense percentages.
-        local wmSpread = fa.pct and math.floor(fa.pct.spread * 100 + 0.5) or 100
-        local wmRecoil = fa.pct and math.floor(fa.pct.recoil * 100 + 0.5) or 100
-        local secBB = tab:Section("Firearm Manual", "Right", "Hand-tune instead of zeroing")
-        secBB:Label(function() return bbStatus end)
-        secBB:Slider("Spread Kept", wmSpread, 5, 0, 100, "%",
-            function(v) wmSpread = tonumber(v) or wmSpread end,
-            "How much of your normal aim scatter every gun keeps. 100% = stock, 0% = dead centre. Applies from your next shot, gun in hand included.")
-        secBB:Slider("Recoil Kept", wmRecoil, 5, 0, 100, "%",
-            function(v) wmRecoil = tonumber(v) or wmRecoil end,
-            "How much camera kick every gun keeps. 100% = stock, 0% = none. Applies from your next shot.")
-        secBB:Slider("Pellet Spread", bbVal.spread, BB_STEP, 0, BB_STOCK.spread, "",
-            function(v) bbVal.spread = tonumber(v) or bbVal.spread end,
-            "BlunderBuss ONLY - pellet cone radius. 0 = all 10 pellets dead centre. Stock 8.35. Takes effect the next time you equip the BlunderBuss.")
-        secBB:Button("Apply Weapons", function()
-            if not gateOK() then return end
-            task.spawn(function()
-                local ok, why = faApply(wmSpread / 100, wmRecoil / 100)
-                notif("Weapons", ok and string.format("Every gun: spread %d%% | recoil %d%%", wmSpread, wmRecoil)
-                    or ("Spread/recoil failed - " .. tostring(why)), ok and 3 or 5)
-                -- BlunderBuss pellet cone, reported via the status label
-                bbApply(bbVal, "Set (re-equip the BlunderBuss)")
-            end)
-        end)
-        secBB:Button("Restore Default", function()
-            if not gateOK() then return end
-            -- Put the sliders back too, so the panel shows what is actually in memory.
-            wmSpread, wmRecoil = 100, 100
-            bbVal.spread = BB_STOCK.spread
-            task.spawn(function()
-                faRestore()
-                fireRestore()
-                bbApply(BB_STOCK, "Restored")
-                notif("Weapons", "Restored stock spread, recoil and pellet cone", 3)
             end)
         end)
 
@@ -13861,7 +12153,7 @@ end)()
         end)
 
         -- Directly UNDER Firearm Auto (the user's spot). RowAlign would start this left section a
-        -- new row below the taller Firearm Manual + Thunderspears; `stack` (uilib patch #12) makes
+        -- new row below the taller Thunderspears; `stack` (uilib patch #12) makes
         -- it continue the left column instead. On the upstream fallback lib it just sits lower.
         -- Load Values (the lock popup) also loads the gas bar; a respawn rebuilds the gear table, and
         -- this re-finds it (gas keys only).
@@ -14162,8 +12454,6 @@ end)()
 
         local secAbout = setTab:Section("About", "Right", "Requiem")
         pcall(function() secAbout:Label(function() return "Menu key:   F3" end) end)
-        pcall(function() secAbout:Label(function() return "Player ESP:   " .. GetKeyName(GUI.PlayerEspKey) end) end)
-        pcall(function() secAbout:Label(function() return "Player List:   " .. GetKeyName(GUI.PlayerListKey) end) end)
     end)
 
     print("[Requiem] loaded with INS-ui front-end")
