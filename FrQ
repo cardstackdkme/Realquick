@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.0"
+GUI.Version = "v8.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -430,6 +430,7 @@ local ACTOR_ESP = {
     NearbyOnly  = false,
     ScanRadius  = 500,
     MaxLabels   = 25,
+    Opacity     = 1,       -- pill opacity (lower lets you see the player under the label)
     MaxDistance = 100000,
     TextSize    = 13,
     FontIndex   = 3,
@@ -6317,6 +6318,13 @@ end)()  -- /Music
                 e.nameBg.Position = Vector2.new(nameLeft, top)
                 e.nameBg.Size = Vector2.new(nameW, h)
                 e.nameText.Position = Vector2.new(nameLeft + pad, textY)
+                local op = ACTOR_ESP.Opacity or 1
+                if e.op ~= op then
+                    e.op = op
+                    e.distBg.Transparency, e.nameBg.Transparency = 0.85 * op, 0.85 * op
+                    e.distText.Transparency, e.nameText.Transparency = op, op
+                    e.icon.Transparency, e.dot.Transparency = op, op
+                end
                 if not e.shown or e.drawnRole ~= e.role then
                     e.nameText.Text = name
                     e.nameText.Color = e.role == "staff" and COLOR_STAFF or COLOR_ACTOR
@@ -6361,6 +6369,278 @@ end)()  -- /Music
 
     loadKnownSlots()
     _G.__RQ_ACTOR_ESP = ACTOR_ESP
+end)()
+
+-- ============================================================
+-- DIRECT ESP: named players, switched on one by one in the Direct ESP tab, drawn with the Actor
+-- ESP pill and a white name. Found through the player list; with Bypass Leaderboard on, a player
+-- missing from it (staff hid the leaderboard, which removes Player objects on the client) is found
+-- by their character model in Workspace, which keeps the exact username as its name (the lookup is
+-- case-sensitive, so the list holds exact Roblox usernames).
+-- The list itself is encrypted (RC4-drop768 with a per-blob nonce, base64) so the script does not
+-- show who is on it. The key is never in the script: it lives in RQ/direct_esp.txt, written the
+-- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
+-- ============================================================
+;(function()
+    local DIRECT_BLOB = "c71d24b0:J2SHLudntIYV3TlioF6Muaf9T/OG1AekvSgLtIs5y33s4EQ+Bior0yQWVWF5XAE/vXNF/3qZhO9Ljf7/vg6KaDscmRbhz8eRrB542hMVmT1ZNRoQya0775hBGSD0TeHphZC24VW8IX+R3rhM3fzsIvCipprJqPFV4wf8vmuymfzGpEHF9SMBdArGw0CzU/3M8Mj2HVv2z/1kN/dXoV9oWapQJZN9wtbWXYhWXC6dHM4m/Z0pusNZ+IcLOufs1iZo2rLjHXMiFqy/TPODuzM973tW1pBqtmvmZYcUfK0p7rezvAl4C8oI8CHK03zegzflVpn0EFj1UkYkparLtxuviJOIQJPsLGjm0A6QAxTaEuLFt+qJL/+Db8JEqzyYuFFohtMIVNcjNhacvQ7MAZK/ReN2YiLerLPZxtOiDXqdpvOKf+I5dXMnxyj9h8Ktz9DyBLF+iJCd5D/iJMDm+FnNRt6v4OBU3qLzk9OT2/2NVGh8ojftMPLpQUHZh/xx6Nn5gyXkQExvSfDLVyvklglx1DpRy9KRBIAWTaGgOpy5xvGEP5HIOmlYpMzspG0y9N94P8z4RD5yIyEyfaTvw3v6g1ZA"
+    -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
+    local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
+
+    local function rc4(key, data)
+        local S = {}
+        for i = 0, 255 do S[i] = i end
+        local j, kl = 0, #key
+        for i = 0, 255 do
+            j = (j + S[i] + key:byte(i % kl + 1)) % 256
+            S[i], S[j] = S[j], S[i]
+        end
+        local i, out = 0, {}
+        j = 0
+        for n = 1, 768 + #data do
+            i = (i + 1) % 256
+            j = (j + S[i]) % 256
+            S[i], S[j] = S[j], S[i]
+            if n > 768 then
+                out[#out + 1] = string.char(bit32.bxor(data:byte(n - 768), S[(S[i] + S[j]) % 256]))
+            end
+        end
+        return table.concat(out)
+    end
+
+    -- the groups, or nil when the key is wrong
+    local function decode(key)
+        if type(key) ~= "string" or key == "" then return nil end
+        local nonce, b64 = DIRECT_BLOB:match("^(%x+):(.+)$")
+        local raw = nil
+        pcall(function() raw = base64decode(b64) end)
+        if type(raw) ~= "string" then return nil end
+        local ok, plain = pcall(rc4, key .. nonce, raw)
+        if not ok or plain:sub(1, 6) ~= "RQDE1\n" then return nil end
+        local groups, byName = {}, {}
+        for line in plain:sub(7):gmatch("[^\n]+") do
+            local g, nm, id = line:match("^([^|]+)|([^|]+)|(%d+)$")
+            if g then
+                if not byName[g] then
+                    byName[g] = { name = g, list = {} }
+                    groups[#groups + 1] = byName[g]
+                end
+                table.insert(byName[g].list, { nm, tonumber(id) })
+            end
+        end
+        return groups
+    end
+
+    local D = {
+        On = {}, Bypass = false, ShowDead = false, Opacity = 1, Found = {},
+        Groups = {}, Locked = true,
+    }
+    do
+        local saved = nil
+        pcall(function() if isfile(KEY_FILE) then saved = readfile(KEY_FILE) end end)
+        local groups = type(saved) == "string" and decode((saved:gsub("%s", ""))) or nil
+        if groups then D.Groups, D.Locked = groups, false end
+    end
+    -- entered in the tab: keep it on this machine only
+    function D.unlock(key)
+        key = (tostring(key or ""):gsub("%s", ""))
+        local groups = decode(key)
+        if not groups then return false end
+        D.Groups, D.Locked = groups, false
+        pcall(function()
+            if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then
+                makefolder(CONFIG_DIR)
+            end
+            writefile(KEY_FILE, key)
+        end)
+        return true
+    end
+    local cfg = GUI.DirectESPCfg
+    if type(cfg) == "table" then
+        if type(cfg.on) == "table" then
+            for k, v in pairs(cfg.on) do if v == true then D.On[k] = true end end
+        end
+        if type(cfg.bypass) == "boolean" then D.Bypass = cfg.bypass end
+        if type(cfg.showDead) == "boolean" then D.ShowDead = cfg.showDead end
+        if type(cfg.opacity) == "number" then D.Opacity = math.max(0.1, math.min(1, cfg.opacity)) end
+    end
+    GUI.DirectESP = D
+
+    -- [name] = { model, part, via, checkedAt, nameAt, dead }
+    local track = {}
+
+    local function locate(name)
+        local p = nil
+        pcall(function() p = Players:FindFirstChild(name) end)
+        if p then
+            local ch, cn = nil, nil
+            pcall(function() ch = p.Character; cn = ch and ch.Name end)
+            -- dead: the Player still points at its body (renamed <name>_ragdoll) until respawn
+            local dead = type(cn) == "string" and cn:sub(-8) == "_ragdoll"
+            if ch and not dead then return ch, "player list" end
+            if ch then
+                if D.ShowDead then return ch, "body" end
+                return nil
+            end
+        end
+        if D.Bypass then
+            local m = nil
+            pcall(function() m = Workspace:FindFirstChild(name) end)
+            if m then return m, "workspace" end
+            if D.ShowDead then
+                pcall(function() m = Workspace:FindFirstChild(name .. "_ragdoll") end)
+                if m then return m, "body" end
+            end
+        end
+        return nil
+    end
+
+    local function resolvePart(model)
+        for _, n in ipairs({ "HumanoidRootPart", "UpperTorso", "Torso", "Head" }) do
+            local part = nil
+            pcall(function() part = model:FindFirstChild(n) end)
+            if part then return part end
+        end
+        return nil
+    end
+
+    -- switched on from the tab: look now, and say so if they are not here
+    function D.search(name)
+        local m, via = locate(name)
+        track[name] = { model = m, part = m and resolvePart(m), via = via, checkedAt = os.clock() }
+        D.Found[name] = m ~= nil
+        pcall(function()
+            if m then uiNotify("Direct ESP", name .. " found (" .. via .. ")", 3)
+            else uiNotify("Direct ESP", "Player not found: " .. name .. (D.Bypass and "" or " - try Bypass Leaderboard"), 4) end
+        end)
+    end
+
+    task.spawn(function()
+        local PILL, TEXT, DIM, NAME = Color3.fromRGB(24, 24, 28), Color3.fromRGB(235, 235, 240),
+            Color3.fromRGB(170, 170, 178), Color3.fromRGB(250, 250, 252)
+        local DEADC = Color3.fromRGB(225, 110, 110)
+        local SIZE, PAD = 13, 4
+        local H, CW = SIZE + 4, SIZE * 0.55
+        local font = nil
+        pcall(function() font = TITAN_FONTS[ACTOR_ESP.FontIndex].font end)
+        local function pill()
+            local s = Drawing.new("Square")
+            s.Color, s.Filled, s.Corner, s.ZIndex, s.Visible = PILL, true, 4, 53, false
+            return s
+        end
+        local function text(c)
+            local t = Drawing.new("Text")
+            t.Color, t.Size, t.Center, t.Outline, t.ZIndex, t.Visible = c, SIZE, false, false, 54, false
+            if font then t.Font = font end
+            return t
+        end
+        local function circle(filled, r)
+            local c = Drawing.new("Circle")
+            c.Color, c.Filled, c.Radius, c.NumSides, c.ZIndex, c.Visible = DIM, filled, r, filled and 8 or 16, 54, false
+            if not filled then c.Thickness = 1 end
+            return c
+        end
+        local KEYS = { "distBg", "distText", "icon", "dot", "nameBg", "nameText" }
+        local drawn = {}
+        local function hide(d)
+            if d.shown == false then return end
+            d.shown = false
+            for _, k in ipairs(KEYS) do d[k].Visible = false end
+        end
+        local cursor, lookAt = 0, 0
+        while GUI.Running do
+            local now = os.clock()
+            -- one lookup every 0.25s, round-robin over the names switched on: finds players who
+            -- join or respawn later, and lets go of bodies (renamed <name>_ragdoll on death)
+            local names = {}
+            for nm in pairs(D.On) do names[#names + 1] = nm end
+            table.sort(names)
+            if #names > 0 and now - lookAt >= 0.25 then
+                lookAt = now
+                cursor = cursor % #names + 1
+                local nm = names[cursor]
+                local t = track[nm]
+                local stale = not t or not t.model or now - (t.checkedAt or 0) > 3
+                if t and t.model and not stale then
+                    local mn, par = nil, nil
+                    pcall(function() mn = t.model.Name; par = t.model.Parent end)
+                    t.dead = type(mn) == "string" and mn:sub(-8) == "_ragdoll"
+                    if par == nil or (t.dead and not D.ShowDead) then stale = true end
+                end
+                if stale then
+                    local m, via = locate(nm)
+                    if not (t and t.model == m and t.part) then
+                        track[nm] = { model = m, part = m and resolvePart(m), via = via }
+                        t = track[nm]
+                    end
+                    t.via, t.checkedAt, t.dead = via, now, via == "body"
+                    D.Found[nm] = m ~= nil
+                end
+            end
+
+            local cam = nil
+            pcall(function() cam = Workspace.CurrentCamera.CFrame.Position end)
+            local op = D.Opacity
+            for nm, d in pairs(drawn) do
+                if not D.On[nm] then
+                    for _, k in ipairs(KEYS) do pcall(function() d[k]:Remove() end) end
+                    drawn[nm] = nil
+                end
+            end
+            for _, nm in ipairs(names) do
+                local t = track[nm]
+                local d = drawn[nm]
+                if not d then
+                    d = { distBg = pill(), distText = text(TEXT), icon = circle(false, 3), dot = circle(true, 1),
+                          nameBg = pill(), nameText = text(NAME) }
+                    d.nameText.Text = nm
+                    drawn[nm] = d
+                end
+                local pos = nil
+                local dead = t and t.dead
+                if t and t.part and (D.ShowDead or not dead) then pcall(function() pos = t.part.Position end) end
+                local s, vis = nil, false
+                if pos and cam then s, vis = WorldToScreen(Vector3.new(pos.X, pos.Y + 3, pos.Z)) end
+                local label = dead and (nm .. " (dead)") or nm
+                if d.label ~= label then
+                    d.label = label
+                    d.nameText.Text = label
+                    d.nameText.Color = dead and DEADC or NAME
+                end
+                if not (s and vis) then
+                    hide(d)
+                else
+                    if d.op ~= op then
+                        d.op = op
+                        d.distBg.Transparency, d.nameBg.Transparency = 0.85 * op, 0.85 * op
+                        d.distText.Transparency, d.nameText.Transparency = op, op
+                        d.icon.Transparency, d.dot.Transparency = op, op
+                    end
+                    local dx, dy, dz = cam.X - pos.X, cam.Y - (pos.Y - 3), cam.Z - pos.Z
+                    local distStr = tostring(math.floor(math.sqrt(dx * dx + dy * dy + dz * dz)))
+                    local distW = PAD + #distStr * CW + 4 + 6 + PAD
+                    local nameW = PAD + #label * CW + PAD
+                    local left = s.X - (distW + 3 + nameW) / 2
+                    local top = s.Y - H - 5
+                    local ty = top + (H - SIZE) / 2
+                    d.distBg.Position, d.distBg.Size = Vector2.new(left, top), Vector2.new(distW, H)
+                    d.distText.Text, d.distText.Position = distStr, Vector2.new(left + PAD, ty)
+                    local ix = left + PAD + #distStr * CW + 4 + 3
+                    d.icon.Position, d.dot.Position = Vector2.new(ix, top + H / 2), Vector2.new(ix, top + H / 2)
+                    local nl = left + distW + 3
+                    d.nameBg.Position, d.nameBg.Size = Vector2.new(nl, top), Vector2.new(nameW, H)
+                    d.nameText.Position = Vector2.new(nl + PAD, ty)
+                    if not d.shown then
+                        d.shown = true
+                        for _, k in ipairs(KEYS) do d[k].Visible = true end
+                    end
+                end
+            end
+            task.wait(1 / 60)
+        end
+        for _, d in pairs(drawn) do
+            for _, k in ipairs(KEYS) do pcall(function() d[k]:Remove() end) end
+        end
+    end)
 end)()
 
 -- Helper: hide all labels for a simple ESP type
@@ -6806,6 +7086,11 @@ saveConfig = function()
             actorRadius  = ACTOR_ESP.ScanRadius,
             actorLabels  = ACTOR_ESP.MaxLabels,
             actorRange   = ACTOR_ESP.MaxDistance,
+            actorOpacity = ACTOR_ESP.Opacity,
+            directEsp    = GUI.DirectESP and {
+                on = GUI.DirectESP.On, bypass = GUI.DirectESP.Bypass, opacity = GUI.DirectESP.Opacity,
+                showDead = GUI.DirectESP.ShowDead,
+            } or nil,
             agKeyBox     = GUI.AGKeyBox ~= false,
             agKeyX       = GUI.AGKeyX,
             agKeyY       = GUI.AGKeyY,
@@ -6815,9 +7100,7 @@ saveConfig = function()
             agPanelY     = GUI.AGPanelY,
             agToggleKey  = GUI.AG and GUI.AG.ToggleKey or GUI.AGToggleKey,
             agCfg        = GUI.AG and {
-                filter = GUI.AG.Filter, retry = GUI.AG.Retry, snap = GUI.AG.Snap,
-                radius = GUI.AG.SnapRadius, strength = GUI.AG.SnapStrength,
-                dpc = GUI.AG.DegPerCount, minChance = GUI.AG.MinChance,
+                filter = GUI.AG.Filter, retry = GUI.AG.Retry, minChance = GUI.AG.MinChance,
             } or GUI.AGCfg,
         },
         ores = oresOn,
@@ -6907,6 +7190,8 @@ loadConfig = function()
         if type(f.actorRadius)  == "number"  then ACTOR_ESP.ScanRadius     = math.floor(f.actorRadius) end
         if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
         if type(f.actorRange)   == "number"  then ACTOR_ESP.MaxDistance    = math.max(100, math.floor(f.actorRange)) end
+        if type(f.actorOpacity) == "number"  then ACTOR_ESP.Opacity        = math.max(0.1, math.min(1, f.actorOpacity)) end
+        if type(f.directEsp)    == "table"   then GUI.DirectESPCfg         = f.directEsp end
         if type(f.agKeyBox)     == "boolean" then GUI.AGKeyBox             = f.agKeyBox     end
         if type(f.agKeyX)       == "number" and type(f.agKeyY) == "number" then
             GUI.AGKeyX, GUI.AGKeyY = f.agKeyX, f.agKeyY
@@ -6926,10 +7211,6 @@ loadConfig = function()
             if A then
                 if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then A.Filter = c.filter end
                 if type(c.retry) == "boolean" then A.Retry = c.retry end
-                if type(c.snap) == "boolean" then A.Snap = c.snap end
-                if type(c.radius) == "number" then A.SnapRadius = c.radius end
-                if type(c.strength) == "number" then A.SnapStrength = c.strength end
-                if type(c.dpc) == "number" and c.dpc > 0 then A.DegPerCount = c.dpc end
                 if type(c.minChance) == "number" then A.MinChance = c.minChance end
             end
         end
@@ -10410,10 +10691,6 @@ local AG = {
     Range = 400,           -- the game's base hook range; its spread scales with distance / range
     Filter = "All",        -- "All" | "Actors" | "Players" (Actor ESP's classification)
     Retry = true,          -- a hook that lands on something else is let go and fired again
-    Snap = false,          -- turn the camera toward a target near your aim
-    SnapRadius = 90,       -- pixels from your aim that Snap reaches
-    SnapStrength = 0.45,   -- share of the remaining aim error corrected per tick
-    DegPerCount = nil,     -- camera degrees per mouse count, measured by Calibrate Snap
     -- runtime
     Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off", Pending = nil, Chance = nil,
     Await = nil, HookPart = nil, Lat = nil, Hooks = 0, Hits = 0, Misses = 0, Presses = {},
@@ -10423,10 +10700,6 @@ do
     if type(c) == "table" then
         if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then AG.Filter = c.filter end
         if type(c.retry) == "boolean" then AG.Retry = c.retry end
-        if type(c.snap) == "boolean" then AG.Snap = c.snap end
-        if type(c.radius) == "number" then AG.SnapRadius = c.radius end
-        if type(c.strength) == "number" then AG.SnapStrength = c.strength end
-        if type(c.dpc) == "number" and c.dpc > 0 then AG.DegPerCount = c.dpc end
         if type(c.minChance) == "number" then AG.MinChance = c.minChance end
     end
 end
@@ -10724,52 +10997,6 @@ function AGX.ownedBy(part, nm)
     end
     return false
 end
--- Camera degrees per mouse count. Turns the camera by a known amount and back, with the menu
--- closed (an open menu frees the cursor, which then moves instead of the camera).
-function AGX.calibrate()
-    if AGX.calibrating then return end
-    AGX.calibrating = true
-    task.spawn(function()
-        pcall(function() uiNotify("Calibrate Snap", "close the menu and keep the mouse still", 5) end)
-        local t0 = os.clock()
-        while agMenuOpen(os.clock()) and os.clock() - t0 < 10 do task.wait(0.1) end
-        task.wait(0.6)
-        local function yaw()
-            local y = nil
-            pcall(function()
-                local lv = Workspace.CurrentCamera.CFrame.LookVector
-                y = math.deg(math.atan2(-lv.X, -lv.Z))
-            end)
-            return y
-        end
-        local msg
-        local focused = false
-        pcall(function() focused = isrbxactive() and true or false end)
-        if not focused then
-            msg = "Roblox must be focused"
-        else
-            local y0 = yaw()
-            pcall(mousemoverel, 0, 200, 0)
-            task.wait(0.3)
-            local y1 = yaw()
-            pcall(mousemoverel, 0, -200, 0)
-            if not (y0 and y1) then
-                msg = "could not read the camera"
-            else
-                local d = (y1 - y0 + 540) % 360 - 180
-                if math.abs(d) < 0.3 then
-                    msg = "the camera did not turn - is the mouse locked in game?"
-                else
-                    AG.DegPerCount = math.abs(d) / 200
-                    msg = string.format("%.4f degrees per count", AG.DegPerCount)
-                end
-            end
-        end
-        pcall(function() uiNotify("Calibrate Snap", msg, 6) end)
-        AGX.calibrating = false
-    end)
-end
-GUI.AGCalibrate = AGX.calibrate
 
 -- The press gate: on the zone now AND where the cursor will be relative to them when the game
 -- reads it. Judged once per player per zone per tick (the grapple and the trigger both ask).
@@ -11038,11 +11265,10 @@ task.spawn(function()
             -- Best hook among the players nearest the cursor. What counts is where your aim is,
             -- relative to them, when the game reads the key (`lead` from now): flicking ONTO someone
             -- fires on that point alone, so a fast sweep still lands; moving OFF someone needs both
-            -- now and then to hold. Also returns the nearest target's aim error, for Snap.
+            -- now and then to hold.
             local function pickHook()
                 AGX.refreshAssist(now)
                 local best, bestP, bestF, seenP = nil, -1, nil, nil
-                local snapX, snapY, snapD = nil, nil, math.huge
                 local ig = AG.Ignore
                 for i = 1, math.min(3, #near) do
                     local c = near[i]
@@ -11057,38 +11283,11 @@ task.spawn(function()
                             local p = pAt >= pNow and pAt or math.min(pNow, pAt)
                             if p > 0 and (not seenP or p > seenP) then seenP = p end
                             if p >= AG.MinChance and p > bestP then best, bestP, bestF = c.nm, p, f end
-                            local ex, ey = f.cx - px, f.cy - py
-                            local d = math.sqrt(ex * ex + ey * ey)
-                            if d < snapD then snapX, snapY, snapD = ex, ey, d end
                         end
                     end
                 end
                 AG.Chance = seenP
-                return best, bestF, snapX, snapY, snapD
-            end
-            -- Snap: turn toward a target near your aim by a share of the error each tick. In game the
-            -- cursor is locked to the screen centre, so this is a camera turn and needs the measured
-            -- degrees per mouse count (Calibrate Snap); with a free cursor it moves the cursor.
-            local function agSnap(ex, ey, d)
-                if not (AG.Snap and ex) or d > AG.SnapRadius or d < 1 then return end
-                local locked = math.abs(mx - vp.X / 2) < 2 and math.abs(my - vp.Y / 2) < 2
-                local s = AG.SnapStrength
-                local kx, ky
-                if locked then
-                    local dpc = AG.DegPerCount
-                    if not dpc then AG.Status = "Snap needs Calibrate Snap"; return end
-                    kx = math.deg(math.atan(ex / ppK)) / dpc * s
-                    ky = math.deg(math.atan(ey / ppK)) / dpc * s
-                else
-                    kx, ky = ex * s, ey * s
-                end
-                -- whole counts only; the remainder carries into the next tick
-                kx, ky = kx + (AGX.remX or 0), ky + (AGX.remY or 0)
-                local ix = kx >= 0 and math.floor(kx) or math.ceil(kx)
-                local iy = ky >= 0 and math.floor(ky) or math.ceil(ky)
-                ix, iy = math.max(-120, math.min(120, ix)), math.max(-120, math.min(120, iy))
-                AGX.remX, AGX.remY = kx - ix, ky - iy
-                if ix ~= 0 or iy ~= 0 then pcall(mousemoverel, 0, ix, iy) end
+                return best, bestF
             end
             -- Has the game already let go of them? They left, their body was replaced (death,
             -- respawn, slot load), or they shook the hook off. Attribute reads are slow, so those
@@ -11177,17 +11376,14 @@ task.spawn(function()
                 elseif not armed or blocked then
                     AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
                 else
-                    local best, f, sx, sy, sd = pickHook()
+                    local best, f = pickHook()
                     if best and now - AG.PressedAt >= AG.MinGap then
                         agHook(best, f)
+                    elseif AG.Chance then
+                        AG.Status = string.format("aim closer (%d%% < %d%%)",
+                            math.floor(AG.Chance * 100 + 0.5), math.floor(AG.MinChance * 100 + 0.5))
                     else
-                        agSnap(sx, sy, sd)
-                        if AG.Chance then
-                            AG.Status = string.format("aim closer (%d%% < %d%%)",
-                                math.floor(AG.Chance * 100 + 0.5), math.floor(AG.MinChance * 100 + 0.5))
-                        elseif not AG.Status:find("Snap needs", 1, true) then
-                            AG.Status = "armed"
-                        end
+                        AG.Status = "armed"
                     end
                 end
             end
@@ -11731,9 +11927,63 @@ end)()
         secEnt:Slider("Actor Range", ACTOR_ESP.MaxDistance, 100, 100, 100000, "", function(v)
             ACTOR_ESP.MaxDistance = math.max(100, math.floor(tonumber(v) or ACTOR_ESP.MaxDistance))
         end):Tooltip("studs from the camera that actor/staff labels are drawn to (Nearby Only overrides it with Scan Radius). Click the number to type one")
+        secEnt:Slider("Actor Opacity", math.floor((ACTOR_ESP.Opacity or 1) * 100 + 0.5), 5, 10, 100, "%", function(v)
+            local n = tonumber(v)
+            if n then ACTOR_ESP.Opacity = math.max(0.1, math.min(1, n / 100)) end
+        end):Tooltip("how solid the actor/staff pills are. Lower it to see the player through the label")
         secEnt:Slider("Actor Labels", ACTOR_ESP.MaxLabels, 1, 0, 1000, "", function(v)
             ACTOR_ESP.MaxLabels = math.max(0, math.floor(tonumber(v) or ACTOR_ESP.MaxLabels))
         end):Tooltip("most actor/staff labels drawn at once - the nearest win. 0 hides all labels (detection keeps running). Click the number to type one")
+    end)
+
+    -- ===== Tab: Direct ESP (named players) =====
+    tabBuild(function()
+        local D = GUI.DirectESP
+        if not D then return end
+        local tab = window:Tab("Direct ESP", "eye")
+        local side = "Left"
+        if D.Locked then
+            local secKey = tab:Section("Locked", "Left", "Enter the key once")
+            local typed = ""
+            pcall(function()
+                secKey:Textbox("Key", "", function(v)
+                    typed = tostring(v or "")
+                    if D.unlock(typed) then uiNotify("Direct ESP", "Unlocked - reload the script to show the lists", 6) end
+                end, "type the key (pasting is not supported) - or put it in RQ/direct_esp.txt in your executor folder and reload. It is saved there, never in the script")
+            end)
+            secKey:Button("Unlock", function()
+                if D.unlock(typed) then
+                    uiNotify("Direct ESP", "Unlocked - reload the script to show the lists", 6)
+                else
+                    uiNotify("Direct ESP", "Wrong key", 4)
+                end
+            end)
+            side = "Right"
+        end
+        for _, g in ipairs(D.Groups) do
+            local sec = tab:Section(g.name, side, #g.list .. " players")
+            side = side == "Left" and "Right" or "Left"
+            for _, entry in ipairs(g.list) do
+                local nm = entry[1]
+                sec:Toggle(nm, D.On[nm] == true, function(v)
+                    if v then
+                        D.On[nm] = true
+                        D.search(nm)
+                    else
+                        D.On[nm] = nil
+                    end
+                end)
+            end
+        end
+        local secOpt = tab:Section("Options", side, "Search and look")
+        secOpt:Toggle("Bypass Leaderboard", D.Bypass, function(v) D.Bypass = v == true end)
+            :Tooltip("when staff hide the leaderboard the game removes players from your client. With this on, a player who is missing is found by their character in the world instead")
+        secOpt:Toggle("Show Dead", D.ShowDead, function(v) D.ShowDead = v == true end)
+            :Tooltip("keep a pill on a player's body while they are dead, marked (dead). With Bypass Leaderboard it also finds bodies of hidden players")
+        secOpt:Slider("Opacity", math.floor(D.Opacity * 100 + 0.5), 5, 10, 100, "%", function(v)
+            local n = tonumber(v)
+            if n then D.Opacity = math.max(0.1, math.min(1, n / 100)) end
+        end):Tooltip("how solid the Direct ESP pills are. Lower it to see the player through the label")
     end)
 
     -- ===== Tab: Style =====
@@ -13391,16 +13641,6 @@ end)()
             end)
             secAG:Toggle("Retry Misses", AG.Retry, function(v) AG.Retry = v == true end)
                 :Tooltip("after each hook it checks what the hook stuck to. If it landed on something other than the target, it lets go and fires again a moment later")
-            secAG:Toggle("Snap", AG.Snap, function(v) AG.Snap = v == true end)
-                :Tooltip("turns your camera toward a target that is near your aim so the hook lands. Run Calibrate Snap once first. Off = it only fires, never moves your view")
-            secAG:Slider("Snap Radius", AG.SnapRadius, 5, 10, 400, "px", function(v)
-                AG.SnapRadius = math.floor(tonumber(v) or AG.SnapRadius)
-            end):Tooltip("how far from your aim (on screen) Snap starts pulling")
-            secAG:Slider("Snap Strength", math.floor(AG.SnapStrength * 100 + 0.5), 5, 5, 100, "%", function(v)
-                local n = tonumber(v)
-                if n then AG.SnapStrength = math.max(0.05, math.min(1, n / 100)) end
-            end):Tooltip("share of the remaining aim error corrected each tick. Higher snaps harder; lower looks smoother")
-            secAG:Button("Calibrate Snap", function() if GUI.AGCalibrate then GUI.AGCalibrate() end end)
             pcall(function()
                 secAG:Keybind("Toggle Key", AG.ToggleKey and toName(AG.ToggleKey) or "", function(k)
                     local vk = toVK(k)
