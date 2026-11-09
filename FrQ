@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.0"
+GUI.Version = "v8.1"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
