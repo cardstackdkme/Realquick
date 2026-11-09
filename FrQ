@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.10"
+GUI.Version = "v8.11"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3746,8 +3746,7 @@ local function InputLoop()
             local onCounter = IsInside(mx, my, GUI.CounterX, GUI.CounterY, GUI.CounterW, GUI.CounterH)
             if GUI.CounterDragging then
                 if mouseDown then
-                    local nx = mx - GUI.CounterDragOX
-                    local ny = my - GUI.CounterDragOY
+                    local nx, ny = GUI.Snap("counter", mx - GUI.CounterDragOX, my - GUI.CounterDragOY, GUI.CounterW, GUI.CounterH)
                     local ddx = nx - GUI.CounterX
                     local ddy = ny - GUI.CounterY
                     if ddx ~= 0 or ddy ~= 0 then
@@ -3755,6 +3754,7 @@ local function InputLoop()
                     end
                 else
                     GUI.CounterDragging = false
+                    GUI.SnapGuides(nil, nil)
                 end
             elseif mouseDown and onCounter and not GUI.Dragging then
                 GUI.CounterDragging = true
@@ -3772,8 +3772,7 @@ local function InputLoop()
 
             if GUI.HealthBarDragging then
                 if mouseDown then
-                    local nx = mx - GUI.HealthBarDragOX
-                    local ny = my - GUI.HealthBarDragOY
+                    local nx, ny = GUI.Snap("hp", mx - GUI.HealthBarDragOX, my - GUI.HealthBarDragOY, GUI.HealthBarW, GUI.HealthBarH)
                     local ddx = nx - GUI.HealthBarX
                     local ddy = ny - GUI.HealthBarY
                     if ddx ~= 0 or ddy ~= 0 then
@@ -3790,6 +3789,7 @@ local function InputLoop()
                     end
                 else
                     GUI.HealthBarDragging = false
+                    GUI.SnapGuides(nil, nil)
                     -- Save the new spot the moment you let go (it used to wait for Save Config).
                     -- Only after a real move, so a plain click on the bar writes nothing.
                     if GUI._hbMoved then GUI._hbMoved = false; pcall(saveConfig) end
@@ -3821,8 +3821,7 @@ local function InputLoop()
 
             if GUI.GasBarDragging then
                 if gDown then
-                    local nx = gmx - GUI.GasBarDragOX
-                    local ny = gmy - GUI.GasBarDragOY
+                    local nx, ny = GUI.Snap("gas", gmx - GUI.GasBarDragOX, gmy - GUI.GasBarDragOY, GUI.GasBarW, GUI.GasBarH)
                     local ddx = nx - GUI.GasBarX
                     local ddy = ny - GUI.GasBarY
                     if ddx ~= 0 or ddy ~= 0 then
@@ -3839,6 +3838,7 @@ local function InputLoop()
                     end
                 else
                     GUI.GasBarDragging = false
+                    GUI.SnapGuides(nil, nil)
                     if GUI._gbMoved then GUI._gbMoved = false; pcall(saveConfig) end   -- same as health
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
@@ -5257,6 +5257,8 @@ UnloadScript = function()
         pcall(function() el:Remove() end)
     end
     GUI.Elements = {}
+    for _, l in pairs(GUI._snapLines or {}) do pcall(function() l:Remove() end) end
+    GUI._snapLines = nil
     ClearContent()
     ClearSubTabs()
     ClearPlayerList()
@@ -7407,6 +7409,7 @@ saveConfig = function()
             healthBar    = GUI.HealthBarVisible,
             gasBar       = GUI.GasBarVisible,
             counter      = GUI.CounterVisible,
+            snapDrag     = GUI.SnapOn ~= false,
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
@@ -7509,6 +7512,7 @@ loadConfig = function()
         if type(f.healthBar)    == "boolean" then GUI.HealthBarVisible     = f.healthBar    end
         if type(f.gasBar)       == "boolean" then GUI.GasBarVisible        = f.gasBar       end
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
+        if type(f.snapDrag)     == "boolean" then GUI.SnapOn               = f.snapDrag     end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
         if type(f.staffEsp)     == "boolean" then STAFF_ESP.Enabled        = f.staffEsp     end
@@ -7764,6 +7768,105 @@ do
     else
         GUI.LayoutMenu = nil
     end
+end
+
+-- Snapping while you drag a panel (hold Shift to place it freely). Its edges and centre lock onto
+-- the other panels on screen, the menu window, the screen's centre lines, and another panel's
+-- mirror across the vertical centre line, so a bar on the left and one on the right sit
+-- symmetrically. A guide line shows what it locked onto.
+GUI.SnapOn = GUI.SnapOn ~= false
+GUI.SnapPx = 8
+GUI.SnapPanels = {   -- key -> x, y, w, h while it is on screen
+    hp = function()
+        if GUI.HealthBarVisible and #(GUI.HealthBarElements or {}) > 0 then
+            return GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH
+        end
+    end,
+    gas = function()
+        if GUI.GasBarVisible and #(GUI.GasBarElements or {}) > 0 then
+            return GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH
+        end
+    end,
+    counter = function()
+        if GUI.CounterVisible and #(GUI.CounterElements or {}) > 0 then
+            return GUI.CounterX, GUI.CounterY, GUI.CounterW, GUI.CounterH
+        end
+    end,
+    pl = function() if GUI.PlayerListOpen then return GUI.PlayerListX, GUI.PlayerListY, GUI.PlayerListW, GUI.PlayerListH end end,
+    en = function() if GUI.EnchantsOpen then return GUI.EnchantsX, GUI.EnchantsY, GUI.EnchantsW, GUI.EnchantsH end end,
+    rs = function() if GUI.RSDiffOpen then return GUI.RSDiffX, GUI.RSDiffY, GUI.RSDiffW, GUI.RSDiffH end end,
+    velo = function() if GUI.VeloOpen then return GUI.VeloX, GUI.VeloY, 314, 220 end end,
+    -- The lib rebuilds _G.RQGeo every frame it draws the window, so one that stopped changing is a
+    -- minimised menu, not a target.
+    menu = function()
+        local g, now = _G.RQGeo, os.clock()
+        if g ~= GUI._snapGeoRef then GUI._snapGeoRef, GUI._snapGeoAt = g, now end
+        if type(g) == "table" and g.open and now - (GUI._snapGeoAt or 0) <= 0.25 then return g.wx, g.wy, g.ww, g.wh end
+    end,
+}
+-- Where a panel being dragged to (x, y) should go instead. `self` is its key in GUI.SnapPanels.
+function GUI.Snap(self, x, y, w, h)
+    local free = not GUI.SnapOn or not (tonumber(w) and tonumber(h))
+    if not free then pcall(function() free = iskeypressed(0x10) and true or false end) end   -- Shift
+    if free then GUI.SnapGuides(nil, nil); return x, y end
+    local vw, vh = 1920, 1080
+    pcall(function() local vp = Workspace.CurrentCamera.ViewportSize; vw, vh = vp.X, vp.Y end)
+    local xs, ys = { vw / 2 }, { vh / 2 }
+    for key, get in pairs(GUI.SnapPanels) do
+        if key ~= self then
+            local ok, ox, oy, ow, oh = pcall(get)
+            if ok and tonumber(ox) and tonumber(oy) and tonumber(ow) and tonumber(oh) then
+                for _, v in ipairs({ ox, ox + ow, ox + ow / 2, vw - ox, vw - ox - ow }) do xs[#xs + 1] = v end
+                for _, v in ipairs({ oy, oy + oh, oy + oh / 2 }) do ys[#ys + 1] = v end
+            end
+        end
+    end
+    local function nearest(pos, size, lines)
+        local bestD, bestPos, bestLine = GUI.SnapPx + 0.5, nil, nil
+        for _, edge in ipairs({ 0, size / 2, size }) do
+            for _, l in ipairs(lines) do
+                local d = math.abs(l - (pos + edge))
+                if d < bestD then bestD, bestPos, bestLine = d, l - edge, l end
+            end
+        end
+        return bestPos, bestLine
+    end
+    local sx, gx = nearest(x, w, xs)
+    local sy, gy = nearest(y, h, ys)
+    GUI.SnapGuides(gx, gy)
+    return sx or x, sy or y
+end
+-- Full-screen guide lines at x = gx and y = gy; nil hides that one.
+function GUI.SnapGuides(gx, gy)
+    local G = GUI._snapLines
+    if not G then
+        if not (gx or gy) then return end
+        G = {}
+        pcall(function()
+            for _, k in ipairs({ "v", "h" }) do
+                local l = Drawing.new("Line")
+                l.Thickness = 1
+                l.Color = Color3.fromRGB(90, 170, 255)
+                l.Transparency = 0.9
+                l.ZIndex = 90
+                l.Visible = false
+                G[k] = l
+            end
+        end)
+        GUI._snapLines = G
+    end
+    local vw, vh = 1920, 1080
+    pcall(function() local vp = Workspace.CurrentCamera.ViewportSize; vw, vh = vp.X, vp.Y end)
+    pcall(function()
+        if G.v then
+            if gx then G.v.From = Vector2.new(gx, 0); G.v.To = Vector2.new(gx, vh) end
+            G.v.Visible = gx ~= nil
+        end
+        if G.h then
+            if gy then G.h.From = Vector2.new(0, gy); G.h.To = Vector2.new(vw, gy) end
+            G.h.Visible = gy ~= nil
+        end
+    end)
 end
 
 -- NOTE: we intentionally do NOT auto-load the RS snapshot here.
@@ -8606,8 +8709,13 @@ task.spawn(function()
         if R.dragKey and down then
             local kx = R.dragKey=="pl" and "PlayerListX" or R.dragKey=="en" and "EnchantsX" or R.dragKey=="velo" and "VeloX" or "RSDiffX"
             local ky = R.dragKey=="pl" and "PlayerListY" or R.dragKey=="en" and "EnchantsY" or R.dragKey=="velo" and "VeloY" or "RSDiffY"
-            GUI[kx]=R.mx-R.dragOX; GUI[ky]=R.my-R.dragOY
-        elseif not down then R.dragKey=nil end
+            local sw = R.dragKey=="pl" and GUI.PlayerListW or R.dragKey=="en" and GUI.EnchantsW or R.dragKey=="velo" and 314 or GUI.RSDiffW
+            local sh = R.dragKey=="pl" and GUI.PlayerListH or R.dragKey=="en" and GUI.EnchantsH or R.dragKey=="velo" and 220 or GUI.RSDiffH
+            GUI[kx], GUI[ky] = GUI.Snap(R.dragKey, R.mx-R.dragOX, R.my-R.dragOY, sw, sh)
+        elseif not down then
+            if R.dragKey then GUI.SnapGuides(nil, nil) end
+            R.dragKey=nil
+        end
         if R.scrollOff and down then
             local dy=R.my-R.scrollLastY
             GUI[R.scrollOff]=maxf(0,minf(R.scrollMax,(GUI[R.scrollOff] or 0)+dy*(R.scrollMax/maxf(1,R.scrollTrackH))))
@@ -14001,6 +14109,8 @@ end)()
         secLook:Slider("Opacity", math.floor((RUITHEME.opacity or 1) * 100), 1, 30, 100, "%", function(v) RUITHEME.opacity = (tonumber(v) or 100) / 100 end)
 
         local secLay = setTab:Section("Layout", "Left", "Where the menu and panels open")
+        secLay:Toggle("Snap While Dragging", GUI.SnapOn ~= false, function(v) GUI.SnapOn = v == true end)
+            :Tooltip("a dragged bar or panel locks its edges and centre onto other panels, the menu, the screen centre, and the mirror of another panel across the centre (so left and right bars line up). A blue line shows what it locked onto. Hold Shift to place it freely")
         secLay:Button("Save GUI Positions", function()
             local ok, err = GUI.SaveLayout()
             if ok then
