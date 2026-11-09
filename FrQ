@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.3"
+GUI.Version = "v8.4"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -100,15 +100,15 @@ GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
 GUI.PowerDouble = false     -- Tools -> Admin -> "Hide admin Panel": hide the staff Editor (windows, top panel, ping pop-ups)
 
--- Personal gas + health bars (self only, Tools -> Indicators). Both are the slim HUD bar: a label
--- centred above a thin bar. X/Y nil = not placed yet: the first build puts gas centred above the
+-- Personal gas + health bars (self only, Tools -> Indicators). Both are the slim HUD bar: text
+-- inside a 20 px bar. X/Y nil = not placed yet: the first build puts gas centred above the
 -- hotbar and health to its left; after a drag the spot is saved with the config.
 GUI.GasBarVisible = false
 GUI.GasBarElements = {}
 GUI.GasBarX = nil
 GUI.GasBarY = nil
 GUI.GasBarW = 240
-GUI.GasBarH = 12
+GUI.GasBarH = 20
 GUI.GasBarDragging = false
 GUI.GasBarDragOX = 0
 GUI.GasBarDragOY = 0
@@ -118,7 +118,7 @@ GUI.HealthBarElements = {}
 GUI.HealthBarX = nil
 GUI.HealthBarY = nil
 GUI.HealthBarW = 240
-GUI.HealthBarH = 12
+GUI.HealthBarH = 20
 GUI.HealthBarDragging = false
 GUI.HealthBarDragOX = 0
 GUI.HealthBarDragOY = 0
@@ -3813,11 +3813,6 @@ local function InputLoop()
             local gDown = ismouse1pressed()
             local glh = GUI.SlimLabelH or 0
             local onGas = IsInside(gmx, gmy, GUI.GasBarX, GUI.GasBarY - glh, GUI.GasBarW, GUI.GasBarH + glh)
-            -- Is the menu window on screen? Same test as agMenuOpen (defined further down): the fork
-            -- rebuilds _G.RQGeo every frame it renders, so a table that stopped changing = minimised.
-            local geo = _G.RQGeo
-            if geo ~= GUI._gasGeoRef then GUI._gasGeoRef, GUI._gasGeoAt = geo, os.clock() end
-            local menuOpen = type(geo) == "table" and geo.open == true and (os.clock() - (GUI._gasGeoAt or 0)) <= 0.25
 
             if GUI.GasBarDragging then
                 if gDown then
@@ -3838,25 +3833,20 @@ local function InputLoop()
                     end
                 else
                     GUI.GasBarDragging = false
-                    -- Pressed and released without moving it, with the menu open = a click: find
-                    -- the gas. Menu-only, so a combat click that lands on the bar never sweeps.
-                    local moved = math.abs(gmx - (GUI.GasBarPressX or gmx)) + math.abs(gmy - (GUI.GasBarPressY or gmy))
-                    if moved <= 3 and menuOpen and GUI.FindGas then GUI.FindGas() end
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
                    and not GUI.HealthBarDragging then
                 GUI.GasBarDragging = true
-                GUI.GasBarPressX, GUI.GasBarPressY = gmx, gmy
                 GUI.GasBarDragOX = gmx - GUI.GasBarX
                 GUI.GasBarDragOY = gmy - GUI.GasBarY
             end
 
-            -- ~30x a second: the ODM gas is two memory reads (getgc only runs when the gear table
-            -- has to be found again), and gas drains continuously while you move.
+            -- ~30x a second: the ODM gas is a few memory reads (the gas bar never sweeps; the
+            -- Character tab's Load Values / Reload Gas feed it), and gas drains while you move.
             local gnow = os.clock()
             if gnow - (GUI._gbRefreshAt or 0) >= 1 / 30 then
                 GUI._gbRefreshAt = gnow
-                UpdateGasBar(true)   -- the ONLY caller allowed to run the (requested) sweep
+                UpdateGasBar()
             end
         end
 
@@ -4583,22 +4573,38 @@ ClearGasBar = function()
 end
 
 -- ============================================================
--- SLIM HUD BARS (v8.2): personal health + ODM gas
--- One look for both, the same as the standalone GasBar.lua: a label centred above a thin bar,
--- green > 50%, yellow > 20%, red below. Drag either one by its label or its bar; the spot is saved
--- with the config. Both refresh IN PLACE (no Remove + rebuild), so neither ever blinks.
+-- SLIM HUD BARS (v8.4): personal health + ODM gas
+-- One look for both: the text sits INSIDE the bar, white with a thin black outline, on a pure-black
+-- track so it stays readable however empty the bar is. Health fills green > 50%, yellow > 20%, red
+-- below. Gas fills with a gradient, blue at the empty end -> purple at the full end. Drag either bar;
+-- the spot is saved with the config. Both refresh IN PLACE (no Remove + rebuild), so they never blink.
 -- Everything lives in this do-block: the main chunk is near Luau's 200-local limit.
 -- ============================================================
 do
-    local LABEL_H = 20                        -- the label sits this far above the bar
-    local FONT = Drawing.Fonts.SystemBold     -- the health bar's font, used for both labels
+    local TEXT_SIZE = 14
+    local SLICE = 2                           -- gradient slice width (px): narrow = smooth
+    local FONT = Drawing.Fonts.SystemBold     -- the health bar's font, used for both bars
     local C3 = Color3.fromRGB
-    GUI.SlimLabelH = LABEL_H                  -- the drag code grabs the label too
+    GUI.SlimLabelH = 0                        -- the text is inside the bar now (the drag code reads this)
 
     local function barColor(frac)
         if frac > 0.5 then return C3(90, 200, 120) end
         if frac > 0.2 then return C3(235, 190, 70) end
         return C3(225, 70, 60)
+    end
+
+    -- Gas gradient, blended in LINEAR light (gamma 2.2), not raw sRGB: a straight sRGB blend sags
+    -- dull in the middle, a linear-light blend keeps every slice equally bright, so it reads as one
+    -- smooth, even sweep. Blue = empty end, purple = full end.
+    local GRAD_LO, GRAD_HI = { 45, 125, 255 }, { 170, 80, 255 }
+    local function lin(c) return (c / 255) ^ 2.2 end
+    local function gradColor(t)
+        local out = {}
+        for i = 1, 3 do
+            local l = lin(GRAD_LO[i]) + (lin(GRAD_HI[i]) - lin(GRAD_LO[i])) * t
+            out[i] = math.floor(255 * l ^ (1 / 2.2) + 0.5)
+        end
+        return C3(out[1], out[2], out[3])
     end
 
     -- First build with no saved spot: gas centred above the hotbar, health to its left.
@@ -4611,45 +4617,76 @@ do
         return math.floor(vx / 2 - w - 190), y
     end
 
-    local function draw(px, py, pw, ph, elems)
+    -- gradient=true: the fill is a row of SLICE-wide strips, each its own colour (Drawing has no
+    -- gradient fill). They are positioned once here; dragging moves them with everything else.
+    local function draw(px, py, pw, ph, elems, gradient)
         local function add(o) o.Visible = true; elems[#elems + 1] = o; return o end
-        local function sq(col, z, filled, a)
+        local function sq(col, z, filled, a, corner)
             local s = Drawing.new("Square")
             s.Color = col; s.Filled = filled; s.Transparency = a; s.ZIndex = z
-            s.Corner = 4; s.Thickness = 1
+            s.Corner = corner or 4; s.Thickness = 1
             return add(s)
         end
         local h = {}
-        h.bg = sq(C3(14, 14, 16), 55, true, 0.85)
-        h.fill = sq(C3(90, 200, 120), 56, true, 1)
-        h.border = sq(C3(60, 60, 66), 57, false, 1)
-        local t = Drawing.new("Text")
-        t.Size = 15; t.Outline = true; t.Center = true; t.ZIndex = 58
-        t.Color = C3(235, 235, 235); t.Font = FONT; t.Text = ""
-        h.label = add(t)
+        h.bg = sq(C3(0, 0, 0), 55, true, 1)                  -- pure black track
         h.bg.Position, h.bg.Size = Vector2.new(px, py), Vector2.new(pw, ph)
+        local iw = pw - 4                                    -- inner width
+        if gradient then
+            h.slices, h.sliceH = {}, ph - 4
+            local n = math.ceil(iw / SLICE)
+            for i = 1, n do
+                local s = sq(gradColor((i - 0.5) / n), 56, true, 1, 0)
+                s.Position = Vector2.new(px + 2 + (i - 1) * SLICE, py + 2)
+                s.Size = Vector2.new(SLICE, ph - 4)
+                s.Visible = false
+                h.slices[i] = { o = s, vis = false, w = SLICE, x0 = (i - 1) * SLICE }
+            end
+        else
+            h.fill = sq(C3(90, 200, 120), 56, true, 1, 3)
+            h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(0, ph - 4)
+        end
+        h.border = sq(C3(60, 60, 66), 57, false, 1)
         h.border.Position, h.border.Size = Vector2.new(px, py), Vector2.new(pw, ph)
-        h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(0, ph - 4)
-        h.label.Position = Vector2.new(px + math.floor(pw / 2), py - LABEL_H)
+        local t = Drawing.new("Text")
+        t.Size = TEXT_SIZE; t.Outline = true; t.Center = true; t.ZIndex = 58
+        t.Color = C3(255, 255, 255); t.Font = FONT; t.Text = ""
+        h.label = add(t)
+        -- Center = true centres horizontally only; this puts the text's middle on the bar's middle
+        h.label.Position = Vector2.new(px + math.floor(pw / 2), py + math.floor((ph - TEXT_SIZE) / 2) - 1)
         return h
     end
 
-    -- `status` replaces the numbers (searching, no gear) and hides the fill.
+    -- Show `fw` px of gradient: touch only the strips whose state changes, so a draining bar costs
+    -- one or two property writes per refresh instead of ~120.
+    local function showSlices(h, fw)
+        for _, s in ipairs(h.slices) do
+            local w = math.max(0, math.min(SLICE, fw - s.x0))
+            local vis = w > 0
+            if vis ~= s.vis then s.vis = vis; s.o.Visible = vis end
+            if vis and w ~= s.w then s.w = w; s.o.Size = Vector2.new(w, h.sliceH) end
+        end
+    end
+
+    -- `status` replaces the whole text (no title, no numbers) and empties the bar.
     local function update(h, title, val, maxVal, px, py, pw, ph, status)
         if not h then return end
         pcall(function()
             if status then
-                h.fill.Visible = false
-                h.label.Text = title .. "  " .. status
+                if h.slices then showSlices(h, 0) else h.fill.Visible = false end
+                h.label.Text = status
                 return
             end
             local inf = (maxVal == math.huge)
             local m = (maxVal and maxVal > 0) and maxVal or 100
             local frac = inf and 1 or math.max(0, math.min(1, val / m))
             local fw = math.floor((pw - 4) * frac + 0.5)
-            h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(fw, ph - 4)
-            h.fill.Color = barColor(frac)
-            h.fill.Visible = fw > 0
+            if h.slices then
+                showSlices(h, fw)
+            else
+                h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(fw, ph - 4)
+                h.fill.Color = barColor(frac)
+                h.fill.Visible = fw > 0
+            end
             if inf then
                 h.label.Text = title .. "  INF"
             else
@@ -4667,7 +4704,7 @@ do
             GUI.HealthBarX, GUI.HealthBarY = defaultPos("hp", GUI.HealthBarW)
         end
         GUI.HealthBarHandle = draw(GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH,
-            GUI.HealthBarElements)
+            GUI.HealthBarElements, false)
         GUI.UpdateHealthBar()
     end
     GUI.UpdateHealthBar = function()
@@ -4679,33 +4716,21 @@ do
 
     -- ---------- ODM gear gas ----------
     -- The gas the check-gas monologue reports lives in ClientGearHandler's gear state table, rebuilt
-    -- on every equip: { gas = <left>, maxGas = 800, gasConsumption = 6, gasBoostingConsumption = 12,
-    -- ... } (live 2026-11-09). One getgc finds it, then the two numbers are read straight from
-    -- memory. (The old source, the gaspack's Amount/MaxAmount attributes, is a different tank.)
+    -- on every equip/respawn: { gas = <left>, maxGas = 800, gasConsumption = 6,
+    -- gasBoostingConsumption = 12, ... } (live 2026-11-09). Found by a getgc, then the two numbers are
+    -- read straight from memory. (The gaspack's Amount/MaxAmount attributes are a different tank.)
     --
-    -- ⚠ v8.2 FROZE MATCHA ON LOAD. One getgc sweeps the game's whole Lua heap: 10+ s in Requiem,
-    -- during which Matcha does nothing else, so Windows flags it "Not responding". v8.2 swept by
-    -- itself the moment a saved "Gas Bar = on" was restored, inside loadConfig. Rules now:
-    --   * the sweep runs ONLY when asked: a click on the bar (menu open) or Tools -> Find Gas, or
-    --     after a respawn when "Auto-find After Respawn" is on (off by default);
-    --   * it runs ONLY from InputLoop (UpdateGasBar(true)), never from a build/toggle/load path, and
-    --     only after one tick of "finding..." plus a notice, so you know why Matcha paused;
-    --   * no retry loop: a sweep that finds nothing waits for the next request.
+    -- ⚠ THE GAS BAR NEVER RUNS getgc ITSELF. One sweep = 10+ s with Matcha frozen (v8.2 swept on
+    -- load and Windows closed Matcha as not responding). It is fed by sweeps you start:
+    --   * Character -> Load Values: warm() adds the three gas keys to its ONE sweep and hands the raw
+    --     entries to GUI.GasFromSweep (no second freeze);
+    --   * Character -> Reload Gas: a gas-only sweep, for after a respawn rebuilt the table.
+    -- Found slots ride on _G keyed by JobId, so re-running the script in the same server keeps them.
     local NODE_SPAN = 2048   -- a 64-slot hash part (32-byte slots): every field of the table is inside
-    -- find: nil = idle, "asked" = requested (shows "finding..."), "go" = sweep on the next loop tick
-    local ODM = { cands = {}, char = nil, prev = nil, find = nil, findAt = 0, status = "click to find" }
+    GUI.GasSweepKeys = { "gasBoostingConsumption", "maxGas", "gas" }
+    -- status nil = derive it (Load Values first / Reload Gas); a string = say exactly that
+    local ODM = { cands = {}, char = nil, prev = nil, status = nil }
     GUI.ODMGas = ODM
-    -- An explicit request always searches again, even while a table is shown (a stale value is the
-    -- usual reason to ask), so a request can never sit pending and fire later by surprise.
-    GUI.FindGas = function()
-        if not GUI.GasBarVisible then
-            pcall(uiNotify, "Gas Bar", "Turn on Gas Bar first", 4)
-            return
-        end
-        if ODM.find ~= nil then return end
-        ODM.cands, ODM.active = {}, nil
-        ODM.find, ODM.findAt = "asked", 0
-    end
 
     local function num(kind, a)
         local ok, v = pcall(memory_read, kind, a)
@@ -4719,7 +4744,7 @@ do
         return nil
     end
     -- A slot is [value 8][extra 4][type tag 4][key pointer 8 ...]. It still holds its field while
-    -- the tag says number (3) and the key pointer is the one seen at scan time.
+    -- the tag says number (3) and the key pointer is the one seen at sweep time.
     local function slotOf(e)
         local a = addrOf(e)
         if not a then return nil end
@@ -4731,11 +4756,24 @@ do
         return num("int", s.a + 12) == 3 and num("uint64", s.a + 16) == s.key
     end
 
-    -- Every live gear table: a numeric gasBoostingConsumption with exactly one numeric gas and one
-    -- numeric maxGas in the same hash part. Function-constant look-alikes never have all three.
-    local function scan()
-        local ok, entries = pcall(function() return getgc({ "gasBoostingConsumption", "maxGas", "gas" }) end)
-        if not ok or type(entries) ~= "table" then return {} end
+    local function jobId()
+        local j = ""
+        pcall(function() j = tostring(game.JobId or "") end)
+        return j
+    end
+    -- a re-run in the same server: reuse the slots found last time (checked by slotOK every read)
+    do
+        local saved = _G.RQGasSlots
+        if type(saved) == "table" and saved.job == jobId() and type(saved.cands) == "table" then
+            ODM.cands = saved.cands
+        end
+    end
+
+    -- Every live gear table in a sweep's entries: a numeric gasBoostingConsumption with exactly one
+    -- numeric gas and one numeric maxGas in the same hash part. Function-constant look-alikes never
+    -- have all three. Called by the Character tab's sweeps; never sweeps by itself.
+    GUI.GasFromSweep = function(entries)
+        if type(entries) ~= "table" then return 0 end
         local by = { gasBoostingConsumption = {}, maxGas = {}, gas = {} }
         for _, e in pairs(entries) do
             if type(e) == "table" and e.type == "number" and by[e.key] then
@@ -4758,7 +4796,11 @@ do
                 if g and m then found[#found + 1] = { gas = g, max = m, last = num("double", g.a), changed = 0 } end
             end
         end
-        return found
+        if ODM.active then ODM.prev = ODM.active.gas.a end
+        ODM.cands, ODM.active = found, nil
+        ODM.status = (#found == 0) and "No gear - Reload Gas" or nil
+        _G.RQGasSlots = { job = jobId(), cands = found }
+        return #found
     end
 
     local function charAddr()
@@ -4772,7 +4814,7 @@ do
 
     -- After a respawn the old gear table can linger until Lua frees it, holding its last number.
     -- Several candidates: show the one whose gas moved most recently; while none has moved, prefer
-    -- one that is not the table shown before the respawn (the newer one).
+    -- one that is not the table shown before (the newer one).
     local function pick()
         local best = nil
         for _, c in ipairs(ODM.cands) do
@@ -4784,21 +4826,25 @@ do
         return best
     end
 
-    -- (gas, maxGas), or (nil, status). `canScan` is true ONLY from InputLoop; every other caller
-    -- (build, toggle, loadConfig) just reads, so a sweep can never run during load.
-    local function readODM(canScan)
-        if type(getgc) ~= "function" or type(memory_read) ~= "function" then return nil, "unavailable" end
+    local function idleText()
+        if ODM.status then return ODM.status end
+        if GUI.CharIsLoaded and GUI.CharIsLoaded() then return "Reload Gas in Character" end
+        return "Load Values first"
+    end
+
+    -- (gas, maxGas), or (nil, text). Memory reads only: this never sweeps.
+    local function readODM()
+        if type(memory_read) ~= "function" then return nil, "unavailable" end
         local now = os.clock()
         local ch = charAddr()
         if ch ~= ODM.char then
             local first = not ODM.charSeen
             ODM.charSeen = true
             ODM.char = ch
-            if not first then                -- respawned: the gear table is rebuilt
+            if not first and #ODM.cands > 0 then   -- respawned: the gear table is rebuilt
                 if ODM.active then ODM.prev = ODM.active.gas.a end
                 ODM.cands, ODM.active = {}, nil
-                ODM.status = "respawned - click to find"
-                if GUI.GasAutoFind and ODM.foundOnce then ODM.find, ODM.findAt = "asked", now + 3 end
+                ODM.status = "Reload Gas in Character"
             end
         end
         local had = #ODM.cands > 0
@@ -4812,33 +4858,11 @@ do
             end
         end
         ODM.cands = keep
-        if had and #keep == 0 then           -- the table was freed (unequipped, rebuilt)
-            ODM.status = "gear changed - click to find"
-            if GUI.GasAutoFind and ODM.find == nil then ODM.find, ODM.findAt = "asked", now + 3 end
-        end
-        if #keep == 0 then
-            if ODM.find == "go" and canScan then
-                ODM.find = nil
-                ODM.cands = scan()
-                if #ODM.cands == 0 then
-                    ODM.status = "no gear found - click to retry"
-                    return nil, ODM.status
-                end
-                ODM.foundOnce = true
-            elseif ODM.find ~= nil and now >= ODM.findAt then
-                -- one tick of "finding..." (and a notice) BEFORE the sweep holds Matcha
-                if canScan and ODM.find == "asked" then
-                    ODM.find = "go"
-                    pcall(uiNotify, "Gas Bar", "Finding your gear - Matcha pauses for about 10 seconds", 6)
-                end
-                return nil, "finding..."
-            else
-                return nil, ODM.status
-            end
-        end
+        if had and #keep == 0 then ODM.status = "Reload Gas in Character" end   -- table freed
+        if #keep == 0 then return nil, idleText() end
         ODM.active = pick()
         local c = ODM.active
-        if not c then return nil, "--" end
+        if not c then return nil, idleText() end
         local g, m = num("double", c.gas.a), num("double", c.max.a)
         if g and m and m > 0 then return g, m end
         return nil, "--"
@@ -4850,14 +4874,13 @@ do
         if GUI.GasBarX == nil or GUI.GasBarY == nil then
             GUI.GasBarX, GUI.GasBarY = defaultPos("gas", GUI.GasBarW)
         end
-        GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements)
-        UpdateGasBar()          -- read only: never sweeps (this runs during load and from toggles)
+        GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements, true)
+        UpdateGasBar()
     end
-    -- canScan: pass true ONLY from InputLoop
-    UpdateGasBar = function(canScan)
+    UpdateGasBar = function()
         local h = GUI.GasBarHandle
         if not (GUI.GasBarVisible and h) then return end
-        local g, m = readODM(canScan == true)
+        local g, m = readODM()
         if g then
             update(h, "GAS", g, m, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH)
         else
@@ -12314,12 +12337,7 @@ end)()
         end):Tooltip("your health as a slim bar. Drag its label or bar to move it; the spot is saved")
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
-        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Drag to move; the spot is saved. Click the bar (menu open) or Find Gas to find your gear")
-        -- The search sweeps the game's whole Lua heap: Matcha pauses ~10 s. So it never runs by itself.
-        secInd:Button("Find Gas", function() if GUI.FindGas then GUI.FindGas() end end)
-        secInd:Toggle("Auto-find After Respawn", GUI.GasAutoFind == true, function(v)
-            GUI.GasAutoFind = v == true
-        end):Tooltip("after you respawn, find the new gear table by itself. Matcha pauses ~10 s each time, 3 s after you spawn. Off: click the bar or Find Gas")
+        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. Drag to move; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
         secInd:Toggle("Velocity Indicator", GUI.VeloOpen, function(v) GUI.VeloOpen = v end)
 
@@ -12955,8 +12973,12 @@ end)()
         local function warm()
             local keys = {}
             for k in pairs(CFG) do keys[#keys + 1] = k; if not cache[k] then cache[k] = {} end end
+            -- The gas bar rides on this sweep (no second freeze). Its keys are NOT CFG keys, so the
+            -- filter below never caches them; the gas bar gets the raw entries instead.
+            for _, k in ipairs(GUI.GasSweepKeys or {}) do keys[#keys + 1] = k end
             local ok, entries = pcall(function() return getgc(keys) end)   -- getgc accepts a key LIST
             if not ok or type(entries) ~= "table" then return false end
+            if GUI.GasFromSweep then pcall(GUI.GasFromSweep, entries) end
             local found = 0
             for _, e in pairs(entries) do
                 local cfg = e and CFG[e.key]
@@ -13023,6 +13045,25 @@ end)()
                 notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
             end)
         end
+        -- Reload Gas: a respawn rebuilds the gear table, so the gas bar needs one more sweep. Gas keys
+        -- ONLY -- the Character values themselves are untouched (their cached slots outlive respawns,
+        -- and re-resolving the BlunderBuss after an edit would fail its stock-value test).
+        GUI.CharReloadGas = function()
+            if charLoading then return end
+            if not warmed then return GUI.CharLoad() end   -- nothing loaded yet: the full Load Values
+            charLoading = true
+            task.spawn(function()
+                notif("Gas", "Scanning memory... (~10s freeze)", 2)
+                local n = 0
+                local ok, entries = pcall(function() return getgc(GUI.GasSweepKeys) end)
+                if ok and type(entries) == "table" and GUI.GasFromSweep then
+                    local ok2, r = pcall(GUI.GasFromSweep, entries)
+                    if ok2 and type(r) == "number" then n = r end
+                end
+                charLoading = false
+                notif("Gas", n > 0 and "Gas bar loaded" or "No gear found - equip it, then retry", n > 0 and 3 or 4)
+            end)
+        end
         -- Silent. drawCharLock already dims this panel and puts "VALUES LOCKED" + a Load Values
         -- popup over it, so a toast on every blocked click was just noise on top of that.
         local function gateOK()
@@ -13049,6 +13090,11 @@ end)()
         -- ---------- Grapple (ODM hook range) ----------
         -- Additional Range only. GearGrappleRangeMultiplier is no longer written at all (its slider
         -- was removed), so the projection is a plain 400 + additional.
+        -- Load Values (the lock popup) also loads the gas bar. A respawn rebuilds the gear table:
+        -- this re-finds it, gas keys only.
+        tab:Section("Gas Bar", "Left", "after a respawn"):Button("Reload Gas  (~10s)", function()
+            if GUI.CharReloadGas then GUI.CharReloadGas() end
+        end)
         local secGr = tab:Section("Grapple", "Left", "ODM hook range")
         local grAdd = CFG.GearAdditionalGrappleRange.fb
         secGr:Slider("Additional Range", grAdd, 50, 0, 5000, "", function(v) grAdd = math.floor(tonumber(v) or grAdd) end)
