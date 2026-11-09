@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.14"
+GUI.Version = "v8.15"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6790,6 +6790,7 @@ saveConfig = function()
             counter      = GUI.CounterVisible,
             snapDrag     = GUI.SnapOn ~= false,
             panelsFollow = GUI.PanelsFollowMenu ~= false,
+            accent       = GUI.AccentRGB,
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
@@ -6886,6 +6887,9 @@ loadConfig = function()
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.snapDrag)     == "boolean" then GUI.SnapOn               = f.snapDrag     end
         if type(f.panelsFollow) == "boolean" then GUI.PanelsFollowMenu     = f.panelsFollow end
+        if type(f.accent) == "table" and tonumber(f.accent[1]) and tonumber(f.accent[2]) and tonumber(f.accent[3]) then
+            GUI.AccentRGB = { f.accent[1], f.accent[2], f.accent[3] }
+        end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
         if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
@@ -10397,15 +10401,23 @@ end)()
     pcall(function() Lib:SetTheme({ accentA = RED_A, accentB = RED_B, bg = Color3.fromRGB(16, 16, 20), sidebar = Color3.fromRGB(16, 16, 20) }) end)
 
     -- Shared theme: the custom panels (Requiem UI engine) read the accent from the same
-    -- getgenv().RequiemUI table, so menu and panels match. The accent is the fixed Requiem red;
-    -- nothing overrides the lib's own opacity any more (Settings > Interface > Menu opacity).
-    -- The rainbow is reset because a session-stored "on" from before has no switch left.
+    -- getgenv().RequiemUI table, so menu and panels match. The accent is set from Settings >
+    -- Appearance > Accent and saved in the config (GUI.AccentRGB); nothing overrides the lib's own
+    -- opacity (Settings > Interface > Menu opacity). The rainbow is reset because a session-stored
+    -- "on" from before has no switch left.
     local RUITHEME = (getgenv and getgenv().RequiemUI) or {}
     pcall(function() getgenv().RequiemUI = RUITHEME end)
-    RUITHEME.baseAccent, RUITHEME.baseAccentB = RED_A, RED_B
-    RUITHEME.accent, RUITHEME.accentB = RED_A, RED_B
     RUITHEME.opacity, RUITHEME.rainbow = 1, false
     GUI._theme = RUITHEME   -- shared with the Requiem UI engine (robust cross-IIFE bridge)
+    GUI.SetAccent = function(c)
+        local b = Color3.fromRGB(math.floor(c.R * 204 + 0.5), math.floor(c.G * 204 + 0.5), math.floor(c.B * 204 + 0.5))
+        RUITHEME.baseAccent, RUITHEME.baseAccentB, RUITHEME.accent, RUITHEME.accentB = c, b, c, b
+        pcall(function() Lib:SetTheme({ accentA = c, accentB = b }) end)
+    end
+    do
+        local sa = GUI.AccentRGB
+        GUI.SetAccent(type(sa) == "table" and tonumber(sa[1]) and Color3.fromRGB(sa[1], sa[2], sa[3]) or RED_A)
+    end
 
     -- Requiem logo. SetLogo has two footguns: (1) it only decodes PNG/JPEG, not WebP; (2) its
     -- URL path caches by URL *length*, so Requiem's PNG URL (len 88) collides with Verfall's
@@ -12444,9 +12456,9 @@ end)()
         local setTab = window:AddSettingsTab("cog")
 
         -- One Appearance: the library's own (Background, Text color, Border, Corner radius, ...).
-        -- Its Theme section is dropped and the accent stays the fixed Requiem red. "Apply to Panels"
-        -- makes the Player List / Enchants / RS Diff panels follow it (the panel engine reads
-        -- GUI.MenuLook a few times a second).
+        -- Its Theme section is dropped; Requiem adds "Apply to Panels" (the Player List / Enchants /
+        -- RS Diff panels follow it; the panel engine reads GUI.MenuLook a few times a second) and
+        -- "Accent" (menu + panels, saved in the config) to the top of it.
         local look = nil
         pcall(function()
             local secs = setTab._tab.sections
@@ -12469,10 +12481,24 @@ end)()
         local secPan = setTab:Section("Panels", "Left")
         local follow = secPan:Toggle("Apply to Panels", GUI.PanelsFollowMenu ~= false, function(v) GUI.PanelsFollowMenu = v == true end)
         pcall(function() follow:Tooltip("the Player List, Enchants and RS Diff panels use this Appearance's background, text colour, border and corner radius. Off = their own dark look") end)
-        -- The switch belongs inside Appearance: move it to the top there and drop the helper section.
+        local accPick = nil
+        pcall(function()
+            accPick = secPan:Colorpicker("Accent", RUITHEME.accent or Color3.fromRGB(220, 75, 75), function(c)
+                GUI.SetAccent(c)
+                GUI.AccentRGB = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+                -- the picker fires while you drag it: save once it has been still for a second
+                GUI._accSaveAt = os.clock()
+                task.delay(1, function()
+                    if os.clock() - (GUI._accSaveAt or 0) >= 0.95 then pcall(saveConfig) end
+                end)
+            end)
+            accPick:Tooltip("the menu's and the panels' accent colour. Saved with your config")
+        end)
+        -- Both belong inside Appearance: move them to its top and drop the helper section.
         pcall(function()
             if look and follow.item then
                 table.insert(look.items, 1, follow.item)
+                if accPick and accPick.item then table.insert(look.items, 2, accPick.item) end
                 local secs = setTab._tab.sections
                 for i = #secs, 1, -1 do if secs[i] == secPan._section then table.remove(secs, i) end end
             end
