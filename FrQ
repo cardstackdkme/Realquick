@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.12"
+GUI.Version = "v8.13"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -89,7 +89,7 @@ GUI.PLHealthOffsetX = 2
 GUI.PLHealthOffsetY = 8
 GUI.PLSubTabOffsetX = 0
 GUI.PLSubTabOffsetY = 7
-GUI.PLAutoUpdate = false
+GUI.PLAutoUpdate = true   -- the Player List's Auto Update button: off freezes the roster
 GUI.PLSortMode = "None"     -- "None", "Rank", "Health"
 GUI.PLSearchText = ""
 GUI.PLScrollOffset = 0
@@ -3485,16 +3485,6 @@ local function InputLoop()
                 GUI.PLWasKeys[0x0D] = enterDown
             end
 
-            -- Auto-refresh (every ~2s, only if enabled)
-            if GUI.PLAutoUpdate and not GUI.PlayerListDragging then
-                GUI._plRefreshTimer = (GUI._plRefreshTimer or 0) + 1
-                if GUI._plRefreshTimer >= 120 then
-                    GUI._plRefreshTimer = 0
-                    GUI.PLCachedPlayers = ReadPlayerData()
-                    BuildPlayerList()
-                end
-            end
-
             GUI._plWasMouseDown = mouseDown
         end
 
@@ -4034,7 +4024,8 @@ do
     -- Per-bar look. Width/height live in GUI.<Bar>W/H (the drag code uses them); the rest here.
     GUI.BarStyle = GUI.BarStyle or {
         hp  = { text = 12, pct = true, nums = true, track = 100, border = true, fill = "Health Colors" },
-        gas = { text = 12, pct = true, nums = true, track = 100, border = true },
+        gas = { text = 12, pct = true, nums = true, track = 100, border = true,
+                flash = true, flashAfter = 3, flashColor = { 255, 30, 30 } },
     }
     -- Gradient stops {r,g,b}, empty end FIRST. Presets: the built-ins plus any you save (config).
     GUI.Grad = GUI.Grad or {
@@ -4378,14 +4369,37 @@ do
         GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements, "gas")
         UpdateGasBar()
     end
+    -- Emergency gas: under 15% for BarStyle.gas.flashAfter seconds straight, the bar flashes the
+    -- Style colour twice a second until gas is back above 15%. Only writes on a flash edge.
+    GUI.FlashGas = function(h, frac)
+        local st, now = GUI.BarStyle.gas, os.clock()
+        if st.flash ~= false and frac and frac < 0.15 then h.lowSince = h.lowSince or now else h.lowSince = nil end
+        local on = h.lowSince ~= nil and now - h.lowSince >= (st.flashAfter or 3) and math.floor(now * 4) % 2 == 0
+        if on == (h.flashOn == true) then return end
+        h.flashOn = on
+        local c = st.flashColor or { 255, 30, 30 }
+        local col = C3(c[1], c[2], c[3])
+        if h.slices then
+            if on then
+                for _, s in ipairs(h.slices) do pcall(function() s.o.Color = col end) end
+            else
+                recolor(h)
+            end
+        elseif h.fill and on then
+            pcall(function() h.fill.Color = col end)   -- off: update() repaints it
+        end
+        pcall(function() h.border.Color = on and col or C3(60, 60, 66) end)
+    end
     UpdateGasBar = function()
         local h = GUI.GasBarHandle
         if not (GUI.GasBarVisible and h) then return end
         local g, m = readODM()
         if g then
             update(h, "GAS", g, m, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH)
+            GUI.FlashGas(h, (m and m > 0) and g / m or nil)
         else
             update(h, "GAS", 0, 1, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, m)
+            GUI.FlashGas(h, nil)
         end
     end
 end
@@ -6767,11 +6781,12 @@ saveConfig = function()
             landmine     = LANDMINE.Enabled,
             titan        = TITAN.Enabled,
             animal       = ANIMAL.Enabled,
-            plAutoUpdate = GUI.PLAutoUpdate,
+            plLive       = GUI.PLAutoUpdate ~= false,
             healthBar    = GUI.HealthBarVisible,
             gasBar       = GUI.GasBarVisible,
             counter      = GUI.CounterVisible,
             snapDrag     = GUI.SnapOn ~= false,
+            panelsFollow = GUI.PanelsFollowMenu ~= false,
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
             actorEsp     = ACTOR_ESP.Enabled,
@@ -6860,11 +6875,14 @@ loadConfig = function()
         end
         if type(f.titan)        == "boolean" then TITAN.Enabled            = f.titan        end
         if type(f.animal)       == "boolean" then ANIMAL.Enabled           = f.animal       end
-        if type(f.plAutoUpdate) == "boolean" then GUI.PLAutoUpdate         = f.plAutoUpdate end
+        -- plLive, not the old plAutoUpdate: that one was saved "off" while it did nothing, and
+        -- reading it would now start every existing setup with a frozen list.
+        if type(f.plLive)       == "boolean" then GUI.PLAutoUpdate         = f.plLive       end
         if type(f.healthBar)    == "boolean" then GUI.HealthBarVisible     = f.healthBar    end
         if type(f.gasBar)       == "boolean" then GUI.GasBarVisible        = f.gasBar       end
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.snapDrag)     == "boolean" then GUI.SnapOn               = f.snapDrag     end
+        if type(f.panelsFollow) == "boolean" then GUI.PanelsFollowMenu     = f.panelsFollow end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
         if type(f.actorLabels)  == "number"  then ACTOR_ESP.MaxLabels      = math.floor(f.actorLabels) end
@@ -6982,7 +7000,7 @@ resetConfigToDefaults = function()
     TITAN.Enabled            = false
     ANIMAL.Enabled           = false
     ACTOR_ESP.Enabled        = false
-    GUI.PLAutoUpdate         = false
+    GUI.PLAutoUpdate         = true
     GUI.HealthBarVisible     = false
     GUI.CounterVisible       = false
     GUI.DmgIndicatorEnabled  = false
@@ -7246,6 +7264,27 @@ local function av(key, target, k) anim[key] = smooth(anim[key], target, k); retu
 local function mixc(a, b, t)
     return C3(floor((a.R*255+(b.R*255-a.R*255)*t)+0.5), floor((a.G*255+(b.G*255-a.G*255)*t)+0.5), floor((a.B*255+(b.B*255-a.B*255)*t)+0.5))
 end
+-- Settings > Appearance > "Apply to Panels": background / text tones, border and corner radius
+-- follow the menu (GUI.MenuLook, published by the Settings tab); off restores the stock look.
+R.T0 = {}
+for k, v in pairs(T) do R.T0[k] = v end
+R.lookAt, R.borderMul, R.round = -1, 1, 1
+function R.syncLook(now)
+    if now - R.lookAt < 0.25 then return end
+    R.lookAt = now
+    local look = GUI.PanelsFollowMenu ~= false and GUI.MenuLook and GUI.MenuLook()
+    if not (look and look.bg and look.text and tonumber(look.bg.R) and tonumber(look.text.R)) then
+        for k, v in pairs(R.T0) do T[k] = v end
+        R.borderMul, R.round = 1, 1
+        return
+    end
+    local bg, tx, wh, bk = look.bg, look.text, C3(255, 255, 255), C3(0, 0, 0)
+    T.bg, T.bg2, T.head = bg, mixc(bg, bk, 0.2), mixc(bg, wh, 0.016)
+    T.panel, T.field, T.soft = mixc(bg, wh, 0.045), mixc(bg, wh, 0.088), mixc(bg, wh, 0.15)
+    T.text, T.muted, T.dim = tx, mixc(tx, bg, 0.5), mixc(tx, bg, 0.69)
+    R.borderMul = look.border and maxf(0, look.border / 6) or 1
+    R.round = look.radius or 1
+end
 local function tw(s, size) return #tostring(s or "")*(size or 13)*0.5 end
 local function trim(s, n) s=tostring(s or ""); if #s<=n then return s end return s:sub(1,maxf(1,n-2)).."." end
 
@@ -7271,7 +7310,7 @@ local function rect(x,y,w,h,color,z,alpha,corner,filled,thick)
     end
     local o=claim("Square"); if not o then return end
     o.Position=Vector2.new(x,ay); o.Size=Vector2.new(maxf(0,w),maxf(0,h)); o.Color=color or T.panel
-    o.Filled=filled~=false; o.Corner=corner or 0; if thick then o.Thickness=thick end
+    o.Filled=filled~=false; o.Corner=(corner or 0)*R.round; if thick then o.Thickness=thick end
     o.Transparency=(alpha or 1)*R.fade*R.opacity; o.ZIndex=z or 60; return o
 end
 local function txt(s,x,y,size,color,z,center,font)
@@ -7308,7 +7347,7 @@ local function window(key,x,y,w,h,title,subtitle,onClose,noResize)
     local z=60
     shadow(x,y,w,h,z-4)
     rect(x,y,w,h,T.bg,z,0.95,8)
-    rect(x,y,w,h,C3(255,255,255),z+1,0.12,8,false,1)
+    rect(x,y,w,h,C3(255,255,255),z+1,0.12*R.borderMul,8,false,1)
     rect(x,y,w,34,T.head,z+1,0.93,8)
     rect(x,y+26,w,8,T.head,z+1,0.93,0)
     ln(x+12,y+34,x+w-12,y+34,T.red,z+2,1,0.5)
@@ -7528,7 +7567,7 @@ local function drawPlayers()
     if not GUI.PlayerListOpen then anim.plopen=0; PLI.box=nil; return end
     local op=av("plopen",1,14); R.fade=op; R.yoff=(1-op)*12
     plTimer=plTimer+R.dt
-    if plTimer>1.5 then plTimer=0; pcall(function() GUI.PLCachedPlayers=ReadPlayerData() end) end
+    if plTimer>1.5 then plTimer=0; if GUI.PLAutoUpdate~=false then pcall(function() GUI.PLCachedPlayers=ReadPlayerData() end) end end
     local x,y,w,h=GUI.PlayerListX,GUI.PlayerListY,GUI.PlayerListW,GUI.PlayerListH
     local src=GUI.PLCachedPlayers or {}
     local tab,search=GUI.PlayerListTab or "Players",string.lower(GUI.PLSearchText or "")
@@ -7588,8 +7627,14 @@ local function drawPlayers()
         if hint then txt(hint,x+14+sw-10-hintW,searchY+7,11,T.muted,64) end
         PLI.box={x=x+14,y=searchY+R.yoff,w=sw,h=sh}
     end
-    local sortY=searchY+32; local sbw=floor((listW-16)/3)
+    -- sort buttons, then Auto Update: lit = the roster refreshes every 1.5s, off = it holds still
+    local autoW=92; local sortY=searchY+32; local sbw=floor((listW-24-autoW)/3)
     for i,s in ipairs({"None","Rank","Health"}) do button("plsort"..s,x+14+(i-1)*(sbw+8),sortY,sbw,26,s,function() GUI.PLSortMode=s; GUI.PLScrollOffset=0 end, GUI.PLSortMode==s, T.red) end
+    button("plauto",x+14+listW-autoW,sortY,autoW,26,"Auto Update",function()
+        GUI.PLAutoUpdate = GUI.PLAutoUpdate==false
+        if GUI.PLAutoUpdate then plTimer=2 end   -- catch up at once
+        pcall(saveConfig)
+    end, GUI.PLAutoUpdate~=false, T.green)
     local listY=sortY+36; local listH=(y+h-14)-listY; local rowH=42
     local maxS=maxf(0,#list*rowH-listH)
     local off=scrollbar("pl","PLScrollOffset",x+14+listW-6,listY,listH,maxS,listH,#list*rowH)
@@ -7971,6 +8016,7 @@ task.spawn(function()
         R.justP = down and not R.down
 
         -- carry the menu's live accent + transparency each frame (set by the theme driver via the shared GUI table)
+        pcall(R.syncLook, os.clock())
         local th=GUI._theme
         if th then if th.accent then T.red=th.accent end; R.opacity=tonumber(th.opacity) or 1 end
 
@@ -10347,36 +10393,16 @@ end)()
     local RED_B = Color3.fromRGB(175, 55, 55)
     pcall(function() Lib:SetTheme({ accentA = RED_A, accentB = RED_B, bg = Color3.fromRGB(16, 16, 20), sidebar = Color3.fromRGB(16, 16, 20) }) end)
 
-    -- Shared theme: Requiem owns the accent (incl. rainbow) + window opacity and
-    -- pushes them to the lib, while the custom panels (Requiem UI engine) read the
-    -- same getgenv().RequiemUI table — so menu and panels always match. Use the
-    -- Theme tab below to control these (the lib's own rainbow/opacity is overridden).
+    -- Shared theme: the custom panels (Requiem UI engine) read the accent from the same
+    -- getgenv().RequiemUI table, so menu and panels match. The accent is the fixed Requiem red;
+    -- nothing overrides the lib's own opacity any more (Settings > Interface > Menu opacity).
+    -- The rainbow is reset because a session-stored "on" from before has no switch left.
     local RUITHEME = (getgenv and getgenv().RequiemUI) or {}
     pcall(function() getgenv().RequiemUI = RUITHEME end)
-    RUITHEME.baseAccent  = RUITHEME.baseAccent  or RED_A
-    RUITHEME.baseAccentB = RUITHEME.baseAccentB or RED_B
-    RUITHEME.accent      = RUITHEME.accent      or RED_A
-    RUITHEME.accentB     = RUITHEME.accentB     or RED_B
-    RUITHEME.opacity     = RUITHEME.opacity     or 1
-    if RUITHEME.rainbow == nil then RUITHEME.rainbow = false end
-    RUITHEME.rainbowSpeed = RUITHEME.rainbowSpeed or 0.35
+    RUITHEME.baseAccent, RUITHEME.baseAccentB = RED_A, RED_B
+    RUITHEME.accent, RUITHEME.accentB = RED_A, RED_B
+    RUITHEME.opacity, RUITHEME.rainbow = 1, false
     GUI._theme = RUITHEME   -- shared with the Requiem UI engine (robust cross-IIFE bridge)
-    task.spawn(function()
-        while GUI.Running do
-            local acc, accB
-            if RUITHEME.rainbow then
-                local hue = (tick() * RUITHEME.rainbowSpeed) % 1
-                acc  = Color3.fromHSV(hue, 0.72, 1)
-                accB = Color3.fromHSV((hue + 0.08) % 1, 0.72, 0.86)
-            else
-                acc, accB = RUITHEME.baseAccent, RUITHEME.baseAccentB
-            end
-            RUITHEME.accent, RUITHEME.accentB = acc, accB
-            pcall(function() Lib:SetTheme({ accentA = acc, accentB = accB }) end)
-            pcall(function() Lib:SetOpacity(RUITHEME.opacity) end)
-            task.wait(RUITHEME.rainbow and 0.03 or 0.25)
-        end
-    end)
 
     -- Requiem logo. SetLogo has two footguns: (1) it only decodes PNG/JPEG, not WebP; (2) its
     -- URL path caches by URL *length*, so Requiem's PNG URL (len 88) collides with Verfall's
@@ -10447,6 +10473,7 @@ end)()
     -- ===== Tab: ESP (Elements) =====
     tabBuild(function()
         local tab = window:Tab("ESP", "home")
+        GUI._espTab = tab   -- Direct ESP adds its sections here
 
         local secOre = tab:Section("Ore ESP", "Left", "Mineral nodes")
         for i, ore in ipairs(ORE_LIST) do
@@ -10496,14 +10523,15 @@ end)()
         end):Tooltip("most actor/staff labels drawn at once - the nearest win. 0 hides all labels (detection keeps running). Click the number to type one")
     end)
 
-    -- ===== Tab: Direct ESP (named players) =====
+    -- ===== ESP tab, continued: Direct ESP (named players) =====
     tabBuild(function()
         local D = GUI.DirectESP
         if not D then return end
-        local tab = window:Tab("Direct ESP", "eye")
+        local tab = GUI._espTab
+        if not tab then return end
         local side = "Left"
         if D.Locked then
-            local secKey = tab:Section("Locked", "Left", "Enter the key once")
+            local secKey = tab:Section("Direct ESP Key", "Left", "Enter the key once")
             local typed = ""
             pcall(function()
                 secKey:Textbox("Key", "", function(v)
@@ -10535,7 +10563,7 @@ end)()
                 end)
             end
         end
-        local secOpt = tab:Section("Options", side, "Search and look")
+        local secOpt = tab:Section("Direct ESP", side, "Search and look")
         secOpt:Toggle("Bypass Leaderboard", D.Bypass, function(v) D.Bypass = v == true end)
             :Tooltip("when staff hide the leaderboard the game removes players from your client. With this on, a player who is missing is found by their character in the world instead")
         secOpt:Toggle("Show Dead", D.ShowDead, function(v) D.ShowDead = v == true end)
@@ -10609,7 +10637,23 @@ end)()
                 GUI.SetBarStyle("hp", "fill", ddVal(v) == "Gradient" and "Gradient" or "Health Colors")
             end):Tooltip("Health Colors: red to 33%, orange to 66%, green above. Gradient: the Health Gradient below")
         end
-        barSection("Gas Bar", "gas", "Right")
+        local secGB = barSection("Gas Bar", "gas", "Right")
+        if secGB then
+            local gs = GUI.BarStyle.gas
+            secGB:Toggle("Low Gas Flash", gs.flash ~= false, function(v) gs.flash = v == true end)
+                :Tooltip("the bar flashes when your gas stays under 15% for the time below")
+            secGB:Slider("Flash After", gs.flashAfter or 3, 1, 0, 30, "s", function(v)
+                local n = tonumber(v)
+                if n then gs.flashAfter = n end
+            end):Tooltip("seconds gas has to stay under 15% before the bar starts flashing. 0 = straight away")
+            local fc = gs.flashColor or { 255, 30, 30 }
+            pcall(function()
+                secGB:Colorpicker("Flash Colour", Color3.fromRGB(fc[1], fc[2], fc[3]), function(c)
+                    gs.flashColor = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+                    if GUI.GasBarHandle then GUI.GasBarHandle.flashOn = nil end   -- next flash uses it
+                end)
+            end)
+        end
 
         -- ---------- bar gradients ----------
         -- Requiem's copy of the UI lib (Realquick/uilib.lua) has a sortable colour list: drag the
@@ -10921,32 +10965,6 @@ end)()
             GUI.PlayerListOpen = v
             if v then GUI.PLScrollOffset = 0; BuildPlayerList() else ClearPlayerList() end
         end)
-        secPL:Toggle("Auto Update", GUI.PLAutoUpdate, function(v) GUI.PLAutoUpdate = v end)
-
-        local secPanels = tab:Section("Panels", "Right", "Floating windows")
-        secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
-            GUI.CounterVisible = v; BuildCounterPanel()
-        end)
-        secPanels:Toggle("Enchants", GUI.EnchantsOpen, function(v)
-            GUI.EnchantsOpen = v
-            if v then
-                if not GUI.EnchantsAllData then
-                    GUI.EnchantsFetchStatus = "Fetching..."
-                    BuildEnchantsPanel()
-                    task.spawn(function() FetchEnchantData(); FetchOwnedEnchants(); BuildEnchantsPanel() end)
-                else
-                    task.spawn(function() FetchOwnedEnchants(); BuildEnchantsPanel() end)
-                end
-            else
-                GUI.EnchantsModal = nil
-                ClearEnchantsPanel()
-                if GUI._enchHoverEl then GUI._enchHoverEl.Visible = false end
-            end
-        end)
-        secPanels:Toggle("RS Diff", GUI.RSDiffOpen, function(v)
-            GUI.RSDiffOpen = v
-            if v then BuildRSDiffPanel() else ClearRSDiffPanel() end
-        end)
 
         local secInd = tab:Section("Indicators", "Right", "On-screen overlays")
         secInd:Toggle("Health Bar", GUI.HealthBarVisible, function(v)
@@ -10956,405 +10974,6 @@ end)()
             GUI.GasBarVisible = v; BuildGasBar()
         end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. Drag to move; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
-
-        -- ---------- Skillcheck auto-play (QTE minigame) ----------
-        -- Legit auto-tapper: reads the spinner + target-zone angle straight from memory
-        -- (GuiObject.Rotation is a float at struct offset +376; not exposed by the property
-        -- bridge) and taps SPACE (a real OS key the game's InputBegan sees, NOT a remote) the
-        -- instant the spinner is predicted inside the +/-20 deg zone. Velocity is measured from
-        -- ACTUAL rotation changes (immune to loop/render aliasing) and it only taps once the
-        -- spinner has genuinely moved (kills idle-spam that instant-fails a fresh check).
-        -- Cost: idle-polls at 10Hz doing nothing; per-frame work (2 native memory reads) only
-        -- while a check is on screen, so it never lags the menu.
-        local secAuto = tab:Section("Skillcheck", "Left", "Auto-tap the QTE (SPACE)")
-        local scGen = 0
-        -- Live state, published so a failure is DIAGNOSABLE. This feature has now broken twice
-        -- (once from a moved memory offset) and both times it failed completely silently: no
-        -- error, no log, just a spinner that never gets tapped. _G.RQSC keeps the loop's actual
-        -- view readable, so "it doesn't work" is one look instead of a guessing round-trip. (The
-        -- status lines that used to print it in this section were removed on request: the
-        -- section is the toggles and the slider, nothing else.)
-        local SC = { off = nil, s = 0, t = 0, diff = 0, moving = false, presses = 0, seen = 0, state = "off" }
-        pcall(function() rawset(_G, "RQSC", SC) end)
-        secAuto:Toggle("Auto Skillcheck", false, function(on)
-            scGen = scGen + 1
-            if not on then SC.state = "off"; return end
-            SC.state = "starting"
-            local myGen = scGen
-            task.spawn(function()
-                -- ROT_OFFSET is no longer chosen by fingerprint alone -- see discoverRotCands.
-                local ROT_OFFSET, ROT_CANDS               = nil, {}
-                local candMoves, candPrev                 = {}, {}
-                -- The game's own hit test (decompiled from Client.Interfaces.Routes.Screen.Skillcheck)
-                -- is `zone-20 <= spinner <= zone+20`, i.e. a FORTY degree window. Pressing only
-                -- inside +/-9 used the middle 45% of it for no reason and threw away margin on a
-                -- spinner that runs 90-500 deg/s (up to ~1000 as your combo builds). 15 keeps 5
-                -- degrees of safety against a mistimed tap, which is an instant fail.
-                local PRESS_WINDOW, DIFF_GATE             = 15, 30
-                -- 5ms, the value confirmed working live on the standalone build. The port had
-                -- 0.5ms, a tenth of the lead, which under-leads a 900 deg/s spinner by ~4 degrees
-                -- against a 9 degree window.
-                local LATENCY, MAXVEL, GLITCH_JUMP        = 5/1000, 900, 90
-                local STATIC_TIMEOUT, COOLDOWN, HOLD      = 1/5, 3/20, 3/100
-                local RESOLVE_TTL, IDLE_WAIT              = 1/2, 1/10
-                local VK_SPACE = 0x20
-                local plrs  = game:GetService("Players")
-                local mread = memory_read
-                local clk   = os.clock
-                local abs   = math.abs
-
-                local function nav(root, ...)
-                    for _, nm in ipairs({ ... }) do
-                        if not root then return nil end
-                        root = root:FindFirstChild(nm)
-                    end
-                    return root
-                end
-                local function addrOf(inst)
-                    if not inst then return nil end
-                    local ok, a = pcall(function() return inst.Address end)
-                    if ok and a then return tonumber(a) end
-                    return nil
-                end
-                -- GuiObject.Rotation is not in Matcha's property bridge, so it has to be read
-                -- straight out of the instance. Its struct offset is NOT stable across Roblox
-                -- updates — it moved 376 -> 296 and silently killed this feature, because a bad
-                -- offset just returns some unrelated float and the spinner never appears to move.
-                --
-                -- So don't hardcode it: find it. Rotation is stored with its sine and cosine
-                -- cached in the next two floats, and that triple is a very strong fingerprint —
-                -- sin^2+cos^2 == 1 AND deg(atan2(sin,cos)) == the degrees field. Requiring it to
-                -- hold on SEVERAL different GuiObjects at once makes a coincidental match
-                -- essentially impossible (measured live: it held on 2527 objects at +296 and on
-                -- 2 at every other offset in a 280..520 sweep).
-                local function rotTripleAt(addr, off)
-                    local okD, d = pcall(mread, "float", addr + off)
-                    local okS, s = pcall(mread, "float", addr + off + 4)
-                    local okC, c = pcall(mread, "float", addr + off + 8)
-                    if not (okD and okS and okC) then return nil end
-                    if type(d) ~= "number" or d ~= d then return nil end
-                    if type(s) ~= "number" or s ~= s then return nil end
-                    if type(c) ~= "number" or c ~= c then return nil end
-                    if abs(s * s + c * c - 1) > 0.002 then return nil end
-                    if abs(((math.deg(math.atan2(s, c)) - d + 540) % 360) - 180) > 0.05 then return nil end
-                    return d
-                end
-                -- Propose every offset where the triple holds on EVERY probe. Two things changed
-                -- after this broke a third time:
-                --
-                --   1. The sweep was 240..560. The offset is now +216, so the real field was
-                --      OUTSIDE the search window and could never be found. Widened to 120..800.
-                --   2. It used to return a single winner. It cannot: at rest a GuiObject reads
-                --      (0, 0, 1), and that passes the fingerprint TRIVIALLY (0*0+1*1 == 1,
-                --      atan2(0,1) == 0). Discovery runs the moment the check appears, while
-                --      everything is still at rotation 0, so every candidate looks equally valid
-                --      and a dead one wins the coin flip -- which is precisely how it locked +280
-                --      and then read a constant forever.
-                --
-                -- Measured live: exactly TWO offsets pass here, 216 (real) and 280 (zeros), so
-                -- the per-frame cost of carrying the whole candidate list is nothing.
-                local function discoverRotCands(addrs)
-                    local out = {}
-                    for off = 120, 800, 4 do
-                        local all = true
-                        for i = 1, #addrs do
-                            if not rotTripleAt(addrs[i], off) then all = false break end
-                        end
-                        if all then out[#out + 1] = off end
-                    end
-                    return out
-                end
-                -- The tiebreak the fingerprint cannot make: whichever candidate actually CHANGES
-                -- while the spinner is spinning is the real Rotation. A dead offset holds still,
-                -- so it can never win, and a Roblox update that moves the field again just makes
-                -- a different candidate start winning on its own.
-                local function trackCands(addr)
-                    for i = 1, #ROT_CANDS do
-                        local off = ROT_CANDS[i]
-                        local ok, v = pcall(mread, "float", addr + off)
-                        if ok and type(v) == "number" and v == v then
-                            local prev = candPrev[off]
-                            if prev ~= nil and abs(v - prev) > 0.01 then
-                                candMoves[off] = (candMoves[off] or 0) + 1
-                            end
-                            candPrev[off] = v
-                        end
-                    end
-                    -- needs a few real changes, so one glitched read cannot win the lock
-                    local best, bestN = nil, 2
-                    for i = 1, #ROT_CANDS do
-                        local off = ROT_CANDS[i]
-                        local cnt = candMoves[off] or 0
-                        if cnt > bestN then best, bestN = off, cnt end
-                    end
-                    if best and best ~= ROT_OFFSET then
-                        ROT_OFFSET = best
-                        SC.off = best
-                    end
-                end
-                local function readRot(addr)
-                    if not (addr and ROT_OFFSET) then return nil end
-                    local ok, v = pcall(mread, "float", addr + ROT_OFFSET)
-                    if ok and type(v) == "number" and v == v then return v % 360 end
-                    return nil
-                end
-                local function angdiff(a, b) return ((a - b + 540) % 360) - 180 end
-                local function rbxActive()
-                    local ok, r = pcall(isrbxactive)
-                    if ok then return r end
-                    return true
-                end
-
-                local pg, cache, burst
-                local lastS, lastChangeT, velEst, lastPress = nil, nil, 0, nil
-                local hzN, hzT = 0, clk()
-
-                while scGen == myGen and GUI.Running do
-                    if not pg then
-                        local lp = plrs.LocalPlayer
-                        pg = lp and lp:FindFirstChild("PlayerGui")
-                    end
-                    local sc = pg and pg:FindFirstChild("Skillcheck")
-
-                    if not sc then
-                        cache, lastS, lastChangeT, velEst = nil, nil, nil, 0
-                        SC.state = "no Skillcheck GUI"
-                        task.wait(IDLE_WAIT)
-                    else
-                        local now = clk()
-                        if (not cache) or (now - cache.t) > RESOLVE_TTL then
-                            local content = nav(sc, "Skillcheck", "Group", "Frame", "Frame", "Content")
-                            local spin = content and content:FindFirstChild("Spinner")
-                            local val  = content and content:FindFirstChild("Validation")
-                            local sa, va = addrOf(spin), addrOf(val)
-                            if sa and va then
-                                cache = { spin = sa, val = va, t = now }
-                                -- Locate Rotation once per check, off these two plus a third
-                                -- unrelated GuiObject so the triple has to agree three ways.
-                                if #ROT_CANDS == 0 then
-                                    local probes = { sa, va }
-                                    local extra = content:FindFirstChild("Circle") or sc
-                                    local ea = addrOf(extra)
-                                    if ea then probes[#probes + 1] = ea end
-                                    ROT_CANDS = discoverRotCands(probes)
-                                    SC.cands = #ROT_CANDS
-                                end
-                                -- The Spinner is rebuilt per check, so these addresses are new.
-                                -- Carrying the old values over would read as a movement and hand
-                                -- the lock to whatever offset happened to differ.
-                                candPrev = {}
-                            else
-                                cache = nil
-                                SC.state = "Spinner/Validation not found"
-                            end
-                        end
-                        if cache and #ROT_CANDS == 0 then SC.state = "no rotation candidates" end
-
-                        if cache then
-                            -- Learn first: until a candidate has visibly moved there is no
-                            -- ROT_OFFSET, readRot returns nil, and we simply wait.
-                            trackCands(cache.spin)
-                            if not ROT_OFFSET then SC.state = "learning offset (spin the check)" end
-                            local s = readRot(cache.spin)
-                            local t = readRot(cache.val)
-                            if s and t then
-                                if lastS == nil then
-                                    lastS = s
-                                else
-                                    local d = angdiff(s, lastS)
-                                    if abs(d) > GLITCH_JUMP then
-                                        lastS = s
-                                    elseif d ~= 0 then
-                                        if lastChangeT then
-                                            local ddt = now - lastChangeT
-                                            if ddt > 0 then
-                                                local vv = d / ddt
-                                                if vv > MAXVEL then vv = MAXVEL elseif vv < -MAXVEL then vv = -MAXVEL end
-                                                velEst = vv
-                                            end
-                                        end
-                                        lastChangeT = now
-                                        -- Published for "Press E after minigame": a moving spinner
-                                        -- IS an on-screen minigame (see that toggle).
-                                        SC.lastMoveT = now
-                                        lastS = s
-                                    end
-                                end
-
-                                local moving = (lastChangeT ~= nil) and ((now - lastChangeT) < STATIC_TIMEOUT)
-                                local diff   = angdiff(s, t)
-                                local pred   = ((diff + velEst * LATENCY + 540) % 360) - 180
-
-                                SC.s, SC.t, SC.diff, SC.moving = s, t, diff, moving
-                                local act = moving and rbxActive() or false
-                                if moving then SC.seen = SC.seen + 1 end
-                                -- one reason string, in the order the gate actually evaluates
-                                if not moving then SC.state = "waiting for spinner"
-                                elseif abs(diff) > DIFF_GATE then SC.state = "out of range"
-                                elseif abs(pred) > PRESS_WINDOW then SC.state = "closing in"
-                                elseif not act then SC.state = "Roblox not focused"
-                                else SC.state = "TAP" end
-
-                                -- A skillcheck is OVER in a second or two -- the game posts a fail
-                                -- the instant the spinner leaves the zone unpressed -- so the live
-                                -- numbers are back to zero long before anyone can read them.
-                                -- Summarise each burst of motion so ONE attempt explains itself.
-                                if moving then
-                                    if not burst then burst = { t0 = now, n = 0, md = 999, mv = 0, act = 0, taps = 0 } end
-                                    burst.n = burst.n + 1
-                                    if abs(diff) < burst.md then burst.md = abs(diff) end
-                                    if abs(velEst) > burst.mv then burst.mv = abs(velEst) end
-                                    if act then burst.act = burst.act + 1 end
-                                elseif burst then
-                                    SC.last = string.format("%.1fs  %d samples  closest %.0f deg  %.0f deg/s  focused %d/%d  taps %d",
-                                        now - burst.t0, burst.n, burst.md, burst.mv, burst.act, burst.n, burst.taps)
-                                    burst = nil
-                                end
-
-                                if moving and abs(diff) <= DIFF_GATE and abs(pred) <= PRESS_WINDOW
-                                    and act
-                                    and ((not lastPress) or (now - lastPress) > COOLDOWN) then
-                                    lastPress = now
-                                    SC.presses = SC.presses + 1
-                                    if burst then burst.taps = burst.taps + 1 end
-                                    pcall(keypress, VK_SPACE)
-                                    task.wait(HOLD)
-                                    pcall(keyrelease, VK_SPACE)
-                                    lastS = nil
-                                end
-                            end
-                        end
-
-                        -- loop rate, so a starved loop is visible rather than inferred
-                        hzN = hzN + 1
-                        local hnow = clk()
-                        if hnow - hzT >= 1 then SC.hz = hzN / (hnow - hzT); hzN, hzT = 0, hnow end
-                        task.wait()
-                    end
-                end
-            end)
-        end):Tooltip("Legit auto-tap: reads the spinner + zone angle from memory and presses SPACE on time. Roblox must be the focused window. Not an instant-win.")
-
-        -- ---------- Press E after minigame: chain checks back to back ----------
-        -- You start the FIRST minigame yourself. From then on, the moment one ends, this taps E
-        -- until the next one is on screen, then goes quiet while Auto Skillcheck plays it.
-        --
-        -- "On screen" is read off the spinner, because nothing else works: PlayerGui.Skillcheck
-        -- exists permanently, and Visible / Enabled / GroupTransparency all read nil through
-        -- Matcha. The game's controller advances the spinner every RenderStepped from the first
-        -- frame of a check and never pauses it mid-combo (a hit only flips direction), so
-        -- "spinner moved in the last ACTIVE_GRACE" is exactly "a minigame is running".
-        -- That signal comes from the Auto Skillcheck loop, so this needs it switched ON.
-        local EP = { state = "off", presses = 0 }
-        local epGen = 0
-        local epInterval = 1 / 10     -- default 10 taps/s: fast, as asked, and still a real tap
-        secAuto:Toggle("Press E after minigame", false, function(on)
-            epGen = epGen + 1
-            if not on then
-                EP.state = "off"
-                pcall(keyrelease, 0x45)   -- never leave E held on the way out
-                return
-            end
-            local myGen = epGen
-            EP.state = "starting"
-            task.spawn(function()
-                -- 0.25s of stillness = over. The spinner steps every frame (~16ms) for the whole
-                -- check, so this is ~15 missed frames: far past any render hitch, and short
-                -- enough that the next E goes out almost as soon as the result lands.
-                local ACTIVE_GRACE = 1 / 4
-                local HOLD         = 3 / 100  -- same tap length Auto Skillcheck uses for SPACE
-                -- If no minigame appears for this long, stop and wait for YOU to start one again.
-                -- Without it, running out of materials or walking off would leave it tapping E
-                -- into whatever prompt is nearby indefinitely.
-                local GIVE_UP      = 20
-                local VK_E         = 0x45
-                local clk          = os.clock
-                local seenGame     = false    -- only chain AFTER a minigame you started yourself
-                -- Remembers WHY we are idle. Without it the give-up message was overwritten by
-                -- "start the first minigame yourself" on the very next pass and never shown.
-                local gaveUp       = false
-                local spamSince, lastTap = nil, 0
-
-                local function focused()
-                    local ok, r = pcall(isrbxactive)
-                    if ok then return r end
-                    return true
-                end
-
-                -- Is the menu actually on screen? isrbxactive() cannot tell us: the menu is drawn
-                -- INSIDE Roblox, so Roblox stays focused while you use it. That matters because the
-                -- fork polls every key while open -- an injected E would be taken by a keybind
-                -- capture (click Unload Script -> rebind, and E becomes your unload key, so the
-                -- NEXT tap unloads the script) or typed into a textbox.
-                -- _G.RQGeo is rebuilt as a fresh table every frame the window renders, so table
-                -- identity is the heartbeat; a MINIMISED menu leaves it frozen at open=true, which
-                -- the 0.25s staleness check catches. Same test drawBadge uses.
-                local geoRef, geoAt = nil, 0
-                local function menuBusy(now)
-                    local g = _G.RQGeo
-                    if g ~= geoRef then geoRef, geoAt = g, now end
-                    if type(g) == "table" and g.open == true and (now - geoAt) <= 0.25 then return true end
-                    -- belt and braces: the unload capture specifically
-                    local kb = GUI._kbUnload and GUI._kbUnload.item
-                    return type(kb) == "table" and kb.listening == true
-                end
-
-                while epGen == myGen and GUI.Running do
-                    local now = clk()
-                    local S = SC
-                    local liveT = S and S.lastMoveT
-                    local active = liveT ~= nil and (now - liveT) < ACTIVE_GRACE
-
-                    if S == nil or S.state == "off" then
-                        -- No liveness signal without the skillcheck loop -- do nothing rather
-                        -- than tap E blind.
-                        EP.state = "turn on Auto Skillcheck"
-                        seenGame, spamSince, gaveUp = false, nil, false
-                    elseif active then
-                        seenGame, spamSince, gaveUp = true, nil, false
-                        EP.state = "minigame running"
-                    elseif not seenGame then
-                        EP.state = gaveUp and ("no minigame for " .. GIVE_UP .. "s - start one to resume")
-                                           or "start the first minigame yourself"
-                    else
-                        spamSince = spamSince or now
-                        if now - spamSince > GIVE_UP then
-                            -- Re-arm rather than stop: the next minigame you start by hand picks
-                            -- the chain straight back up.
-                            seenGame, spamSince, gaveUp = false, nil, true
-                        elseif not focused() then
-                            -- keypress is OS-level: with Roblox in the background every E would
-                            -- be typed into whatever window has focus instead. A pause, not idle
-                            -- time: it must not run down the give-up clock.
-                            spamSince = nil
-                            EP.state = "paused - Roblox not focused"
-                        elseif GUI.PLSearchFocused then
-                            -- every tap would type an "e" into the Player List search
-                            spamSince = nil
-                            EP.state = "paused - typing in Player List"
-                        elseif menuBusy(now) then
-                            spamSince = nil
-                            EP.state = "paused - menu open"
-                        else
-                            EP.state = "pressing E"
-                            if now - lastTap >= epInterval then
-                                lastTap = now
-                                EP.presses = EP.presses + 1
-                                pcall(keypress, VK_E)
-                                task.wait(HOLD)
-                                pcall(keyrelease, VK_E)
-                            end
-                        end
-                    end
-                    task.wait()
-                end
-                pcall(keyrelease, VK_E)
-                if epGen == myGen then EP.state = "off" end
-            end)
-        end):Tooltip("Start the first minigame yourself. After each one ends this taps E until the next one shows, then waits. Needs Auto Skillcheck ON (it reads the spinner to know when a minigame is up). Pauses while this menu is open or Roblox is not focused, so E never lands in a keybind or textbox. Gives up after 20s with no minigame.")
-        secAuto:Slider("E Tap Interval", epInterval, 1 / 100, 1 / 20, 1 / 2, "s", function(v)
-            epInterval = tonumber(v) or epInterval
-        end):Tooltip("seconds between E taps while waiting for the next minigame. 0.10 = ten a second")
 
         -- ---------- Hiddens: stop the game's own readouts being drawn on your screen ----------
         -- One switch per readout, each driven by the HIDDENS engine. Its label names what the
@@ -12388,17 +12007,473 @@ end)()
         end)
     end)
 
+    -- ===== Tab: Misc =====
+    tabBuild(function()
+        local tab = window:Tab("Misc", "grid")
+
+        -- ---------- Skillcheck auto-play (QTE minigame) ----------
+        -- Legit auto-tapper: reads the spinner + target-zone angle straight from memory
+        -- (GuiObject.Rotation is a float at struct offset +376; not exposed by the property
+        -- bridge) and taps SPACE (a real OS key the game's InputBegan sees, NOT a remote) the
+        -- instant the spinner is predicted inside the +/-20 deg zone. Velocity is measured from
+        -- ACTUAL rotation changes (immune to loop/render aliasing) and it only taps once the
+        -- spinner has genuinely moved (kills idle-spam that instant-fails a fresh check).
+        -- Cost: idle-polls at 10Hz doing nothing; per-frame work (2 native memory reads) only
+        -- while a check is on screen, so it never lags the menu.
+        local secAuto = tab:Section("Skillcheck", "Left", "Auto-tap the QTE (SPACE)")
+        local scGen = 0
+        -- Live state, published so a failure is DIAGNOSABLE. This feature has now broken twice
+        -- (once from a moved memory offset) and both times it failed completely silently: no
+        -- error, no log, just a spinner that never gets tapped. _G.RQSC keeps the loop's actual
+        -- view readable, so "it doesn't work" is one look instead of a guessing round-trip. (The
+        -- status lines that used to print it in this section were removed on request: the
+        -- section is the toggles and the slider, nothing else.)
+        local SC = { off = nil, s = 0, t = 0, diff = 0, moving = false, presses = 0, seen = 0, state = "off" }
+        pcall(function() rawset(_G, "RQSC", SC) end)
+        secAuto:Toggle("Auto Skillcheck", false, function(on)
+            scGen = scGen + 1
+            if not on then SC.state = "off"; return end
+            SC.state = "starting"
+            local myGen = scGen
+            task.spawn(function()
+                -- ROT_OFFSET is no longer chosen by fingerprint alone -- see discoverRotCands.
+                local ROT_OFFSET, ROT_CANDS               = nil, {}
+                local candMoves, candPrev                 = {}, {}
+                -- The game's own hit test (decompiled from Client.Interfaces.Routes.Screen.Skillcheck)
+                -- is `zone-20 <= spinner <= zone+20`, i.e. a FORTY degree window. Pressing only
+                -- inside +/-9 used the middle 45% of it for no reason and threw away margin on a
+                -- spinner that runs 90-500 deg/s (up to ~1000 as your combo builds). 15 keeps 5
+                -- degrees of safety against a mistimed tap, which is an instant fail.
+                local PRESS_WINDOW, DIFF_GATE             = 15, 30
+                -- 5ms, the value confirmed working live on the standalone build. The port had
+                -- 0.5ms, a tenth of the lead, which under-leads a 900 deg/s spinner by ~4 degrees
+                -- against a 9 degree window.
+                local LATENCY, MAXVEL, GLITCH_JUMP        = 5/1000, 900, 90
+                local STATIC_TIMEOUT, COOLDOWN, HOLD      = 1/5, 3/20, 3/100
+                local RESOLVE_TTL, IDLE_WAIT              = 1/2, 1/10
+                local VK_SPACE = 0x20
+                local plrs  = game:GetService("Players")
+                local mread = memory_read
+                local clk   = os.clock
+                local abs   = math.abs
+
+                local function nav(root, ...)
+                    for _, nm in ipairs({ ... }) do
+                        if not root then return nil end
+                        root = root:FindFirstChild(nm)
+                    end
+                    return root
+                end
+                local function addrOf(inst)
+                    if not inst then return nil end
+                    local ok, a = pcall(function() return inst.Address end)
+                    if ok and a then return tonumber(a) end
+                    return nil
+                end
+                -- GuiObject.Rotation is not in Matcha's property bridge, so it has to be read
+                -- straight out of the instance. Its struct offset is NOT stable across Roblox
+                -- updates — it moved 376 -> 296 and silently killed this feature, because a bad
+                -- offset just returns some unrelated float and the spinner never appears to move.
+                --
+                -- So don't hardcode it: find it. Rotation is stored with its sine and cosine
+                -- cached in the next two floats, and that triple is a very strong fingerprint —
+                -- sin^2+cos^2 == 1 AND deg(atan2(sin,cos)) == the degrees field. Requiring it to
+                -- hold on SEVERAL different GuiObjects at once makes a coincidental match
+                -- essentially impossible (measured live: it held on 2527 objects at +296 and on
+                -- 2 at every other offset in a 280..520 sweep).
+                local function rotTripleAt(addr, off)
+                    local okD, d = pcall(mread, "float", addr + off)
+                    local okS, s = pcall(mread, "float", addr + off + 4)
+                    local okC, c = pcall(mread, "float", addr + off + 8)
+                    if not (okD and okS and okC) then return nil end
+                    if type(d) ~= "number" or d ~= d then return nil end
+                    if type(s) ~= "number" or s ~= s then return nil end
+                    if type(c) ~= "number" or c ~= c then return nil end
+                    if abs(s * s + c * c - 1) > 0.002 then return nil end
+                    if abs(((math.deg(math.atan2(s, c)) - d + 540) % 360) - 180) > 0.05 then return nil end
+                    return d
+                end
+                -- Propose every offset where the triple holds on EVERY probe. Two things changed
+                -- after this broke a third time:
+                --
+                --   1. The sweep was 240..560. The offset is now +216, so the real field was
+                --      OUTSIDE the search window and could never be found. Widened to 120..800.
+                --   2. It used to return a single winner. It cannot: at rest a GuiObject reads
+                --      (0, 0, 1), and that passes the fingerprint TRIVIALLY (0*0+1*1 == 1,
+                --      atan2(0,1) == 0). Discovery runs the moment the check appears, while
+                --      everything is still at rotation 0, so every candidate looks equally valid
+                --      and a dead one wins the coin flip -- which is precisely how it locked +280
+                --      and then read a constant forever.
+                --
+                -- Measured live: exactly TWO offsets pass here, 216 (real) and 280 (zeros), so
+                -- the per-frame cost of carrying the whole candidate list is nothing.
+                local function discoverRotCands(addrs)
+                    local out = {}
+                    for off = 120, 800, 4 do
+                        local all = true
+                        for i = 1, #addrs do
+                            if not rotTripleAt(addrs[i], off) then all = false break end
+                        end
+                        if all then out[#out + 1] = off end
+                    end
+                    return out
+                end
+                -- The tiebreak the fingerprint cannot make: whichever candidate actually CHANGES
+                -- while the spinner is spinning is the real Rotation. A dead offset holds still,
+                -- so it can never win, and a Roblox update that moves the field again just makes
+                -- a different candidate start winning on its own.
+                local function trackCands(addr)
+                    for i = 1, #ROT_CANDS do
+                        local off = ROT_CANDS[i]
+                        local ok, v = pcall(mread, "float", addr + off)
+                        if ok and type(v) == "number" and v == v then
+                            local prev = candPrev[off]
+                            if prev ~= nil and abs(v - prev) > 0.01 then
+                                candMoves[off] = (candMoves[off] or 0) + 1
+                            end
+                            candPrev[off] = v
+                        end
+                    end
+                    -- needs a few real changes, so one glitched read cannot win the lock
+                    local best, bestN = nil, 2
+                    for i = 1, #ROT_CANDS do
+                        local off = ROT_CANDS[i]
+                        local cnt = candMoves[off] or 0
+                        if cnt > bestN then best, bestN = off, cnt end
+                    end
+                    if best and best ~= ROT_OFFSET then
+                        ROT_OFFSET = best
+                        SC.off = best
+                    end
+                end
+                local function readRot(addr)
+                    if not (addr and ROT_OFFSET) then return nil end
+                    local ok, v = pcall(mread, "float", addr + ROT_OFFSET)
+                    if ok and type(v) == "number" and v == v then return v % 360 end
+                    return nil
+                end
+                local function angdiff(a, b) return ((a - b + 540) % 360) - 180 end
+                local function rbxActive()
+                    local ok, r = pcall(isrbxactive)
+                    if ok then return r end
+                    return true
+                end
+
+                local pg, cache, burst
+                local lastS, lastChangeT, velEst, lastPress = nil, nil, 0, nil
+                local hzN, hzT = 0, clk()
+
+                while scGen == myGen and GUI.Running do
+                    if not pg then
+                        local lp = plrs.LocalPlayer
+                        pg = lp and lp:FindFirstChild("PlayerGui")
+                    end
+                    local sc = pg and pg:FindFirstChild("Skillcheck")
+
+                    if not sc then
+                        cache, lastS, lastChangeT, velEst = nil, nil, nil, 0
+                        SC.state = "no Skillcheck GUI"
+                        task.wait(IDLE_WAIT)
+                    else
+                        local now = clk()
+                        if (not cache) or (now - cache.t) > RESOLVE_TTL then
+                            local content = nav(sc, "Skillcheck", "Group", "Frame", "Frame", "Content")
+                            local spin = content and content:FindFirstChild("Spinner")
+                            local val  = content and content:FindFirstChild("Validation")
+                            local sa, va = addrOf(spin), addrOf(val)
+                            if sa and va then
+                                cache = { spin = sa, val = va, t = now }
+                                -- Locate Rotation once per check, off these two plus a third
+                                -- unrelated GuiObject so the triple has to agree three ways.
+                                if #ROT_CANDS == 0 then
+                                    local probes = { sa, va }
+                                    local extra = content:FindFirstChild("Circle") or sc
+                                    local ea = addrOf(extra)
+                                    if ea then probes[#probes + 1] = ea end
+                                    ROT_CANDS = discoverRotCands(probes)
+                                    SC.cands = #ROT_CANDS
+                                end
+                                -- The Spinner is rebuilt per check, so these addresses are new.
+                                -- Carrying the old values over would read as a movement and hand
+                                -- the lock to whatever offset happened to differ.
+                                candPrev = {}
+                            else
+                                cache = nil
+                                SC.state = "Spinner/Validation not found"
+                            end
+                        end
+                        if cache and #ROT_CANDS == 0 then SC.state = "no rotation candidates" end
+
+                        if cache then
+                            -- Learn first: until a candidate has visibly moved there is no
+                            -- ROT_OFFSET, readRot returns nil, and we simply wait.
+                            trackCands(cache.spin)
+                            if not ROT_OFFSET then SC.state = "learning offset (spin the check)" end
+                            local s = readRot(cache.spin)
+                            local t = readRot(cache.val)
+                            if s and t then
+                                if lastS == nil then
+                                    lastS = s
+                                else
+                                    local d = angdiff(s, lastS)
+                                    if abs(d) > GLITCH_JUMP then
+                                        lastS = s
+                                    elseif d ~= 0 then
+                                        if lastChangeT then
+                                            local ddt = now - lastChangeT
+                                            if ddt > 0 then
+                                                local vv = d / ddt
+                                                if vv > MAXVEL then vv = MAXVEL elseif vv < -MAXVEL then vv = -MAXVEL end
+                                                velEst = vv
+                                            end
+                                        end
+                                        lastChangeT = now
+                                        -- Published for "Press E after minigame": a moving spinner
+                                        -- IS an on-screen minigame (see that toggle).
+                                        SC.lastMoveT = now
+                                        lastS = s
+                                    end
+                                end
+
+                                local moving = (lastChangeT ~= nil) and ((now - lastChangeT) < STATIC_TIMEOUT)
+                                local diff   = angdiff(s, t)
+                                local pred   = ((diff + velEst * LATENCY + 540) % 360) - 180
+
+                                SC.s, SC.t, SC.diff, SC.moving = s, t, diff, moving
+                                local act = moving and rbxActive() or false
+                                if moving then SC.seen = SC.seen + 1 end
+                                -- one reason string, in the order the gate actually evaluates
+                                if not moving then SC.state = "waiting for spinner"
+                                elseif abs(diff) > DIFF_GATE then SC.state = "out of range"
+                                elseif abs(pred) > PRESS_WINDOW then SC.state = "closing in"
+                                elseif not act then SC.state = "Roblox not focused"
+                                else SC.state = "TAP" end
+
+                                -- A skillcheck is OVER in a second or two -- the game posts a fail
+                                -- the instant the spinner leaves the zone unpressed -- so the live
+                                -- numbers are back to zero long before anyone can read them.
+                                -- Summarise each burst of motion so ONE attempt explains itself.
+                                if moving then
+                                    if not burst then burst = { t0 = now, n = 0, md = 999, mv = 0, act = 0, taps = 0 } end
+                                    burst.n = burst.n + 1
+                                    if abs(diff) < burst.md then burst.md = abs(diff) end
+                                    if abs(velEst) > burst.mv then burst.mv = abs(velEst) end
+                                    if act then burst.act = burst.act + 1 end
+                                elseif burst then
+                                    SC.last = string.format("%.1fs  %d samples  closest %.0f deg  %.0f deg/s  focused %d/%d  taps %d",
+                                        now - burst.t0, burst.n, burst.md, burst.mv, burst.act, burst.n, burst.taps)
+                                    burst = nil
+                                end
+
+                                if moving and abs(diff) <= DIFF_GATE and abs(pred) <= PRESS_WINDOW
+                                    and act
+                                    and ((not lastPress) or (now - lastPress) > COOLDOWN) then
+                                    lastPress = now
+                                    SC.presses = SC.presses + 1
+                                    if burst then burst.taps = burst.taps + 1 end
+                                    pcall(keypress, VK_SPACE)
+                                    task.wait(HOLD)
+                                    pcall(keyrelease, VK_SPACE)
+                                    lastS = nil
+                                end
+                            end
+                        end
+
+                        -- loop rate, so a starved loop is visible rather than inferred
+                        hzN = hzN + 1
+                        local hnow = clk()
+                        if hnow - hzT >= 1 then SC.hz = hzN / (hnow - hzT); hzN, hzT = 0, hnow end
+                        task.wait()
+                    end
+                end
+            end)
+        end):Tooltip("Legit auto-tap: reads the spinner + zone angle from memory and presses SPACE on time. Roblox must be the focused window. Not an instant-win.")
+
+        -- ---------- Press E after minigame: chain checks back to back ----------
+        -- You start the FIRST minigame yourself. From then on, the moment one ends, this taps E
+        -- until the next one is on screen, then goes quiet while Auto Skillcheck plays it.
+        --
+        -- "On screen" is read off the spinner, because nothing else works: PlayerGui.Skillcheck
+        -- exists permanently, and Visible / Enabled / GroupTransparency all read nil through
+        -- Matcha. The game's controller advances the spinner every RenderStepped from the first
+        -- frame of a check and never pauses it mid-combo (a hit only flips direction), so
+        -- "spinner moved in the last ACTIVE_GRACE" is exactly "a minigame is running".
+        -- That signal comes from the Auto Skillcheck loop, so this needs it switched ON.
+        local EP = { state = "off", presses = 0 }
+        local epGen = 0
+        local epInterval = 1 / 10     -- default 10 taps/s: fast, as asked, and still a real tap
+        secAuto:Toggle("Press E after minigame", false, function(on)
+            epGen = epGen + 1
+            if not on then
+                EP.state = "off"
+                pcall(keyrelease, 0x45)   -- never leave E held on the way out
+                return
+            end
+            local myGen = epGen
+            EP.state = "starting"
+            task.spawn(function()
+                -- 0.25s of stillness = over. The spinner steps every frame (~16ms) for the whole
+                -- check, so this is ~15 missed frames: far past any render hitch, and short
+                -- enough that the next E goes out almost as soon as the result lands.
+                local ACTIVE_GRACE = 1 / 4
+                local HOLD         = 3 / 100  -- same tap length Auto Skillcheck uses for SPACE
+                -- If no minigame appears for this long, stop and wait for YOU to start one again.
+                -- Without it, running out of materials or walking off would leave it tapping E
+                -- into whatever prompt is nearby indefinitely.
+                local GIVE_UP      = 20
+                local VK_E         = 0x45
+                local clk          = os.clock
+                local seenGame     = false    -- only chain AFTER a minigame you started yourself
+                -- Remembers WHY we are idle. Without it the give-up message was overwritten by
+                -- "start the first minigame yourself" on the very next pass and never shown.
+                local gaveUp       = false
+                local spamSince, lastTap = nil, 0
+
+                local function focused()
+                    local ok, r = pcall(isrbxactive)
+                    if ok then return r end
+                    return true
+                end
+
+                -- Is the menu actually on screen? isrbxactive() cannot tell us: the menu is drawn
+                -- INSIDE Roblox, so Roblox stays focused while you use it. That matters because the
+                -- fork polls every key while open -- an injected E would be taken by a keybind
+                -- capture (click Unload Script -> rebind, and E becomes your unload key, so the
+                -- NEXT tap unloads the script) or typed into a textbox.
+                -- _G.RQGeo is rebuilt as a fresh table every frame the window renders, so table
+                -- identity is the heartbeat; a MINIMISED menu leaves it frozen at open=true, which
+                -- the 0.25s staleness check catches. Same test drawBadge uses.
+                local geoRef, geoAt = nil, 0
+                local function menuBusy(now)
+                    local g = _G.RQGeo
+                    if g ~= geoRef then geoRef, geoAt = g, now end
+                    if type(g) == "table" and g.open == true and (now - geoAt) <= 0.25 then return true end
+                    -- belt and braces: the unload capture specifically
+                    local kb = GUI._kbUnload and GUI._kbUnload.item
+                    return type(kb) == "table" and kb.listening == true
+                end
+
+                while epGen == myGen and GUI.Running do
+                    local now = clk()
+                    local S = SC
+                    local liveT = S and S.lastMoveT
+                    local active = liveT ~= nil and (now - liveT) < ACTIVE_GRACE
+
+                    if S == nil or S.state == "off" then
+                        -- No liveness signal without the skillcheck loop -- do nothing rather
+                        -- than tap E blind.
+                        EP.state = "turn on Auto Skillcheck"
+                        seenGame, spamSince, gaveUp = false, nil, false
+                    elseif active then
+                        seenGame, spamSince, gaveUp = true, nil, false
+                        EP.state = "minigame running"
+                    elseif not seenGame then
+                        EP.state = gaveUp and ("no minigame for " .. GIVE_UP .. "s - start one to resume")
+                                           or "start the first minigame yourself"
+                    else
+                        spamSince = spamSince or now
+                        if now - spamSince > GIVE_UP then
+                            -- Re-arm rather than stop: the next minigame you start by hand picks
+                            -- the chain straight back up.
+                            seenGame, spamSince, gaveUp = false, nil, true
+                        elseif not focused() then
+                            -- keypress is OS-level: with Roblox in the background every E would
+                            -- be typed into whatever window has focus instead. A pause, not idle
+                            -- time: it must not run down the give-up clock.
+                            spamSince = nil
+                            EP.state = "paused - Roblox not focused"
+                        elseif GUI.PLSearchFocused then
+                            -- every tap would type an "e" into the Player List search
+                            spamSince = nil
+                            EP.state = "paused - typing in Player List"
+                        elseif menuBusy(now) then
+                            spamSince = nil
+                            EP.state = "paused - menu open"
+                        else
+                            EP.state = "pressing E"
+                            if now - lastTap >= epInterval then
+                                lastTap = now
+                                EP.presses = EP.presses + 1
+                                pcall(keypress, VK_E)
+                                task.wait(HOLD)
+                                pcall(keyrelease, VK_E)
+                            end
+                        end
+                    end
+                    task.wait()
+                end
+                pcall(keyrelease, VK_E)
+                if epGen == myGen then EP.state = "off" end
+            end)
+        end):Tooltip("Start the first minigame yourself. After each one ends this taps E until the next one shows, then waits. Needs Auto Skillcheck ON (it reads the spinner to know when a minigame is up). Pauses while this menu is open or Roblox is not focused, so E never lands in a keybind or textbox. Gives up after 20s with no minigame.")
+        secAuto:Slider("E Tap Interval", epInterval, 1 / 100, 1 / 20, 1 / 2, "s", function(v)
+            epInterval = tonumber(v) or epInterval
+        end):Tooltip("seconds between E taps while waiting for the next minigame. 0.10 = ten a second")
+
+        local secPanels = tab:Section("Panels", "Right", "Floating windows")
+        secPanels:Toggle("Counters", GUI.CounterVisible, function(v)
+            GUI.CounterVisible = v; BuildCounterPanel()
+        end)
+        secPanels:Toggle("Enchants", GUI.EnchantsOpen, function(v)
+            GUI.EnchantsOpen = v
+            if v then
+                if not GUI.EnchantsAllData then
+                    GUI.EnchantsFetchStatus = "Fetching..."
+                    BuildEnchantsPanel()
+                    task.spawn(function() FetchEnchantData(); FetchOwnedEnchants(); BuildEnchantsPanel() end)
+                else
+                    task.spawn(function() FetchOwnedEnchants(); BuildEnchantsPanel() end)
+                end
+            else
+                GUI.EnchantsModal = nil
+                ClearEnchantsPanel()
+                if GUI._enchHoverEl then GUI._enchHoverEl.Visible = false end
+            end
+        end)
+        secPanels:Toggle("RS Diff", GUI.RSDiffOpen, function(v)
+            GUI.RSDiffOpen = v
+            if v then BuildRSDiffPanel() else ClearRSDiffPanel() end
+        end)
+    end)
+
     -- ===== Settings tab (built-in) =====
     tabBuild(function()
         local setTab = window:AddSettingsTab("cog")
 
-        -- Appearance: Requiem owns the accent + opacity (the lib doesn't expose its
-        -- live theme), and the driver above pushes them to BOTH the menu and the popups.
-        local secLook = setTab:Section("Appearance", "Left", "Applies to menu + popups")
-        secLook:Toggle("Rainbow", RUITHEME.rainbow, function(v) RUITHEME.rainbow = v end)
-        secLook:Slider("Rainbow Speed", math.floor((RUITHEME.rainbowSpeed or 0.35) * 100), 1, 5, 150, "", function(v) RUITHEME.rainbowSpeed = (tonumber(v) or 35) / 100 end)
-        pcall(function() secLook:Colorpicker("Accent", RUITHEME.baseAccent, function(c) RUITHEME.baseAccent = c; RUITHEME.baseAccentB = c end) end)
-        secLook:Slider("Opacity", math.floor((RUITHEME.opacity or 1) * 100), 1, 30, 100, "%", function(v) RUITHEME.opacity = (tonumber(v) or 100) / 100 end)
+        -- One Appearance: the library's own (Background, Text color, Border, Corner radius, ...).
+        -- Its Theme section is dropped and the accent stays the fixed Requiem red. "Apply to Panels"
+        -- makes the Player List / Enchants / RS Diff panels follow it (the panel engine reads
+        -- GUI.MenuLook a few times a second).
+        local look = nil
+        pcall(function()
+            local secs = setTab._tab.sections
+            for i = #secs, 1, -1 do
+                local s = secs[i]
+                if s.name == "Theme" then table.remove(secs, i) elseif s.name == "Appearance" then look = s end
+            end
+        end)
+        GUI.MenuLook = function()
+            if not look then return nil end
+            local v = {}
+            for _, it in ipairs(look.items or {}) do
+                if it.label == "Background" then v.bg = it.value
+                elseif it.label == "Text color" then v.text = it.value
+                elseif it.label == "Border" then v.border = tonumber(it.value)
+                elseif it.label == "Corner radius" then v.radius = (tonumber(it.value) or 100) / 100 end
+            end
+            return v
+        end
+        local secPan = setTab:Section("Panels", "Left")
+        local follow = secPan:Toggle("Apply to Panels", GUI.PanelsFollowMenu ~= false, function(v) GUI.PanelsFollowMenu = v == true end)
+        pcall(function() follow:Tooltip("the Player List, Enchants and RS Diff panels use this Appearance's background, text colour, border and corner radius. Off = their own dark look") end)
+        -- The switch belongs inside Appearance: move it to the top there and drop the helper section.
+        pcall(function()
+            if look and follow.item then
+                table.insert(look.items, 1, follow.item)
+                local secs = setTab._tab.sections
+                for i = #secs, 1, -1 do if secs[i] == secPan._section then table.remove(secs, i) end end
+            end
+        end)
 
         local secLay = setTab:Section("Layout", "Left", "Where the menu and panels open")
         secLay:Toggle("Snap While Dragging", GUI.SnapOn ~= false, function(v) GUI.SnapOn = v == true end)
