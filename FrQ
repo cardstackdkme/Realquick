@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.5"
+GUI.Version = "v8.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -14088,10 +14088,14 @@ end)()
             end)
         end)
 
-        -- Last section of the LEFT column = bottom-left, beside Thunderspears (the user's spot).
+        -- Directly UNDER Firearm Auto (the user's spot). RowAlign would start this left section a
+        -- new row below the taller Firearm Manual + Thunderspears; `stack` (uilib patch #12) makes
+        -- it continue the left column instead. On the upstream fallback lib it just sits lower.
         -- Load Values (the lock popup) also loads the gas bar; a respawn rebuilds the gear table, and
         -- this re-finds it (gas keys only).
-        tab:Section("Gas Bar", "Left", "after a respawn"):Button("Reload Gas  (~10s)", function()
+        local secGas = tab:Section("Gas Bar", "Left", "after a respawn")
+        pcall(function() secGas._section.stack = true end)
+        secGas:Button("Reload Gas  (~10s)", function()
             if GUI.CharReloadGas then GUI.CharReloadGas() end
         end)
     end)
