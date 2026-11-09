@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.4"
+GUI.Version = "v8.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -101,14 +101,14 @@ GUI.PLWasKeys = {}
 GUI.PowerDouble = false     -- Tools -> Admin -> "Hide admin Panel": hide the staff Editor (windows, top panel, ping pop-ups)
 
 -- Personal gas + health bars (self only, Tools -> Indicators). Both are the slim HUD bar: text
--- inside a 20 px bar. X/Y nil = not placed yet: the first build puts gas centred above the
+-- inside a 14 px bar. X/Y nil = not placed yet: the first build puts gas centred above the
 -- hotbar and health to its left; after a drag the spot is saved with the config.
 GUI.GasBarVisible = false
 GUI.GasBarElements = {}
 GUI.GasBarX = nil
 GUI.GasBarY = nil
 GUI.GasBarW = 240
-GUI.GasBarH = 20
+GUI.GasBarH = 14
 GUI.GasBarDragging = false
 GUI.GasBarDragOX = 0
 GUI.GasBarDragOY = 0
@@ -118,7 +118,7 @@ GUI.HealthBarElements = {}
 GUI.HealthBarX = nil
 GUI.HealthBarY = nil
 GUI.HealthBarW = 240
-GUI.HealthBarH = 20
+GUI.HealthBarH = 14
 GUI.HealthBarDragging = false
 GUI.HealthBarDragOX = 0
 GUI.HealthBarDragOY = 0
@@ -4573,19 +4573,31 @@ ClearGasBar = function()
 end
 
 -- ============================================================
--- SLIM HUD BARS (v8.4): personal health + ODM gas
--- One look for both: the text sits INSIDE the bar, white with a thin black outline, on a pure-black
--- track so it stays readable however empty the bar is. Health fills green > 50%, yellow > 20%, red
--- below. Gas fills with a gradient, blue at the empty end -> purple at the full end. Drag either bar;
--- the spot is saved with the config. Both refresh IN PLACE (no Remove + rebuild), so they never blink.
+-- SLIM HUD BARS (v8.5): personal health + ODM gas
+-- Text sits INSIDE the bar, centred on its middle line (Matcha's Text.Center centres vertically
+-- too), white with a thin outline, on a black track. Health fills green/yellow/red or a gradient;
+-- gas fills with a gradient. Gradients are 2-5 colour stops, empty end first (Style -> Gradient
+-- Editor). Size, text and the rest are per bar in GUI.BarStyle (Style tab). Drag either bar; the
+-- spot is saved with the config. Values refresh IN PLACE, so the bars never blink.
 -- Everything lives in this do-block: the main chunk is near Luau's 200-local limit.
 -- ============================================================
 do
-    local TEXT_SIZE = 14
-    local SLICE = 2                           -- gradient slice width (px): narrow = smooth
+    local SLICE = 2                           -- gradient strip width (px): narrow = smooth
     local FONT = Drawing.Fonts.SystemBold     -- the health bar's font, used for both bars
     local C3 = Color3.fromRGB
-    GUI.SlimLabelH = 0                        -- the text is inside the bar now (the drag code reads this)
+    GUI.SlimLabelH = 0                        -- the text is inside the bar (the drag code reads this)
+
+    -- Per-bar look. Width/height live in GUI.<Bar>W/H (the drag code uses them); the rest here.
+    GUI.BarStyle = GUI.BarStyle or {
+        hp  = { text = 12, pct = true, nums = true, track = 100, border = true, fill = "Health Colors" },
+        gas = { text = 12, pct = true, nums = true, track = 100, border = true },
+    }
+    -- Gradient stops {r,g,b}, empty end FIRST. Presets: the built-ins plus any you save (config).
+    GUI.Grad = GUI.Grad or {
+        gas = { { 45, 125, 255 }, { 170, 80, 255 } },
+        hp  = { { 225, 70, 60 }, { 235, 190, 70 }, { 90, 200, 120 } },
+        presets = {},
+    }
 
     local function barColor(frac)
         if frac > 0.5 then return C3(90, 200, 120) end
@@ -4593,18 +4605,23 @@ do
         return C3(225, 70, 60)
     end
 
-    -- Gas gradient, blended in LINEAR light (gamma 2.2), not raw sRGB: a straight sRGB blend sags
-    -- dull in the middle, a linear-light blend keeps every slice equally bright, so it reads as one
-    -- smooth, even sweep. Blue = empty end, purple = full end.
-    local GRAD_LO, GRAD_HI = { 45, 125, 255 }, { 170, 80, 255 }
+    -- Colour at t (0 = empty end, 1 = full end) along 2-5 stops, blended in LINEAR light (gamma
+    -- 2.2): a raw sRGB blend sags dull between stops, a linear-light one keeps every strip equally
+    -- bright, so the sweep reads smooth and even. Returns r, g, b (0-255). Shared with the editor.
     local function lin(c) return (c / 255) ^ 2.2 end
-    local function gradColor(t)
-        local out = {}
-        for i = 1, 3 do
-            local l = lin(GRAD_LO[i]) + (lin(GRAD_HI[i]) - lin(GRAD_LO[i])) * t
-            out[i] = math.floor(255 * l ^ (1 / 2.2) + 0.5)
+    GUI.GradAt = function(stops, t)
+        local n = type(stops) == "table" and #stops or 0
+        if n == 0 then return 255, 255, 255 end
+        if n == 1 then return stops[1][1], stops[1][2], stops[1][3] end
+        local x = math.max(0, math.min(1, t)) * (n - 1)
+        local i = math.min(n - 2, math.floor(x))
+        local u, a, b = x - i, stops[i + 1], stops[i + 2]
+        local o = {}
+        for k = 1, 3 do
+            local l = lin(a[k]) + (lin(b[k]) - lin(a[k])) * u
+            o[k] = math.floor(255 * l ^ (1 / 2.2) + 0.5)
         end
-        return C3(out[1], out[2], out[3])
+        return o[1], o[2], o[3]
     end
 
     -- First build with no saved spot: gas centred above the hotbar, health to its left.
@@ -4617,9 +4634,14 @@ do
         return math.floor(vx / 2 - w - 190), y
     end
 
-    -- gradient=true: the fill is a row of SLICE-wide strips, each its own colour (Drawing has no
-    -- gradient fill). They are positioned once here; dragging moves them with everything else.
-    local function draw(px, py, pw, ph, elems, gradient)
+    local function usesGradient(which)
+        return which == "gas" or GUI.BarStyle.hp.fill == "Gradient"
+    end
+
+    -- Gradient fills are rows of SLICE-wide strips, each its own colour (Drawing has no gradient
+    -- fill). They are positioned once here; dragging moves them with everything else.
+    local function draw(px, py, pw, ph, elems, which)
+        local st = GUI.BarStyle[which]
         local function add(o) o.Visible = true; elems[#elems + 1] = o; return o end
         local function sq(col, z, filled, a, corner)
             local s = Drawing.new("Square")
@@ -4627,33 +4649,49 @@ do
             s.Corner = corner or 4; s.Thickness = 1
             return add(s)
         end
-        local h = {}
-        h.bg = sq(C3(0, 0, 0), 55, true, 1)                  -- pure black track
+        local h = { which = which }
+        h.bg = sq(C3(0, 0, 0), 55, true, math.max(0, math.min(1, (st.track or 100) / 100)))
         h.bg.Position, h.bg.Size = Vector2.new(px, py), Vector2.new(pw, ph)
-        local iw = pw - 4                                    -- inner width
-        if gradient then
-            h.slices, h.sliceH = {}, ph - 4
+        local iw = pw - 4
+        if usesGradient(which) then
+            h.slices, h.sliceH = {}, math.max(1, ph - 4)
             local n = math.ceil(iw / SLICE)
+            local stops = GUI.Grad[which]
             for i = 1, n do
-                local s = sq(gradColor((i - 0.5) / n), 56, true, 1, 0)
+                local r, g, b = GUI.GradAt(stops, (i - 0.5) / n)
+                local s = sq(C3(r, g, b), 56, true, 1, 0)
                 s.Position = Vector2.new(px + 2 + (i - 1) * SLICE, py + 2)
-                s.Size = Vector2.new(SLICE, ph - 4)
+                s.Size = Vector2.new(SLICE, h.sliceH)
                 s.Visible = false
                 h.slices[i] = { o = s, vis = false, w = SLICE, x0 = (i - 1) * SLICE }
             end
         else
             h.fill = sq(C3(90, 200, 120), 56, true, 1, 3)
-            h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(0, ph - 4)
+            h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(0, math.max(1, ph - 4))
         end
         h.border = sq(C3(60, 60, 66), 57, false, 1)
         h.border.Position, h.border.Size = Vector2.new(px, py), Vector2.new(pw, ph)
+        if st.border == false then h.border.Visible = false end
         local t = Drawing.new("Text")
-        t.Size = TEXT_SIZE; t.Outline = true; t.Center = true; t.ZIndex = 58
+        t.Size = st.text or 12; t.Outline = true; t.Center = true; t.ZIndex = 58
         t.Color = C3(255, 255, 255); t.Font = FONT; t.Text = ""
         h.label = add(t)
-        -- Center = true centres horizontally only; this puts the text's middle on the bar's middle
-        h.label.Position = Vector2.new(px + math.floor(pw / 2), py + math.floor((ph - TEXT_SIZE) / 2) - 1)
+        h.label.Position = Vector2.new(px + math.floor(pw / 2), py + math.floor(ph / 2))
         return h
+    end
+
+    -- Recolour a gradient bar in place (the editor calls this on every change).
+    local function recolor(h)
+        if not (h and h.slices) then return end
+        local n, stops = #h.slices, GUI.Grad[h.which]
+        for i, s in ipairs(h.slices) do
+            local r, g, b = GUI.GradAt(stops, (i - 0.5) / n)
+            pcall(function() s.o.Color = C3(r, g, b) end)
+        end
+    end
+    GUI.RecolorBars = function()
+        recolor(GUI.GasBarHandle)
+        recolor(GUI.HealthBarHandle)
     end
 
     -- Show `fw` px of gradient: touch only the strips whose state changes, so a draining bar costs
@@ -4667,6 +4705,13 @@ do
         end
     end
 
+    local function labelText(title, st, frac, val, m)
+        local parts = { title }
+        if st.pct ~= false then parts[#parts + 1] = string.format("%d%%", math.floor(frac * 100 + 0.5)) end
+        if st.nums ~= false then parts[#parts + 1] = string.format("%d / %d", math.floor(val + 0.5), math.floor(m + 0.5)) end
+        return table.concat(parts, "   ")
+    end
+
     -- `status` replaces the whole text (no title, no numbers) and empties the bar.
     local function update(h, title, val, maxVal, px, py, pw, ph, status)
         if not h then return end
@@ -4676,6 +4721,7 @@ do
                 h.label.Text = status
                 return
             end
+            local st = GUI.BarStyle[h.which]
             local inf = (maxVal == math.huge)
             local m = (maxVal and maxVal > 0) and maxVal or 100
             local frac = inf and 1 or math.max(0, math.min(1, val / m))
@@ -4683,17 +4729,25 @@ do
             if h.slices then
                 showSlices(h, fw)
             else
-                h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(fw, ph - 4)
+                h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(fw, math.max(1, ph - 4))
                 h.fill.Color = barColor(frac)
                 h.fill.Visible = fw > 0
             end
-            if inf then
-                h.label.Text = title .. "  INF"
-            else
-                h.label.Text = string.format("%s  %d%%   %d / %d", title, math.floor(frac * 100 + 0.5),
-                    math.floor(val + 0.5), math.floor(m + 0.5))
-            end
+            h.label.Text = inf and (title .. "  INF") or labelText(title, st, frac, val, m)
         end)
+    end
+
+    -- Style tab: change one setting and rebuild that bar (positions are kept).
+    GUI.SetBarStyle = function(which, key, value)
+        local st = GUI.BarStyle[which]
+        if not st then return end
+        if key == "w" or key == "h" then
+            local pre = which == "hp" and "HealthBar" or "GasBar"
+            GUI[pre .. (key == "w" and "W" or "H")] = value
+        else
+            st[key] = value
+        end
+        if which == "hp" then BuildHealthBar() else BuildGasBar() end
     end
 
     -- ---------- health ----------
@@ -4704,7 +4758,7 @@ do
             GUI.HealthBarX, GUI.HealthBarY = defaultPos("hp", GUI.HealthBarW)
         end
         GUI.HealthBarHandle = draw(GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH,
-            GUI.HealthBarElements, false)
+            GUI.HealthBarElements, "hp")
         GUI.UpdateHealthBar()
     end
     GUI.UpdateHealthBar = function()
@@ -4874,7 +4928,7 @@ do
         if GUI.GasBarX == nil or GUI.GasBarY == nil then
             GUI.GasBarX, GUI.GasBarY = defaultPos("gas", GUI.GasBarW)
         end
-        GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements, true)
+        GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements, "gas")
         UpdateGasBar()
     end
     UpdateGasBar = function()
@@ -7360,12 +7414,11 @@ saveConfig = function()
             agKeyX       = GUI.AGKeyX,
             agKeyY       = GUI.AGKeyY,
             agKeySize    = GUI.AGKeySize,
-            agPanel      = GUI.AGPanel ~= false,
             agPanelX     = GUI.AGPanelX,
             agPanelY     = GUI.AGPanelY,
             agToggleKey  = GUI.AG and GUI.AG.ToggleKey or GUI.AGToggleKey,
             agCfg        = GUI.AG and {
-                filter = GUI.AG.Filter, retry = GUI.AG.Retry, minChance = GUI.AG.MinChance,
+                filter = GUI.AG.Filter, minChance = GUI.AG.MinChance,
             } or GUI.AGCfg,
         },
         ores = oresOn,
@@ -7392,6 +7445,9 @@ saveConfig = function()
             enchantsX   = GUI.EnchantsX,   enchantsY   = GUI.EnchantsY,   enchantsW   = GUI.EnchantsW,   enchantsH   = GUI.EnchantsH,
             rsDiffX     = GUI.RSDiffX,     rsDiffY     = GUI.RSDiffY,     rsDiffW     = GUI.RSDiffW,     rsDiffH     = GUI.RSDiffH,
         },
+        -- HUD bar gradients (Style -> Health / Gas Gradient): 2-5 {r,g,b} stops each, empty end first,
+        -- plus the presets you saved
+        gradients   = GUI.Grad and { gas = GUI.Grad.gas, hp = GUI.Grad.hp, presets = GUI.Grad.presets } or nil,
     }
     task.spawn(function()
         pcall(function()
@@ -7465,7 +7521,6 @@ loadConfig = function()
             GUI.AGKeyX, GUI.AGKeyY = f.agKeyX, f.agKeyY
         end
         if type(f.agKeySize)    == "number"  then GUI.AGKeySize            = math.max(28, math.min(200, f.agKeySize)) end
-        if type(f.agPanel)      == "boolean" then GUI.AGPanel              = f.agPanel      end
         if type(f.agPanelX)     == "number" and type(f.agPanelY) == "number" then
             GUI.AGPanelX, GUI.AGPanelY = f.agPanelX, f.agPanelY
         end
@@ -7478,7 +7533,6 @@ loadConfig = function()
             local A, c = GUI.AG, f.agCfg
             if A then
                 if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then A.Filter = c.filter end
-                if type(c.retry) == "boolean" then A.Retry = c.retry end
                 if type(c.minChance) == "number" then A.MinChance = c.minChance end
             end
         end
@@ -7529,6 +7583,35 @@ loadConfig = function()
         if type(data.panels.rsDiffY)     == "number" then GUI.RSDiffY     = data.panels.rsDiffY     end
         if type(data.panels.rsDiffW)     == "number" then GUI.RSDiffW     = math.max(560, data.panels.rsDiffW) end
         if type(data.panels.rsDiffH)     == "number" then GUI.RSDiffH     = math.max(400, data.panels.rsDiffH) end
+    end
+    -- Gradients: a stop list is used only if it is 2-5 {r,g,b} triples; anything else keeps the default.
+    if type(data.gradients) == "table" and GUI.Grad then
+        local function stopsOK(s)
+            if type(s) ~= "table" or #s < 2 or #s > 5 then return nil end
+            local out = {}
+            for i, c in ipairs(s) do
+                if type(c) ~= "table" then return nil end
+                local r, g, b = tonumber(c[1]), tonumber(c[2]), tonumber(c[3])
+                if not (r and g and b) then return nil end
+                out[i] = { math.max(0, math.min(255, math.floor(r + 0.5))),
+                           math.max(0, math.min(255, math.floor(g + 0.5))),
+                           math.max(0, math.min(255, math.floor(b + 0.5))) }
+            end
+            return out
+        end
+        local gd = data.gradients
+        GUI.Grad.gas = stopsOK(gd.gas) or GUI.Grad.gas
+        GUI.Grad.hp  = stopsOK(gd.hp)  or GUI.Grad.hp
+        if type(gd.presets) == "table" then
+            local ps = {}
+            for _, p in ipairs(gd.presets) do
+                local st = type(p) == "table" and stopsOK(p.stops)
+                if st and #ps < 8 then
+                    ps[#ps + 1] = { name = tostring(p.name or ("Custom " .. (#ps + 1))):sub(1, 18), stops = st }
+                end
+            end
+            GUI.Grad.presets = ps
+        end
     end
 
     -- Re-apply derived state for things that read from the config tables
@@ -10960,7 +11043,7 @@ local AG = {
     MinChance = 0.85,      -- only hook when the game's spread ray is at least this likely to land
     Range = 400,           -- the game's base hook range; its spread scales with distance / range
     Filter = "All",        -- "All" | "Actors" | "Players" (Actor ESP's classification)
-    Retry = true,          -- a hook that lands on something else is let go and fired again
+    Retry = false,         -- REMOVED in v8.5 (user's call): a missed hook is no longer let go and refired
     -- runtime
     Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off", Pending = nil, Chance = nil,
     Await = nil, HookPart = nil, Lat = nil, Hooks = 0, Hits = 0, Misses = 0, Presses = {},
@@ -10969,7 +11052,7 @@ do
     local c = GUI.AGCfg
     if type(c) == "table" then
         if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then AG.Filter = c.filter end
-        if type(c.retry) == "boolean" then AG.Retry = c.retry end
+        -- (saved `retry` ignored: Retry Misses was removed, it stays off)
         if type(c.minChance) == "number" then AG.MinChance = c.minChance end
     end
 end
@@ -11761,7 +11844,7 @@ end)
 --   grip (or the wheel, if the executor reports it). This loop also runs the Auto Grapple toggle
 --   key, since the grapple loop itself idles while the feature is off.
 if GUI.AGKeyBox == nil then GUI.AGKeyBox = true end
-if GUI.AGPanel == nil then GUI.AGPanel = true end
+GUI.AGPanel = false   -- Hotkeys panel REMOVED in v8.5 (user's call); a saved "on" is ignored
 GUI.AGKeySize = GUI.AGKeySize or 64
 task.spawn(function()
     local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
@@ -12293,6 +12376,177 @@ end)()
             RESUPPLY.MaxDistance = val; FLINTLOCK.MaxDistance = val; TITAN.MaxDistance = val
             ANIMAL.MaxDistance = val; PLAYER_ESP.MaxDistance = val
         end)
+
+        -- ---------- HUD bars (Tools -> Indicators turns them on) ----------
+        -- Each control rebuilds only its own bar; the bar keeps its spot.
+        local function barSection(title, which, side)
+            local st = GUI.BarStyle and GUI.BarStyle[which]
+            if not (st and GUI.SetBarStyle) then return nil end
+            local pre = which == "hp" and "HealthBar" or "GasBar"
+            local function num(key) return function(v) local n = tonumber(v); if n then GUI.SetBarStyle(which, key, math.floor(n)) end end end
+            local function flag(key) return function(v) GUI.SetBarStyle(which, key, v == true) end end
+            local sec = tab:Section(title, side, "On-screen bar")
+            sec:Slider("Width", GUI[pre .. "W"] or 240, 10, 120, 480, "px", num("w"))
+            sec:Slider("Height", GUI[pre .. "H"] or 14, 1, 8, 28, "px", num("h"))
+            sec:Slider("Text Size", st.text or 12, 1, 8, 20, "", num("text"))
+            sec:Toggle("Show Percent", st.pct ~= false, flag("pct"))
+            sec:Toggle("Show Numbers", st.nums ~= false, flag("nums"))
+            sec:Slider("Track Opacity", st.track or 100, 5, 0, 100, "%", num("track"))
+                :Tooltip("how solid the black empty part is. 100 = pure black, so the white text always reads")
+            sec:Toggle("Border", st.border ~= false, flag("border"))
+            return sec
+        end
+        local secHB = barSection("Health Bar", "hp", "Left")
+        if secHB then
+            secHB:Dropdown("Fill", GUI.BarStyle.hp.fill or "Health Colors", { "Health Colors", "Gradient" }, false, function(v)
+                GUI.SetBarStyle("hp", "fill", ddVal(v) == "Gradient" and "Gradient" or "Health Colors")
+            end)
+        end
+        barSection("Gas Bar", "gas", "Right")
+
+        -- ---------- bar gradients ----------
+        -- The lib's own colour pickers, one per stop (2-5), empty end first. "+"/"-" really add and
+        -- remove rows: each section's item list (sec._section.items) is what the lib draws every
+        -- frame, so it is rebuilt as [colour rows 1..n, then the controls]. The rows are noSave: the
+        -- gradient lives in RQConfig, saved by itself a second after each change, so the lib's own
+        -- config can never restore a stale colour over it.
+        local BUILTIN = {
+            { name = "Purple Blue", stops = { { 45, 125, 255 }, { 170, 80, 255 } } },
+            { name = "Health",      stops = { { 225, 70, 60 }, { 235, 190, 70 }, { 90, 200, 120 } } },
+            { name = "Sunset",      stops = { { 110, 40, 190 }, { 240, 70, 120 }, { 255, 170, 60 } } },
+            { name = "Ocean",       stops = { { 0, 60, 140 }, { 0, 150, 200 }, { 110, 235, 255 } } },
+            { name = "Mint",        stops = { { 15, 120, 105 }, { 70, 210, 160 }, { 185, 255, 210 } } },
+            { name = "Fire",        stops = { { 120, 10, 10 }, { 230, 60, 20 }, { 255, 205, 50 } } },
+            { name = "Aurora",      stops = { { 40, 90, 255 }, { 80, 215, 200 }, { 165, 255, 120 }, { 235, 115, 255 } } },
+            { name = "Rainbow",     stops = { { 255, 60, 60 }, { 255, 190, 50 }, { 80, 220, 100 }, { 60, 150, 255 }, { 180, 90, 255 } } },
+        }
+        local function copyStops(s)
+            local o = {}
+            for i, c in ipairs(s) do o[i] = { c[1], c[2], c[3] } end
+            return o
+        end
+        -- Color3 .R/.G/.B are 0-1 on some Matcha builds and 0-255 on others: accept both.
+        local function rgbOf(c)
+            local r, g, b = 0, 0, 0
+            pcall(function() r, g, b = c.R, c.G, c.B end)
+            r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+            if r <= 1 and g <= 1 and b <= 1 then r, g, b = r * 255, g * 255, b * 255 end
+            local function q(x) return math.max(0, math.min(255, math.floor(x + 0.5))) end
+            return q(r), q(g), q(b)
+        end
+        local function saveSoon()
+            GUI._gradSaveAt = os.clock() + 1
+            if GUI._gradSaving then return end
+            GUI._gradSaving = true
+            task.spawn(function()
+                while os.clock() < (GUI._gradSaveAt or 0) do task.wait(0.25) end
+                GUI._gradSaving = false
+                pcall(saveConfig)
+            end)
+        end
+        local function presetNames()
+            local n = {}
+            for _, p in ipairs(BUILTIN) do n[#n + 1] = p.name end
+            for _, p in ipairs(GUI.Grad.presets or {}) do n[#n + 1] = p.name end
+            return n
+        end
+        local function findPreset(name)
+            for _, p in ipairs(BUILTIN) do if p.name == name then return p, false end end
+            for i, p in ipairs(GUI.Grad.presets or {}) do if p.name == name then return p, true, i end end
+            return nil
+        end
+        local dropdowns = {}   -- both bars' preset dropdowns: a saved preset shows up in both
+
+        local function gradSection(which, title, side)
+            if not (GUI.Grad and GUI.Grad[which] and GUI.GradAt) then return end
+            local sec = tab:Section(title, side, "2-5 colours, left = empty end")
+            local rows, applying = {}, false
+            local ctl = {}
+            local function stops() return GUI.Grad[which] end
+            local function refresh()
+                local list = {}
+                for i = 1, #stops() do list[#list + 1] = rows[i].item end
+                for _, c in ipairs(ctl) do list[#list + 1] = c.item end
+                pcall(function() sec._section.items = list end)
+            end
+            local function changed()
+                if GUI.RecolorBars then GUI.RecolorBars() end
+                saveSoon()
+            end
+            for i = 1, 5 do
+                local c = stops()[i] or stops()[#stops()]
+                rows[i] = sec:Colorpicker("Colour " .. i, Color3.fromRGB(c[1], c[2], c[3]), function(v)
+                    if applying then return end
+                    local s = stops()
+                    if i > #s then return end
+                    local r, g, b = rgbOf(v)
+                    s[i] = { r, g, b }
+                    changed()
+                end)
+                pcall(function() rows[i].item.noSave = true end)
+            end
+            -- set every visible row from the stops without each Set echoing back as an edit
+            local function syncRows()
+                applying = true
+                for i, c in ipairs(stops()) do pcall(function() rows[i]:Set(Color3.fromRGB(c[1], c[2], c[3])) end) end
+                applying = false
+                refresh()
+                changed()
+            end
+            local dd = sec:Dropdown("Preset", "", presetNames(), false, function(v)
+                local p = findPreset(ddVal(v))
+                if not p then return end
+                GUI.Grad[which] = copyStops(p.stops)
+                syncRows()
+            end)
+            pcall(function() dd.item.noSave = true end)
+            dropdowns[#dropdowns + 1] = dd
+            ctl[#ctl + 1] = dd
+            ctl[#ctl + 1] = sec:Button("+ Add Colour", function()
+                local s = stops()
+                if #s >= 5 then pcall(uiNotify, title, "5 colours is the most", 3); return end
+                local last = s[#s]
+                s[#s + 1] = { last[1], last[2], last[3] }   -- starts as a copy of the end colour
+                syncRows()
+            end)
+            ctl[#ctl + 1] = sec:Button("- Remove Colour", function()
+                local s = stops()
+                if #s <= 2 then pcall(uiNotify, title, "A gradient needs 2 colours", 3); return end
+                s[#s] = nil
+                syncRows()
+            end)
+            ctl[#ctl + 1] = sec:Button("Reverse", function()
+                local s, o = stops(), {}
+                for i = #s, 1, -1 do o[#o + 1] = s[i] end
+                GUI.Grad[which] = o
+                syncRows()
+            end)
+            ctl[#ctl + 1] = sec:Button("Save as Preset", function()
+                GUI.Grad.presets = GUI.Grad.presets or {}
+                if #GUI.Grad.presets >= 8 then pcall(uiNotify, "Presets", "8 saved presets is the most - delete one first", 4); return end
+                local n = 1
+                while findPreset("Custom " .. n) do n = n + 1 end
+                local name = "Custom " .. n
+                table.insert(GUI.Grad.presets, { name = name, stops = copyStops(stops()) })
+                for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
+                pcall(saveConfig)
+                pcall(uiNotify, "Presets", "Saved as " .. name, 3)
+            end)
+            ctl[#ctl + 1] = sec:Button("Delete Preset", function()
+                local name = ""
+                pcall(function() name = ddVal(dd:Get()) end)
+                local p, custom, idx = findPreset(name)
+                if not p then pcall(uiNotify, "Presets", "Pick a saved preset in the list first", 3); return end
+                if not custom then pcall(uiNotify, "Presets", "Built-in presets can't be deleted", 3); return end
+                table.remove(GUI.Grad.presets, idx)
+                for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
+                pcall(saveConfig)
+                pcall(uiNotify, "Presets", "Deleted " .. name, 3)
+            end)
+            refresh()
+        end
+        gradSection("hp", "Health Gradient", "Left")
+        gradSection("gas", "Gas Gradient", "Right")
     end)
 
     -- ===== Tab: Tools =====
@@ -13090,11 +13344,6 @@ end)()
         -- ---------- Grapple (ODM hook range) ----------
         -- Additional Range only. GearGrappleRangeMultiplier is no longer written at all (its slider
         -- was removed), so the projection is a plain 400 + additional.
-        -- Load Values (the lock popup) also loads the gas bar. A respawn rebuilds the gear table:
-        -- this re-finds it, gas keys only.
-        tab:Section("Gas Bar", "Left", "after a respawn"):Button("Reload Gas  (~10s)", function()
-            if GUI.CharReloadGas then GUI.CharReloadGas() end
-        end)
         local secGr = tab:Section("Grapple", "Left", "ODM hook range")
         local grAdd = CFG.GearAdditionalGrappleRange.fb
         secGr:Slider("Additional Range", grAdd, 50, 0, 5000, "", function(v) grAdd = math.floor(tonumber(v) or grAdd) end)
@@ -13838,6 +14087,13 @@ end)()
                     or "Nothing to restore - no writes recorded", 3)
             end)
         end)
+
+        -- Last section of the LEFT column = bottom-left, beside Thunderspears (the user's spot).
+        -- Load Values (the lock popup) also loads the gas bar; a respawn rebuilds the gear table, and
+        -- this re-finds it (gas keys only).
+        tab:Section("Gas Bar", "Left", "after a respawn"):Button("Reload Gas  (~10s)", function()
+            if GUI.CharReloadGas then GUI.CharReloadGas() end
+        end)
     end)
 
     -- ===== Tab: Combat (Auto Parry, Fast Swing, Auto Grapple) =====
@@ -13937,16 +14193,12 @@ end)()
                     if m == "All" or m == "Actors" or m == "Players" then AG.Filter = m end
                 end)
             end)
-            secAG:Toggle("Retry Misses", AG.Retry, function(v) AG.Retry = v == true end)
-                :Tooltip("after each hook it checks what the hook stuck to. If it landed on something other than the target, it lets go and fires again a moment later")
             pcall(function()
                 secAG:Keybind("Toggle Key", AG.ToggleKey and toName(AG.ToggleKey) or "", function(k)
                     local vk = toVK(k)
                     AG.ToggleKey, GUI.AGToggleKey = vk, vk
                 end, "click, then press a key to turn Auto Grapple on/off without opening the menu")
             end)
-            secAG:Toggle("Hotkeys Panel", GUI.AGPanel ~= false, function(v) GUI.AGPanel = v == true end)
-                :Tooltip("on-screen panel showing whether Auto Grapple is ON (with its toggle key) or OFF. Drag it while the menu is open")
             secAG:Toggle("Key Indicator", GUI.AGKeyBox ~= false, function(v) GUI.AGKeyBox = v == true end)
                 :Tooltip("on-screen box with a pulsing Q or E while the bot holds that hook for you - press and hold that key to take over. With the menu open: drag the box to move it, drag its corner (or scroll over it) to resize")
             pcall(function()
