@@ -6378,12 +6378,13 @@ end)()
 -- by their character model in Workspace, which keeps the exact username as its name (the lookup is
 -- case-sensitive, so the list holds exact Roblox usernames).
 -- The list itself is encrypted (RC4-drop768 with a per-blob nonce, base64) so the script does not
--- show who is on it. The key is never in the script: it lives in RQ/direct_esp.key, written the
--- first time it is entered in the Direct ESP tab.
+-- show who is on it. The key is never in the script: it lives in RQ/direct_esp.txt, written the
+-- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
 -- ============================================================
 ;(function()
     local DIRECT_BLOB = "c71d24b0:J2SHLudntIYV3TlioF6Muaf9T/OG1AekvSgLtIs5y33s4EQ+Bior0yQWVWF5XAE/vXNF/3qZhO9Ljf7/vg6KaDscmRbhz8eRrB542hMVmT1ZNRoQya0775hBGSD0TeHphZC24VW8IX+R3rhM3fzsIvCipprJqPFV4wf8vmuymfzGpEHF9SMBdArGw0CzU/3M8Mj2HVv2z/1kN/dXoV9oWapQJZN9wtbWXYhWXC6dHM4m/Z0pusNZ+IcLOufs1iZo2rLjHXMiFqy/TPODuzM973tW1pBqtmvmZYcUfK0p7rezvAl4C8oI8CHK03zegzflVpn0EFj1UkYkparLtxuviJOIQJPsLGjm0A6QAxTaEuLFt+qJL/+Db8JEqzyYuFFohtMIVNcjNhacvQ7MAZK/ReN2YiLerLPZxtOiDXqdpvOKf+I5dXMnxyj9h8Ktz9DyBLF+iJCd5D/iJMDm+FnNRt6v4OBU3qLzk9OT2/2NVGh8ojftMPLpQUHZh/xx6Nn5gyXkQExvSfDLVyvklglx1DpRy9KRBIAWTaGgOpy5xvGEP5HIOmlYpMzspG0y9N94P8z4RD5yIyEyfaTvw3v6g1ZA"
-    local KEY_FILE = CONFIG_DIR .. "/direct_esp.key"
+    -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
+    local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
 
     local function rc4(key, data)
         local S = {}
@@ -12039,7 +12040,7 @@ end)()
                 secKey:Textbox("Key", "", function(v)
                     typed = tostring(v or "")
                     if D.unlock(typed) then uiNotify("Direct ESP", "Unlocked - reload the script to show the lists", 6) end
-                end, "the key is saved in your RQ folder, never in the script")
+                end, "type the key (pasting is not supported) - or put it in RQ/direct_esp.txt in your executor folder and reload. It is saved there, never in the script")
             end)
             secKey:Button("Unlock", function()
                 if D.unlock(typed) then
