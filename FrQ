@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.17"
+GUI.Version = "v8.18"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3176,6 +3176,10 @@ local function InputLoop()
             end -- if GUI.Visible
         end -- else (not listening)
 
+        -- HUD bars and counters only start moving while the menu is up. Checked every tick: the
+        -- test watches _G.RQGeo change between calls, so it must not go a while unpolled.
+        GUI._menuUp = GUI.MenuVisible()
+
         -- Counter panel drag (always, independent of main GUI)
         if GUI.CounterVisible and #GUI.CounterElements > 0 then
             local mx, my = Mouse.X, Mouse.Y
@@ -3193,7 +3197,7 @@ local function InputLoop()
                     GUI.CounterDragging = false
                     GUI.SnapGuides(nil, nil)
                 end
-            elseif mouseDown and onCounter and not GUI.Dragging then
+            elseif mouseDown and onCounter and not GUI.Dragging and GUI._menuUp then   -- move only while editing
                 GUI.CounterDragging = true
                 GUI.CounterDragOX = mx - GUI.CounterX
                 GUI.CounterDragOY = my - GUI.CounterY
@@ -3231,7 +3235,7 @@ local function InputLoop()
                     -- Only after a real move, so a plain click on the bar writes nothing.
                     if GUI._hbMoved then GUI._hbMoved = false; pcall(saveConfig) end
                 end
-            elseif mouseDown and onBar and not GUI.Dragging and not GUI.CounterDragging then
+            elseif mouseDown and onBar and not GUI.Dragging and not GUI.CounterDragging and GUI._menuUp then
                 GUI.HealthBarDragging = true
                 GUI.HealthBarDragOX = mx - GUI.HealthBarX
                 GUI.HealthBarDragOY = my - GUI.HealthBarY
@@ -3279,7 +3283,7 @@ local function InputLoop()
                     if GUI._gbMoved then GUI._gbMoved = false; pcall(saveConfig) end   -- same as health
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
-                   and not GUI.HealthBarDragging then
+                   and not GUI.HealthBarDragging and GUI._menuUp then
                 GUI.GasBarDragging = true
                 GUI.GasBarDragOX = gmx - GUI.GasBarX
                 GUI.GasBarDragOY = gmy - GUI.GasBarY
@@ -7141,6 +7145,13 @@ end
 -- symmetrically. A guide line shows what it locked onto.
 GUI.SnapOn = GUI.SnapOn ~= false
 GUI.SnapPx = 8
+-- Is the Requiem menu on screen? The lib rebuilds _G.RQGeo every frame it draws the window, so one
+-- that stopped changing is a minimised menu. HUD bars only move while this is true.
+function GUI.MenuVisible()
+    local g, now = _G.RQGeo, os.clock()
+    if g ~= GUI._geoRef then GUI._geoRef, GUI._geoAt = g, now end
+    return type(g) == "table" and g.open == true and now - (GUI._geoAt or 0) <= 0.25
+end
 GUI.SnapPanels = {   -- key -> x, y, w, h while it is on screen
     hp = function()
         if GUI.HealthBarVisible and #(GUI.HealthBarElements or {}) > 0 then
@@ -7160,19 +7171,22 @@ GUI.SnapPanels = {   -- key -> x, y, w, h while it is on screen
     pl = function() if GUI.PlayerListOpen then return GUI.PlayerListX, GUI.PlayerListY, GUI.PlayerListW, GUI.PlayerListH end end,
     en = function() if GUI.EnchantsOpen then return GUI.EnchantsX, GUI.EnchantsY, GUI.EnchantsW, GUI.EnchantsH end end,
     rs = function() if GUI.RSDiffOpen then return GUI.RSDiffX, GUI.RSDiffY, GUI.RSDiffW, GUI.RSDiffH end end,
-    -- The lib rebuilds _G.RQGeo every frame it draws the window, so one that stopped changing is a
-    -- minimised menu, not a target.
     menu = function()
-        local g, now = _G.RQGeo, os.clock()
-        if g ~= GUI._snapGeoRef then GUI._snapGeoRef, GUI._snapGeoAt = g, now end
-        if type(g) == "table" and g.open and now - (GUI._snapGeoAt or 0) <= 0.25 then return g.wx, g.wy, g.ww, g.wh end
+        local g = _G.RQGeo
+        if GUI.MenuVisible() then return g.wx, g.wy, g.ww, g.wh end
     end,
 }
 -- Where a panel being dragged to (x, y) should go instead. `self` is its key in GUI.SnapPanels.
+-- Each call also records why it did or did not snap in _G.RQSnap (read-only, for debugging).
 function GUI.Snap(self, x, y, w, h)
+    local dbg = { at = os.clock(), self = self, on = GUI.SnapOn, w = w, h = h }
+    pcall(function() rawset(_G, "RQSnap", dbg) end)
     local free = not GUI.SnapOn or not (tonumber(w) and tonumber(h))
-    if not free then pcall(function() free = iskeypressed(0x10) and true or false end) end   -- Shift
-    if free then GUI.SnapGuides(nil, nil); return x, y end
+    if not free then
+        -- only a real `true` is Shift held: a 0 / non-boolean reply must not count as pressed
+        pcall(function() local s = iskeypressed(0x10); dbg.shift = tostring(s); free = s == true end)
+    end
+    if free then dbg.result = "free"; GUI.SnapGuides(nil, nil); return x, y end
     local vw, vh = 1920, 1080
     pcall(function() local vp = Workspace.CurrentCamera.ViewportSize; vw, vh = vp.X, vp.Y end)
     local xs, ys = { vw / 2 }, { vh / 2 }
@@ -7197,6 +7211,8 @@ function GUI.Snap(self, x, y, w, h)
     end
     local sx, gx = nearest(x, w, xs)
     local sy, gy = nearest(y, h, ys)
+    dbg.lines = #xs .. "x/" .. #ys .. "y"
+    dbg.result = (sx or sy) and ("snapped" .. (sx and " x" or "") .. (sy and " y" or "")) or "nothing within " .. GUI.SnapPx .. "px"
     GUI.SnapGuides(gx, gy)
     return sx or x, sy or y
 end
@@ -10992,10 +11008,10 @@ end)()
         local secInd = tab:Section("Indicators", "Right", "On-screen overlays")
         secInd:Toggle("Health Bar", GUI.HealthBarVisible, function(v)
             GUI.HealthBarVisible = v; BuildHealthBar()
-        end):Tooltip("your health as a slim bar. Drag its label or bar to move it; the spot is saved")
+        end):Tooltip("your health as a slim bar. With the menu open, drag it to move it; the spot is saved")
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
-        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. Drag to move; the spot is saved")
+        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. With the menu open, drag it to move it; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
 
         -- ---------- Hiddens: stop the game's own readouts being drawn on your screen ----------
