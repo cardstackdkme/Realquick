@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.6"
+GUI.Version = "v8.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3778,6 +3778,7 @@ local function InputLoop()
                     if ddx ~= 0 or ddy ~= 0 then
                         GUI.HealthBarX = GUI.HealthBarX + ddx
                         GUI.HealthBarY = GUI.HealthBarY + ddy
+                        GUI._hbMoved = true
                         for _, el in ipairs(GUI.HealthBarElements) do
                             pcall(function()
                                 if el.Position then
@@ -3788,6 +3789,9 @@ local function InputLoop()
                     end
                 else
                     GUI.HealthBarDragging = false
+                    -- Save the new spot the moment you let go (it used to wait for Save Config).
+                    -- Only after a real move, so a plain click on the bar writes nothing.
+                    if GUI._hbMoved then GUI._hbMoved = false; pcall(saveConfig) end
                 end
             elseif mouseDown and onBar and not GUI.Dragging and not GUI.CounterDragging then
                 GUI.HealthBarDragging = true
@@ -3823,6 +3827,7 @@ local function InputLoop()
                     if ddx ~= 0 or ddy ~= 0 then
                         GUI.GasBarX = GUI.GasBarX + ddx
                         GUI.GasBarY = GUI.GasBarY + ddy
+                        GUI._gbMoved = true
                         for _, el in ipairs(GUI.GasBarElements) do
                             pcall(function()
                                 if el.Position then
@@ -3833,6 +3838,7 @@ local function InputLoop()
                     end
                 else
                     GUI.GasBarDragging = false
+                    if GUI._gbMoved then GUI._gbMoved = false; pcall(saveConfig) end   -- same as health
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
                    and not GUI.HealthBarDragging then
