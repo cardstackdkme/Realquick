@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.7"
+GUI.Version = "v8.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -692,9 +692,10 @@ local ENCHANT_RARITY_COLORS = {
 -- Rarities not obtainable by normal means — hidden in "Show Unowned" mode
 local ENCHANT_RARITY_UNOBTAINABLE = { Mythical = true, Unique = true }
 
+-- HP colour bands: 0-33% red, 34-66% orange, 67-100% green (hp = the whole-number % shown)
 local function GetHealthColor(hp)
     if hp >= 67 then return Color3.fromRGB(80, 220, 100) end
-    if hp >= 33 then return Color3.fromRGB(255, 180, 40) end
+    if hp >= 34 then return Color3.fromRGB(245, 150, 45) end
     return Color3.fromRGB(255, 60, 60)
 end
 
@@ -4581,7 +4582,7 @@ end
 -- ============================================================
 -- SLIM HUD BARS (v8.5): personal health + ODM gas
 -- Text sits INSIDE the bar, centred on its middle line (Matcha's Text.Center centres vertically
--- too), white with a thin outline, on a black track. Health fills green/yellow/red or a gradient;
+-- too), white with a thin outline, on a black track. Health fills red/orange/green or a gradient;
 -- gas fills with a gradient. Gradients are 2-5 colour stops, empty end first (Style -> Gradient
 -- Editor). Size, text and the rest are per bar in GUI.BarStyle (Style tab). Drag either bar; the
 -- spot is saved with the config. Values refresh IN PLACE, so the bars never blink.
@@ -4601,13 +4602,16 @@ do
     -- Gradient stops {r,g,b}, empty end FIRST. Presets: the built-ins plus any you save (config).
     GUI.Grad = GUI.Grad or {
         gas = { { 45, 125, 255 }, { 170, 80, 255 } },
-        hp  = { { 225, 70, 60 }, { 235, 190, 70 }, { 90, 200, 120 } },
+        hp  = { { 225, 70, 60 }, { 245, 150, 45 }, { 90, 200, 120 } },
         presets = {},
     }
 
+    -- "Health Colors" fill: 0-33% red, 34-66% orange, 67-100% green. Banded on the same rounded
+    -- percent the label prints, so the colour can never disagree with the number next to it.
     local function barColor(frac)
-        if frac > 0.5 then return C3(90, 200, 120) end
-        if frac > 0.2 then return C3(235, 190, 70) end
+        local p = math.floor(frac * 100 + 0.5)
+        if p >= 67 then return C3(90, 200, 120) end
+        if p >= 34 then return C3(245, 150, 45) end
         return C3(225, 70, 60)
     end
 
@@ -12086,7 +12090,9 @@ end)()
     local Lib
     do
         local UI_URLS = {
-            "https://raw.githubusercontent.com/cardstackdkme/Vrrrrr/main/uilib.lua",          -- forked
+            -- Requiem's own copy (adds the sortable colour list, preset chips and icon buttons)
+            "https://raw.githubusercontent.com/cardstackdkme/Realquick/main/uilib.lua",
+            "https://raw.githubusercontent.com/cardstackdkme/Vrrrrr/main/uilib.lua",          -- Verfall's fork (fallback)
             "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua",  -- upstream fallback
         }
         local lastBody
@@ -12406,153 +12412,309 @@ end)()
         if secHB then
             secHB:Dropdown("Fill", GUI.BarStyle.hp.fill or "Health Colors", { "Health Colors", "Gradient" }, false, function(v)
                 GUI.SetBarStyle("hp", "fill", ddVal(v) == "Gradient" and "Gradient" or "Health Colors")
-            end)
+            end):Tooltip("Health Colors: red to 33%, orange to 66%, green above. Gradient: the Health Gradient below")
         end
         barSection("Gas Bar", "gas", "Right")
 
         -- ---------- bar gradients ----------
-        -- The lib's own colour pickers, one per stop (2-5), empty end first. "+"/"-" really add and
-        -- remove rows: each section's item list (sec._section.items) is what the lib draws every
-        -- frame, so it is rebuilt as [colour rows 1..n, then the controls]. The rows are noSave: the
-        -- gradient lives in RQConfig, saved by itself a second after each change, so the lib's own
-        -- config can never restore a stale colour over it.
-        local BUILTIN = {
-            { name = "Purple Blue", stops = { { 45, 125, 255 }, { 170, 80, 255 } } },
-            { name = "Health",      stops = { { 225, 70, 60 }, { 235, 190, 70 }, { 90, 200, 120 } } },
-            { name = "Sunset",      stops = { { 110, 40, 190 }, { 240, 70, 120 }, { 255, 170, 60 } } },
-            { name = "Ocean",       stops = { { 0, 60, 140 }, { 0, 150, 200 }, { 110, 235, 255 } } },
-            { name = "Mint",        stops = { { 15, 120, 105 }, { 70, 210, 160 }, { 185, 255, 210 } } },
-            { name = "Fire",        stops = { { 120, 10, 10 }, { 230, 60, 20 }, { 255, 205, 50 } } },
-            { name = "Aurora",      stops = { { 40, 90, 255 }, { 80, 215, 200 }, { 165, 255, 120 }, { 235, 115, 255 } } },
-            { name = "Rainbow",     stops = { { 255, 60, 60 }, { 255, 190, 50 }, { 80, 220, 100 }, { 60, 150, 255 }, { 180, 90, 255 } } },
-        }
-        local function copyStops(s)
-            local o = {}
-            for i, c in ipairs(s) do o[i] = { c[1], c[2], c[3] } end
-            return o
-        end
-        -- Color3 .R/.G/.B are 0-1 on some Matcha builds and 0-255 on others: accept both.
-        local function rgbOf(c)
-            local r, g, b = 0, 0, 0
-            pcall(function() r, g, b = c.R, c.G, c.B end)
-            r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
-            if r <= 1 and g <= 1 and b <= 1 then r, g, b = r * 255, g * 255, b * 255 end
-            local function q(x) return math.max(0, math.min(255, math.floor(x + 0.5))) end
-            return q(r), q(g), q(b)
-        end
-        local function saveSoon()
-            GUI._gradSaveAt = os.clock() + 1
-            if GUI._gradSaving then return end
-            GUI._gradSaving = true
-            task.spawn(function()
-                while os.clock() < (GUI._gradSaveAt or 0) do task.wait(0.25) end
-                GUI._gradSaving = false
-                pcall(saveConfig)
-            end)
-        end
-        local function presetNames()
-            local n = {}
-            for _, p in ipairs(BUILTIN) do n[#n + 1] = p.name end
-            for _, p in ipairs(GUI.Grad.presets or {}) do n[#n + 1] = p.name end
-            return n
-        end
-        local function findPreset(name)
-            for _, p in ipairs(BUILTIN) do if p.name == name then return p, false end end
-            for i, p in ipairs(GUI.Grad.presets or {}) do if p.name == name then return p, true, i end end
-            return nil
-        end
-        local dropdowns = {}   -- both bars' preset dropdowns: a saved preset shows up in both
-
-        local function gradSection(which, title, side)
-            if not (GUI.Grad and GUI.Grad[which] and GUI.GradAt) then return end
-            local sec = tab:Section(title, side, "2-5 colours, left = empty end")
-            local rows, applying = {}, false
-            local ctl = {}
-            local function stops() return GUI.Grad[which] end
-            local function refresh()
-                local list = {}
-                for i = 1, #stops() do list[#list + 1] = rows[i].item end
-                for _, c in ipairs(ctl) do list[#list + 1] = c.item end
-                pcall(function() sec._section.items = list end)
+        -- Requiem's copy of the UI lib (Realquick/uilib.lua) has a sortable colour list: drag the
+        -- three lines to reorder, x removes a colour, "Add colour" adds one and opens its picker, and
+        -- undo / redo / reverse sit right of the live preview. Presets are gradient chips (click =
+        -- use, x on your own = delete, + = save the current colours). If an older copy of the lib
+        -- loaded (the fallbacks), the classic colour rows + buttons below are used instead.
+        -- Either way the gradient lives in RQConfig, saved a second after each change; the rows are
+        -- noSave so the lib's own config can never restore a stale colour over it.
+        do
+            local BUILTIN = {
+                { name = "Purple Blue", stops = { { 45, 125, 255 }, { 170, 80, 255 } } },
+                { name = "Health",      stops = { { 225, 70, 60 }, { 245, 150, 45 }, { 90, 200, 120 } } },
+                { name = "Sunset",      stops = { { 110, 40, 190 }, { 240, 70, 120 }, { 255, 170, 60 } } },
+                { name = "Ocean",       stops = { { 0, 60, 140 }, { 0, 150, 200 }, { 110, 235, 255 } } },
+                { name = "Mint",        stops = { { 15, 120, 105 }, { 70, 210, 160 }, { 185, 255, 210 } } },
+                { name = "Fire",        stops = { { 120, 10, 10 }, { 230, 60, 20 }, { 255, 205, 50 } } },
+                { name = "Aurora",      stops = { { 40, 90, 255 }, { 80, 215, 200 }, { 165, 255, 120 }, { 235, 115, 255 } } },
+                { name = "Rainbow",     stops = { { 255, 60, 60 }, { 255, 190, 50 }, { 80, 220, 100 }, { 60, 150, 255 }, { 180, 90, 255 } } },
+            }
+            local function copyStops(s)
+                local o = {}
+                for i, c in ipairs(s) do o[i] = { c[1], c[2], c[3] } end
+                return o
             end
-            local function changed()
-                if GUI.RecolorBars then GUI.RecolorBars() end
-                saveSoon()
+            -- Color3 .R/.G/.B are 0-1 on some Matcha builds and 0-255 on others: accept both.
+            local function rgbOf(c)
+                local r, g, b = 0, 0, 0
+                pcall(function() r, g, b = c.R, c.G, c.B end)
+                r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+                if r <= 1 and g <= 1 and b <= 1 then r, g, b = r * 255, g * 255, b * 255 end
+                local function q(x) return math.max(0, math.min(255, math.floor(x + 0.5))) end
+                return q(r), q(g), q(b)
             end
-            for i = 1, 5 do
-                local c = stops()[i] or stops()[#stops()]
-                rows[i] = sec:Colorpicker("Colour " .. i, Color3.fromRGB(c[1], c[2], c[3]), function(v)
-                    if applying then return end
-                    local s = stops()
-                    if i > #s then return end
-                    local r, g, b = rgbOf(v)
-                    s[i] = { r, g, b }
-                    changed()
+            local function toC3(stops)
+                local o = {}
+                for i, c in ipairs(stops) do o[i] = Color3.fromRGB(c[1], c[2], c[3]) end
+                return o
+            end
+            local function fromC3(cols)
+                local o = {}
+                for i, c in ipairs(cols) do local r, g, b = rgbOf(c); o[i] = { r, g, b } end
+                return o
+            end
+            local function sameStops(a, b)
+                if #a ~= #b then return false end
+                for i = 1, #a do
+                    for k = 1, 3 do if a[i][k] ~= b[i][k] then return false end end
+                end
+                return true
+            end
+            -- the HUD bar's own blend (linear light), so the previews and chips match the bars exactly.
+            -- The lib passes the same colour list for every strip of one redraw: convert it once.
+            local memoCols, memoStops
+            local function sample(cols, t)
+                if cols ~= memoCols then memoCols, memoStops = cols, fromC3(cols) end
+                local r, g, b = GUI.GradAt(memoStops, t)
+                return Color3.fromRGB(r, g, b)
+            end
+            local function saveSoon()
+                GUI._gradSaveAt = os.clock() + 1
+                if GUI._gradSaving then return end
+                GUI._gradSaving = true
+                task.spawn(function()
+                    while os.clock() < (GUI._gradSaveAt or 0) do task.wait(0.25) end
+                    GUI._gradSaving = false
+                    pcall(saveConfig)
                 end)
-                pcall(function() rows[i].item.noSave = true end)
             end
-            -- set every visible row from the stops without each Set echoing back as an edit
-            local function syncRows()
-                applying = true
-                for i, c in ipairs(stops()) do pcall(function() rows[i]:Set(Color3.fromRGB(c[1], c[2], c[3])) end) end
-                applying = false
+            local function presetNames()
+                local n = {}
+                for _, p in ipairs(BUILTIN) do n[#n + 1] = p.name end
+                for _, p in ipairs(GUI.Grad.presets or {}) do n[#n + 1] = p.name end
+                return n
+            end
+            local function findPreset(name)
+                for _, p in ipairs(BUILTIN) do if p.name == name then return p, false end end
+                for i, p in ipairs(GUI.Grad.presets or {}) do if p.name == name then return p, true, i end end
+                return nil
+            end
+            -- chip i = built-ins first, then yours (second return = index in GUI.Grad.presets)
+            local function presetAt(i)
+                if i <= #BUILTIN then return BUILTIN[i], nil end
+                local ci = i - #BUILTIN
+                return (GUI.Grad.presets or {})[ci], ci
+            end
+            local function matchIndex(stops)
+                for i = 1, #BUILTIN + #(GUI.Grad.presets or {}) do
+                    local p = presetAt(i)
+                    if p and sameStops(p.stops, stops) then return i end
+                end
+                return nil
+            end
+            local function presetItems()
+                local o = {}
+                for _, p in ipairs(BUILTIN) do o[#o + 1] = { name = p.name, colors = toC3(p.stops) } end
+                for _, p in ipairs(GUI.Grad.presets or {}) do o[#o + 1] = { name = p.name, colors = toC3(p.stops), removable = true } end
+                return o
+            end
+            local swatchSets = {}   -- both bars' chip rows: a saved preset shows up in both
+            local function refreshSwatches()
+                local items = presetItems()
+                for _, s in ipairs(swatchSets) do
+                    pcall(function() s.h:SetItems(items); s.h:SetSelected(matchIndex(GUI.Grad[s.which])) end)
+                end
+            end
+
+            local function gradModern(sec, which, title)
+                local undo, redo = {}, {}
+                local cur = copyStops(GUI.Grad[which])
+                local lastEdit                 -- picker drags on one colour fold into ONE undo step
+                local list, sw
+                local function sync()
+                    pcall(function()
+                        list:SetToolEnabled("undo", #undo > 0)
+                        list:SetToolEnabled("redo", #redo > 0)
+                    end)
+                    pcall(function() sw:SetSelected(matchIndex(GUI.Grad[which])) end)
+                end
+                -- every change lands here; push = remember the colours from before it, for undo
+                local function apply(stops, push)
+                    if push then
+                        undo[#undo + 1] = cur
+                        if #undo > 40 then table.remove(undo, 1) end
+                        redo = {}
+                    end
+                    GUI.Grad[which] = copyStops(stops)
+                    cur = copyStops(stops)
+                    if GUI.RecolorBars then GUI.RecolorBars() end
+                    saveSoon()
+                    sync()
+                end
+                -- a change from outside the list (undo, redo, reverse, a preset) redraws the rows too
+                local function replace(stops, push)
+                    lastEdit = nil
+                    apply(stops, push)
+                    pcall(function() list:SetColors(toC3(stops)) end)
+                end
+                list = sec:ColorList(title, toC3(GUI.Grad[which]), function(cols, why, idx)
+                    -- the picker calls back every frame while you drag in it: one step per colour,
+                    -- until you leave it alone for 1.5s or touch something else
+                    local now = os.clock()
+                    local merge = why == "edit" and lastEdit ~= nil and lastEdit.idx == idx and now - lastEdit.t < 1.5
+                    lastEdit = (why == "edit") and { idx = idx, t = now } or nil
+                    apply(fromC3(cols), not merge)
+                end, {
+                    min = 2, max = 5, sample = sample, prefix = "Colour", addText = "Add colour",
+                    tools = {
+                        { icon = "undo", tooltip = "undo", enabled = false, callback = function()
+                            if #undo == 0 then return end
+                            redo[#redo + 1] = cur
+                            replace(table.remove(undo), false)
+                        end },
+                        { icon = "redo", tooltip = "redo", enabled = false, callback = function()
+                            if #redo == 0 then return end
+                            undo[#undo + 1] = cur
+                            replace(table.remove(redo), false)
+                        end },
+                        { icon = "reverse", tooltip = "reverse the colours", callback = function()
+                            local s, o = GUI.Grad[which], {}
+                            for i = #s, 1, -1 do o[#o + 1] = { s[i][1], s[i][2], s[i][3] } end
+                            replace(o, true)
+                        end },
+                    },
+                })
+                sw = sec:Swatches("Presets", presetItems(), {
+                    sample = sample,
+                    addTip = "save these colours as a preset",
+                    onPick = function(i)
+                        local p = presetAt(i)
+                        if p and not sameStops(p.stops, GUI.Grad[which]) then replace(p.stops, true) end
+                    end,
+                    onRemove = function(i)
+                        local p, ci = presetAt(i)
+                        if not (p and ci) then return end
+                        table.remove(GUI.Grad.presets, ci)
+                        pcall(saveConfig)
+                        refreshSwatches()
+                        pcall(uiNotify, "Presets", "Deleted " .. p.name, 3)
+                    end,
+                    onAdd = function()
+                        GUI.Grad.presets = GUI.Grad.presets or {}
+                        local have = matchIndex(GUI.Grad[which])
+                        if have then pcall(uiNotify, "Presets", "Already saved as " .. presetAt(have).name, 3); return end
+                        if #GUI.Grad.presets >= 8 then pcall(uiNotify, "Presets", "8 saved presets is the most - delete one first", 4); return end
+                        local n = 1
+                        while findPreset("Custom " .. n) do n = n + 1 end
+                        table.insert(GUI.Grad.presets, { name = "Custom " .. n, stops = copyStops(GUI.Grad[which]) })
+                        pcall(saveConfig)
+                        refreshSwatches()
+                        pcall(uiNotify, "Presets", "Saved as Custom " .. n, 3)
+                    end,
+                })
+                swatchSets[#swatchSets + 1] = { h = sw, which = which }
+                sync()
+            end
+
+            -- classic version (older lib): one colour picker per stop, "+"/"-" really add and remove
+            -- rows (sec._section.items is what the lib draws every frame), preset dropdown + buttons
+            local dropdowns = {}   -- both bars' preset dropdowns: a saved preset shows up in both
+            local function gradClassic(sec, which, title)
+                local rows, applying = {}, false
+                local ctl = {}
+                local function stops() return GUI.Grad[which] end
+                local function refresh()
+                    local list = {}
+                    for i = 1, #stops() do list[#list + 1] = rows[i].item end
+                    for _, c in ipairs(ctl) do list[#list + 1] = c.item end
+                    pcall(function() sec._section.items = list end)
+                end
+                local function changed()
+                    if GUI.RecolorBars then GUI.RecolorBars() end
+                    saveSoon()
+                end
+                for i = 1, 5 do
+                    local c = stops()[i] or stops()[#stops()]
+                    rows[i] = sec:Colorpicker("Colour " .. i, Color3.fromRGB(c[1], c[2], c[3]), function(v)
+                        if applying then return end
+                        local s = stops()
+                        if i > #s then return end
+                        local r, g, b = rgbOf(v)
+                        s[i] = { r, g, b }
+                        changed()
+                    end)
+                    pcall(function() rows[i].item.noSave = true end)
+                end
+                -- set every visible row from the stops without each Set echoing back as an edit
+                local function syncRows()
+                    applying = true
+                    for i, c in ipairs(stops()) do pcall(function() rows[i]:Set(Color3.fromRGB(c[1], c[2], c[3])) end) end
+                    applying = false
+                    refresh()
+                    changed()
+                end
+                local dd = sec:Dropdown("Preset", "", presetNames(), false, function(v)
+                    local p = findPreset(ddVal(v))
+                    if not p then return end
+                    GUI.Grad[which] = copyStops(p.stops)
+                    syncRows()
+                end)
+                pcall(function() dd.item.noSave = true end)
+                dropdowns[#dropdowns + 1] = dd
+                ctl[#ctl + 1] = dd
+                ctl[#ctl + 1] = sec:Button("+ Add Colour", function()
+                    local s = stops()
+                    if #s >= 5 then pcall(uiNotify, title, "5 colours is the most", 3); return end
+                    local last = s[#s]
+                    s[#s + 1] = { last[1], last[2], last[3] }   -- starts as a copy of the end colour
+                    syncRows()
+                end)
+                ctl[#ctl + 1] = sec:Button("- Remove Colour", function()
+                    local s = stops()
+                    if #s <= 2 then pcall(uiNotify, title, "A gradient needs 2 colours", 3); return end
+                    s[#s] = nil
+                    syncRows()
+                end)
+                ctl[#ctl + 1] = sec:Button("Reverse", function()
+                    local s, o = stops(), {}
+                    for i = #s, 1, -1 do o[#o + 1] = s[i] end
+                    GUI.Grad[which] = o
+                    syncRows()
+                end)
+                ctl[#ctl + 1] = sec:Button("Save as Preset", function()
+                    GUI.Grad.presets = GUI.Grad.presets or {}
+                    if #GUI.Grad.presets >= 8 then pcall(uiNotify, "Presets", "8 saved presets is the most - delete one first", 4); return end
+                    local n = 1
+                    while findPreset("Custom " .. n) do n = n + 1 end
+                    local name = "Custom " .. n
+                    table.insert(GUI.Grad.presets, { name = name, stops = copyStops(stops()) })
+                    for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
+                    pcall(saveConfig)
+                    pcall(uiNotify, "Presets", "Saved as " .. name, 3)
+                end)
+                ctl[#ctl + 1] = sec:Button("Delete Preset", function()
+                    local name = ""
+                    pcall(function() name = ddVal(dd:Get()) end)
+                    local p, custom, idx = findPreset(name)
+                    if not p then pcall(uiNotify, "Presets", "Pick a saved preset in the list first", 3); return end
+                    if not custom then pcall(uiNotify, "Presets", "Built-in presets can't be deleted", 3); return end
+                    table.remove(GUI.Grad.presets, idx)
+                    for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
+                    pcall(saveConfig)
+                    pcall(uiNotify, "Presets", "Deleted " .. name, 3)
+                end)
                 refresh()
-                changed()
             end
-            local dd = sec:Dropdown("Preset", "", presetNames(), false, function(v)
-                local p = findPreset(ddVal(v))
-                if not p then return end
-                GUI.Grad[which] = copyStops(p.stops)
-                syncRows()
-            end)
-            pcall(function() dd.item.noSave = true end)
-            dropdowns[#dropdowns + 1] = dd
-            ctl[#ctl + 1] = dd
-            ctl[#ctl + 1] = sec:Button("+ Add Colour", function()
-                local s = stops()
-                if #s >= 5 then pcall(uiNotify, title, "5 colours is the most", 3); return end
-                local last = s[#s]
-                s[#s + 1] = { last[1], last[2], last[3] }   -- starts as a copy of the end colour
-                syncRows()
-            end)
-            ctl[#ctl + 1] = sec:Button("- Remove Colour", function()
-                local s = stops()
-                if #s <= 2 then pcall(uiNotify, title, "A gradient needs 2 colours", 3); return end
-                s[#s] = nil
-                syncRows()
-            end)
-            ctl[#ctl + 1] = sec:Button("Reverse", function()
-                local s, o = stops(), {}
-                for i = #s, 1, -1 do o[#o + 1] = s[i] end
-                GUI.Grad[which] = o
-                syncRows()
-            end)
-            ctl[#ctl + 1] = sec:Button("Save as Preset", function()
-                GUI.Grad.presets = GUI.Grad.presets or {}
-                if #GUI.Grad.presets >= 8 then pcall(uiNotify, "Presets", "8 saved presets is the most - delete one first", 4); return end
-                local n = 1
-                while findPreset("Custom " .. n) do n = n + 1 end
-                local name = "Custom " .. n
-                table.insert(GUI.Grad.presets, { name = name, stops = copyStops(stops()) })
-                for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
-                pcall(saveConfig)
-                pcall(uiNotify, "Presets", "Saved as " .. name, 3)
-            end)
-            ctl[#ctl + 1] = sec:Button("Delete Preset", function()
-                local name = ""
-                pcall(function() name = ddVal(dd:Get()) end)
-                local p, custom, idx = findPreset(name)
-                if not p then pcall(uiNotify, "Presets", "Pick a saved preset in the list first", 3); return end
-                if not custom then pcall(uiNotify, "Presets", "Built-in presets can't be deleted", 3); return end
-                table.remove(GUI.Grad.presets, idx)
-                for _, d in ipairs(dropdowns) do pcall(function() d:UpdateChoices(presetNames()) end) end
-                pcall(saveConfig)
-                pcall(uiNotify, "Presets", "Deleted " .. name, 3)
-            end)
-            refresh()
+
+            local function gradSection(which, title, side)
+                if not (GUI.Grad and GUI.Grad[which] and GUI.GradAt) then return end
+                local sec = tab:Section(title, side, "drag to reorder, top = empty end")
+                if sec.ColorList and sec.Swatches then
+                    gradModern(sec, which, title)
+                else
+                    pcall(function() sec._section.desc = "2-5 colours, left = empty end" end)
+                    gradClassic(sec, which, title)
+                end
+            end
+            gradSection("hp", "Health Gradient", "Left")
+            gradSection("gas", "Gas Gradient", "Right")
         end
-        gradSection("hp", "Health Gradient", "Left")
-        gradSection("gas", "Gas Gradient", "Right")
     end)
 
     -- ===== Tab: Tools =====
