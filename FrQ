@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.2"
+GUI.Version = "v8.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3813,6 +3813,11 @@ local function InputLoop()
             local gDown = ismouse1pressed()
             local glh = GUI.SlimLabelH or 0
             local onGas = IsInside(gmx, gmy, GUI.GasBarX, GUI.GasBarY - glh, GUI.GasBarW, GUI.GasBarH + glh)
+            -- Is the menu window on screen? Same test as agMenuOpen (defined further down): the fork
+            -- rebuilds _G.RQGeo every frame it renders, so a table that stopped changing = minimised.
+            local geo = _G.RQGeo
+            if geo ~= GUI._gasGeoRef then GUI._gasGeoRef, GUI._gasGeoAt = geo, os.clock() end
+            local menuOpen = type(geo) == "table" and geo.open == true and (os.clock() - (GUI._gasGeoAt or 0)) <= 0.25
 
             if GUI.GasBarDragging then
                 if gDown then
@@ -3833,10 +3838,15 @@ local function InputLoop()
                     end
                 else
                     GUI.GasBarDragging = false
+                    -- Pressed and released without moving it, with the menu open = a click: find
+                    -- the gas. Menu-only, so a combat click that lands on the bar never sweeps.
+                    local moved = math.abs(gmx - (GUI.GasBarPressX or gmx)) + math.abs(gmy - (GUI.GasBarPressY or gmy))
+                    if moved <= 3 and menuOpen and GUI.FindGas then GUI.FindGas() end
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
                    and not GUI.HealthBarDragging then
                 GUI.GasBarDragging = true
+                GUI.GasBarPressX, GUI.GasBarPressY = gmx, gmy
                 GUI.GasBarDragOX = gmx - GUI.GasBarX
                 GUI.GasBarDragOY = gmy - GUI.GasBarY
             end
@@ -3846,7 +3856,7 @@ local function InputLoop()
             local gnow = os.clock()
             if gnow - (GUI._gbRefreshAt or 0) >= 1 / 30 then
                 GUI._gbRefreshAt = gnow
-                UpdateGasBar()
+                UpdateGasBar(true)   -- the ONLY caller allowed to run the (requested) sweep
             end
         end
 
@@ -4672,9 +4682,30 @@ do
     -- on every equip: { gas = <left>, maxGas = 800, gasConsumption = 6, gasBoostingConsumption = 12,
     -- ... } (live 2026-11-09). One getgc finds it, then the two numbers are read straight from
     -- memory. (The old source, the gaspack's Amount/MaxAmount attributes, is a different tank.)
+    --
+    -- ⚠ v8.2 FROZE MATCHA ON LOAD. One getgc sweeps the game's whole Lua heap: 10+ s in Requiem,
+    -- during which Matcha does nothing else, so Windows flags it "Not responding". v8.2 swept by
+    -- itself the moment a saved "Gas Bar = on" was restored, inside loadConfig. Rules now:
+    --   * the sweep runs ONLY when asked: a click on the bar (menu open) or Tools -> Find Gas, or
+    --     after a respawn when "Auto-find After Respawn" is on (off by default);
+    --   * it runs ONLY from InputLoop (UpdateGasBar(true)), never from a build/toggle/load path, and
+    --     only after one tick of "finding..." plus a notice, so you know why Matcha paused;
+    --   * no retry loop: a sweep that finds nothing waits for the next request.
     local NODE_SPAN = 2048   -- a 64-slot hash part (32-byte slots): every field of the table is inside
-    local ODM = { cands = {}, nextScan = 0, backoff = 3, char = nil, prev = nil, status = "searching..." }
+    -- find: nil = idle, "asked" = requested (shows "finding..."), "go" = sweep on the next loop tick
+    local ODM = { cands = {}, char = nil, prev = nil, find = nil, findAt = 0, status = "click to find" }
     GUI.ODMGas = ODM
+    -- An explicit request always searches again, even while a table is shown (a stale value is the
+    -- usual reason to ask), so a request can never sit pending and fire later by surprise.
+    GUI.FindGas = function()
+        if not GUI.GasBarVisible then
+            pcall(uiNotify, "Gas Bar", "Turn on Gas Bar first", 4)
+            return
+        end
+        if ODM.find ~= nil then return end
+        ODM.cands, ODM.active = {}, nil
+        ODM.find, ODM.findAt = "asked", 0
+    end
 
     local function num(kind, a)
         local ok, v = pcall(memory_read, kind, a)
@@ -4753,21 +4784,24 @@ do
         return best
     end
 
-    -- (gas, maxGas), or (nil, status). A scan is announced one call BEFORE it runs, so the label
-    -- says "searching..." while getgc holds the VM.
-    local function readODM()
+    -- (gas, maxGas), or (nil, status). `canScan` is true ONLY from InputLoop; every other caller
+    -- (build, toggle, loadConfig) just reads, so a sweep can never run during load.
+    local function readODM(canScan)
         if type(getgc) ~= "function" or type(memory_read) ~= "function" then return nil, "unavailable" end
         local now = os.clock()
         local ch = charAddr()
-        if ch ~= ODM.char then              -- respawned: the gear table is rebuilt
-            local first = not ODM.charSeen   -- the first read is not a respawn: search at once
+        if ch ~= ODM.char then
+            local first = not ODM.charSeen
             ODM.charSeen = true
             ODM.char = ch
-            if ODM.active then ODM.prev = ODM.active.gas.a end
-            ODM.cands, ODM.active, ODM.backoff = {}, nil, 3
-            ODM.nextScan = first and now or now + 2
-            ODM.status, ODM.announced = "searching...", false
+            if not first then                -- respawned: the gear table is rebuilt
+                if ODM.active then ODM.prev = ODM.active.gas.a end
+                ODM.cands, ODM.active = {}, nil
+                ODM.status = "respawned - click to find"
+                if GUI.GasAutoFind and ODM.foundOnce then ODM.find, ODM.findAt = "asked", now + 3 end
+            end
         end
+        local had = #ODM.cands > 0
         local keep = {}
         for _, c in ipairs(ODM.cands) do
             if slotOK(c.gas) and slotOK(c.max) then
@@ -4778,21 +4812,29 @@ do
             end
         end
         ODM.cands = keep
+        if had and #keep == 0 then           -- the table was freed (unequipped, rebuilt)
+            ODM.status = "gear changed - click to find"
+            if GUI.GasAutoFind and ODM.find == nil then ODM.find, ODM.findAt = "asked", now + 3 end
+        end
         if #keep == 0 then
-            if now < ODM.nextScan then return nil, ODM.status end
-            if not ODM.announced then
-                ODM.announced = true
-                return nil, "searching..."
-            end
-            ODM.announced = false
-            ODM.cands = scan()
-            if #ODM.cands == 0 then
-                ODM.nextScan = os.clock() + ODM.backoff
-                ODM.backoff = math.min(ODM.backoff * 2, 30)
-                ODM.status = "-- (no gear)"
+            if ODM.find == "go" and canScan then
+                ODM.find = nil
+                ODM.cands = scan()
+                if #ODM.cands == 0 then
+                    ODM.status = "no gear found - click to retry"
+                    return nil, ODM.status
+                end
+                ODM.foundOnce = true
+            elseif ODM.find ~= nil and now >= ODM.findAt then
+                -- one tick of "finding..." (and a notice) BEFORE the sweep holds Matcha
+                if canScan and ODM.find == "asked" then
+                    ODM.find = "go"
+                    pcall(uiNotify, "Gas Bar", "Finding your gear - Matcha pauses for about 10 seconds", 6)
+                end
+                return nil, "finding..."
+            else
                 return nil, ODM.status
             end
-            ODM.backoff = 3
         end
         ODM.active = pick()
         local c = ODM.active
@@ -4809,12 +4851,13 @@ do
             GUI.GasBarX, GUI.GasBarY = defaultPos("gas", GUI.GasBarW)
         end
         GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements)
-        UpdateGasBar()
+        UpdateGasBar()          -- read only: never sweeps (this runs during load and from toggles)
     end
-    UpdateGasBar = function()
+    -- canScan: pass true ONLY from InputLoop
+    UpdateGasBar = function(canScan)
         local h = GUI.GasBarHandle
         if not (GUI.GasBarVisible and h) then return end
-        local g, m = readODM()
+        local g, m = readODM(canScan == true)
         if g then
             update(h, "GAS", g, m, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH)
         else
@@ -12271,7 +12314,12 @@ end)()
         end):Tooltip("your health as a slim bar. Drag its label or bar to move it; the spot is saved")
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
-        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Drag to move; the spot is saved")
+        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Drag to move; the spot is saved. Click the bar (menu open) or Find Gas to find your gear")
+        -- The search sweeps the game's whole Lua heap: Matcha pauses ~10 s. So it never runs by itself.
+        secInd:Button("Find Gas", function() if GUI.FindGas then GUI.FindGas() end end)
+        secInd:Toggle("Auto-find After Respawn", GUI.GasAutoFind == true, function(v)
+            GUI.GasAutoFind = v == true
+        end):Tooltip("after you respawn, find the new gear table by itself. Matcha pauses ~10 s each time, 3 s after you spawn. Off: click the bar or Find Gas")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
         secInd:Toggle("Velocity Indicator", GUI.VeloOpen, function(v) GUI.VeloOpen = v end)
 
