@@ -7100,9 +7100,7 @@ saveConfig = function()
             agPanelY     = GUI.AGPanelY,
             agToggleKey  = GUI.AG and GUI.AG.ToggleKey or GUI.AGToggleKey,
             agCfg        = GUI.AG and {
-                filter = GUI.AG.Filter, retry = GUI.AG.Retry, snap = GUI.AG.Snap,
-                radius = GUI.AG.SnapRadius, strength = GUI.AG.SnapStrength,
-                dpc = GUI.AG.DegPerCount, minChance = GUI.AG.MinChance,
+                filter = GUI.AG.Filter, retry = GUI.AG.Retry, minChance = GUI.AG.MinChance,
             } or GUI.AGCfg,
         },
         ores = oresOn,
@@ -7213,10 +7211,6 @@ loadConfig = function()
             if A then
                 if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then A.Filter = c.filter end
                 if type(c.retry) == "boolean" then A.Retry = c.retry end
-                if type(c.snap) == "boolean" then A.Snap = c.snap end
-                if type(c.radius) == "number" then A.SnapRadius = c.radius end
-                if type(c.strength) == "number" then A.SnapStrength = c.strength end
-                if type(c.dpc) == "number" and c.dpc > 0 then A.DegPerCount = c.dpc end
                 if type(c.minChance) == "number" then A.MinChance = c.minChance end
             end
         end
@@ -10697,10 +10691,6 @@ local AG = {
     Range = 400,           -- the game's base hook range; its spread scales with distance / range
     Filter = "All",        -- "All" | "Actors" | "Players" (Actor ESP's classification)
     Retry = true,          -- a hook that lands on something else is let go and fired again
-    Snap = false,          -- turn the camera toward a target near your aim
-    SnapRadius = 90,       -- pixels from your aim that Snap reaches
-    SnapStrength = 0.45,   -- share of the remaining aim error corrected per tick
-    DegPerCount = nil,     -- camera degrees per mouse count, measured by Calibrate Snap
     -- runtime
     Held = nil, Target = nil, OnAt = 0, PressedAt = -10, Status = "off", Pending = nil, Chance = nil,
     Await = nil, HookPart = nil, Lat = nil, Hooks = 0, Hits = 0, Misses = 0, Presses = {},
@@ -10710,10 +10700,6 @@ do
     if type(c) == "table" then
         if c.filter == "All" or c.filter == "Actors" or c.filter == "Players" then AG.Filter = c.filter end
         if type(c.retry) == "boolean" then AG.Retry = c.retry end
-        if type(c.snap) == "boolean" then AG.Snap = c.snap end
-        if type(c.radius) == "number" then AG.SnapRadius = c.radius end
-        if type(c.strength) == "number" then AG.SnapStrength = c.strength end
-        if type(c.dpc) == "number" and c.dpc > 0 then AG.DegPerCount = c.dpc end
         if type(c.minChance) == "number" then AG.MinChance = c.minChance end
     end
 end
@@ -11011,52 +10997,6 @@ function AGX.ownedBy(part, nm)
     end
     return false
 end
--- Camera degrees per mouse count. Turns the camera by a known amount and back, with the menu
--- closed (an open menu frees the cursor, which then moves instead of the camera).
-function AGX.calibrate()
-    if AGX.calibrating then return end
-    AGX.calibrating = true
-    task.spawn(function()
-        pcall(function() uiNotify("Calibrate Snap", "close the menu and keep the mouse still", 5) end)
-        local t0 = os.clock()
-        while agMenuOpen(os.clock()) and os.clock() - t0 < 10 do task.wait(0.1) end
-        task.wait(0.6)
-        local function yaw()
-            local y = nil
-            pcall(function()
-                local lv = Workspace.CurrentCamera.CFrame.LookVector
-                y = math.deg(math.atan2(-lv.X, -lv.Z))
-            end)
-            return y
-        end
-        local msg
-        local focused = false
-        pcall(function() focused = isrbxactive() and true or false end)
-        if not focused then
-            msg = "Roblox must be focused"
-        else
-            local y0 = yaw()
-            pcall(mousemoverel, 0, 200, 0)
-            task.wait(0.3)
-            local y1 = yaw()
-            pcall(mousemoverel, 0, -200, 0)
-            if not (y0 and y1) then
-                msg = "could not read the camera"
-            else
-                local d = (y1 - y0 + 540) % 360 - 180
-                if math.abs(d) < 0.3 then
-                    msg = "the camera did not turn - is the mouse locked in game?"
-                else
-                    AG.DegPerCount = math.abs(d) / 200
-                    msg = string.format("%.4f degrees per count", AG.DegPerCount)
-                end
-            end
-        end
-        pcall(function() uiNotify("Calibrate Snap", msg, 6) end)
-        AGX.calibrating = false
-    end)
-end
-GUI.AGCalibrate = AGX.calibrate
 
 -- The press gate: on the zone now AND where the cursor will be relative to them when the game
 -- reads it. Judged once per player per zone per tick (the grapple and the trigger both ask).
@@ -11325,11 +11265,10 @@ task.spawn(function()
             -- Best hook among the players nearest the cursor. What counts is where your aim is,
             -- relative to them, when the game reads the key (`lead` from now): flicking ONTO someone
             -- fires on that point alone, so a fast sweep still lands; moving OFF someone needs both
-            -- now and then to hold. Also returns the nearest target's aim error, for Snap.
+            -- now and then to hold.
             local function pickHook()
                 AGX.refreshAssist(now)
                 local best, bestP, bestF, seenP = nil, -1, nil, nil
-                local snapX, snapY, snapD = nil, nil, math.huge
                 local ig = AG.Ignore
                 for i = 1, math.min(3, #near) do
                     local c = near[i]
@@ -11344,38 +11283,11 @@ task.spawn(function()
                             local p = pAt >= pNow and pAt or math.min(pNow, pAt)
                             if p > 0 and (not seenP or p > seenP) then seenP = p end
                             if p >= AG.MinChance and p > bestP then best, bestP, bestF = c.nm, p, f end
-                            local ex, ey = f.cx - px, f.cy - py
-                            local d = math.sqrt(ex * ex + ey * ey)
-                            if d < snapD then snapX, snapY, snapD = ex, ey, d end
                         end
                     end
                 end
                 AG.Chance = seenP
-                return best, bestF, snapX, snapY, snapD
-            end
-            -- Snap: turn toward a target near your aim by a share of the error each tick. In game the
-            -- cursor is locked to the screen centre, so this is a camera turn and needs the measured
-            -- degrees per mouse count (Calibrate Snap); with a free cursor it moves the cursor.
-            local function agSnap(ex, ey, d)
-                if not (AG.Snap and ex) or d > AG.SnapRadius or d < 1 then return end
-                local locked = math.abs(mx - vp.X / 2) < 2 and math.abs(my - vp.Y / 2) < 2
-                local s = AG.SnapStrength
-                local kx, ky
-                if locked then
-                    local dpc = AG.DegPerCount
-                    if not dpc then AG.Status = "Snap needs Calibrate Snap"; return end
-                    kx = math.deg(math.atan(ex / ppK)) / dpc * s
-                    ky = math.deg(math.atan(ey / ppK)) / dpc * s
-                else
-                    kx, ky = ex * s, ey * s
-                end
-                -- whole counts only; the remainder carries into the next tick
-                kx, ky = kx + (AGX.remX or 0), ky + (AGX.remY or 0)
-                local ix = kx >= 0 and math.floor(kx) or math.ceil(kx)
-                local iy = ky >= 0 and math.floor(ky) or math.ceil(ky)
-                ix, iy = math.max(-120, math.min(120, ix)), math.max(-120, math.min(120, iy))
-                AGX.remX, AGX.remY = kx - ix, ky - iy
-                if ix ~= 0 or iy ~= 0 then pcall(mousemoverel, 0, ix, iy) end
+                return best, bestF
             end
             -- Has the game already let go of them? They left, their body was replaced (death,
             -- respawn, slot load), or they shook the hook off. Attribute reads are slow, so those
@@ -11464,17 +11376,14 @@ task.spawn(function()
                 elseif not armed or blocked then
                     AG.Status = blocked or ("hold " .. agKeyName(AG.HoldKey) .. " to use")
                 else
-                    local best, f, sx, sy, sd = pickHook()
+                    local best, f = pickHook()
                     if best and now - AG.PressedAt >= AG.MinGap then
                         agHook(best, f)
+                    elseif AG.Chance then
+                        AG.Status = string.format("aim closer (%d%% < %d%%)",
+                            math.floor(AG.Chance * 100 + 0.5), math.floor(AG.MinChance * 100 + 0.5))
                     else
-                        agSnap(sx, sy, sd)
-                        if AG.Chance then
-                            AG.Status = string.format("aim closer (%d%% < %d%%)",
-                                math.floor(AG.Chance * 100 + 0.5), math.floor(AG.MinChance * 100 + 0.5))
-                        elseif not AG.Status:find("Snap needs", 1, true) then
-                            AG.Status = "armed"
-                        end
+                        AG.Status = "armed"
                     end
                 end
             end
@@ -13732,16 +13641,6 @@ end)()
             end)
             secAG:Toggle("Retry Misses", AG.Retry, function(v) AG.Retry = v == true end)
                 :Tooltip("after each hook it checks what the hook stuck to. If it landed on something other than the target, it lets go and fires again a moment later")
-            secAG:Toggle("Snap", AG.Snap, function(v) AG.Snap = v == true end)
-                :Tooltip("turns your camera toward a target that is near your aim so the hook lands. Run Calibrate Snap once first. Off = it only fires, never moves your view")
-            secAG:Slider("Snap Radius", AG.SnapRadius, 5, 10, 400, "px", function(v)
-                AG.SnapRadius = math.floor(tonumber(v) or AG.SnapRadius)
-            end):Tooltip("how far from your aim (on screen) Snap starts pulling")
-            secAG:Slider("Snap Strength", math.floor(AG.SnapStrength * 100 + 0.5), 5, 5, 100, "%", function(v)
-                local n = tonumber(v)
-                if n then AG.SnapStrength = math.max(0.05, math.min(1, n / 100)) end
-            end):Tooltip("share of the remaining aim error corrected each tick. Higher snaps harder; lower looks smoother")
-            secAG:Button("Calibrate Snap", function() if GUI.AGCalibrate then GUI.AGCalibrate() end end)
             pcall(function()
                 secAG:Keybind("Toggle Key", AG.ToggleKey and toName(AG.ToggleKey) or "", function(k)
                     local vk = toVK(k)
