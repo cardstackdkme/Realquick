@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.16"
+GUI.Version = "v8.17"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12509,14 +12509,15 @@ end)()
             accPick:Tooltip("the menu's and the panels' accent colour. Saved with your config")
         end)
         -- The lib auto-loads its own config a moment after the window is ready, in the background,
-        -- and that file carries an accent of its own. Put Requiem's saved accent back on top of it
-        -- over the first seconds (the newest pick, so a change made meanwhile is kept).
+        -- and that file carries an accent of its own. Put Requiem's saved accent back every frame for
+        -- the first 8 seconds, so that colour never shows for more than one frame (the newest pick,
+        -- so a change made meanwhile is kept).
         task.spawn(function()
-            for _, d in ipairs({ 0.5, 1.5, 3, 6 }) do
-                task.wait(d)
+            local t0 = os.clock()
+            while GUI.Running and os.clock() - t0 < 8 do
                 local sa = GUI.AccentRGB
-                if not GUI.Running then return end
                 if type(sa) == "table" and tonumber(sa[1]) then GUI.SetAccent(Color3.fromRGB(sa[1], sa[2], sa[3])) end
+                task.wait(0.05)
             end
         end)
         -- Both belong inside Appearance: move them to its top and drop the helper section.
