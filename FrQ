@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.1"
+GUI.Version = "v8.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -100,24 +100,25 @@ GUI.PLSearchFocused = false
 GUI.PLWasKeys = {}
 GUI.PowerDouble = false     -- Tools -> Admin -> "Hide admin Panel": hide the staff Editor (windows, top panel, ping pop-ups)
 
--- Personal gas bar (self only, from Tools toggle). Same widget as the health bar.
+-- Personal gas + health bars (self only, Tools -> Indicators). Both are the slim HUD bar: a label
+-- centred above a thin bar. X/Y nil = not placed yet: the first build puts gas centred above the
+-- hotbar and health to its left; after a drag the spot is saved with the config.
 GUI.GasBarVisible = false
 GUI.GasBarElements = {}
-GUI.GasBarX = 20
-GUI.GasBarY = 350
-GUI.GasBarW = 260
-GUI.GasBarH = 40
+GUI.GasBarX = nil
+GUI.GasBarY = nil
+GUI.GasBarW = 240
+GUI.GasBarH = 12
 GUI.GasBarDragging = false
 GUI.GasBarDragOX = 0
 GUI.GasBarDragOY = 0
 
--- Personal health bar (self only, from Tools toggle)
 GUI.HealthBarVisible = false
 GUI.HealthBarElements = {}
-GUI.HealthBarX = 20
-GUI.HealthBarY = 300
-GUI.HealthBarW = 260
-GUI.HealthBarH = 40
+GUI.HealthBarX = nil
+GUI.HealthBarY = nil
+GUI.HealthBarW = 240
+GUI.HealthBarH = 12
 GUI.HealthBarDragging = false
 GUI.HealthBarDragOX = 0
 GUI.HealthBarDragOY = 0
@@ -3765,7 +3766,8 @@ local function InputLoop()
         if GUI.HealthBarVisible and #GUI.HealthBarElements > 0 then
             local mx, my = Mouse.X, Mouse.Y
             local mouseDown = ismouse1pressed()
-            local onBar = IsInside(mx, my, GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH)
+            local lh = GUI.SlimLabelH or 0   -- the label above the bar is a handle too
+            local onBar = IsInside(mx, my, GUI.HealthBarX, GUI.HealthBarY - lh, GUI.HealthBarW, GUI.HealthBarH + lh)
 
             if GUI.HealthBarDragging then
                 if mouseDown then
@@ -3793,11 +3795,12 @@ local function InputLoop()
                 GUI.HealthBarDragOY = my - GUI.HealthBarY
             end
 
-            -- Auto-refresh health bar every ~2s
-            GUI._hbRefreshTimer = (GUI._hbRefreshTimer or 0) + 1
-            if GUI._hbRefreshTimer >= 120 then
-                GUI._hbRefreshTimer = 0
-                BuildHealthBar()
+            -- Refresh IN PLACE 4x a second (the old 2s full rebuild blinked). A few GetAttribute
+            -- reads per refresh, so not every frame.
+            local hnow = os.clock()
+            if hnow - (GUI._hbRefreshAt or 0) >= 0.25 then
+                GUI._hbRefreshAt = hnow
+                if GUI.UpdateHealthBar then GUI.UpdateHealthBar() end
             end
         end
 
@@ -3808,7 +3811,8 @@ local function InputLoop()
         if GUI.GasBarVisible and #GUI.GasBarElements > 0 then
             local gmx, gmy = Mouse.X, Mouse.Y
             local gDown = ismouse1pressed()
-            local onGas = IsInside(gmx, gmy, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH)
+            local glh = GUI.SlimLabelH or 0
+            local onGas = IsInside(gmx, gmy, GUI.GasBarX, GUI.GasBarY - glh, GUI.GasBarW, GUI.GasBarH + glh)
 
             if GUI.GasBarDragging then
                 if gDown then
@@ -3837,12 +3841,11 @@ local function InputLoop()
                 GUI.GasBarDragOY = gmy - GUI.GasBarY
             end
 
-            -- 5s. Was 0.5s, which combined with the old destroy-and-rebuild refresh to produce a
-            -- visible blink twice a second. UpdateGasBar mutates the widget in place, so the
-            -- interval is now purely about how stale the number is allowed to look.
-            GUI._gbRefreshTimer = (GUI._gbRefreshTimer or 0) + 1
-            if GUI._gbRefreshTimer >= 300 then
-                GUI._gbRefreshTimer = 0
+            -- ~30x a second: the ODM gas is two memory reads (getgc only runs when the gear table
+            -- has to be found again), and gas drains continuously while you move.
+            local gnow = os.clock()
+            if gnow - (GUI._gbRefreshAt or 0) >= 1 / 30 then
+                GUI._gbRefreshAt = gnow
                 UpdateGasBar()
             end
         end
@@ -4303,7 +4306,7 @@ local function InputLoop()
         -- duration), and it halves background CPU when the menu is off.
         local interactive = GUI.Visible
             or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
-            or GUI.CounterVisible or GUI.HealthBarVisible
+            or GUI.CounterVisible or GUI.HealthBarVisible or GUI.GasBarVisible
             or GUI.ListeningForKey or GUI.ListeningForPLKey or GUI.ListeningForPEKey or GUI.ListeningForCloseKey
             or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging or GUI.GasBarDragging
             or GUI.PlayerListDragging or GUI.EnchantsDragging or GUI.RSDiffDragging
@@ -4433,6 +4436,7 @@ ClearHealthBar = function()
         pcall(function() el:Remove() end)
     end
     GUI.HealthBarElements = {}
+    GUI.HealthBarHandle = nil   -- the handle points at removed objects; never reuse it
 end
 
 -- Read a player's health and max-health by name. Returns (hp, maxHp).
@@ -4560,22 +4564,6 @@ local function UpdateBarWidget(h, val, maxVal, px, py, pw)
     end)
 end
 
--- Build personal health bar (self only)
-BuildHealthBar = function()
-    ClearHealthBar()
-    if not GUI.HealthBarVisible then return end
-    local hp, maxHp = ReadPlayerHealth(LocalPlayer.Name)
-    DrawHealthBarWidget(GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH,
-        LocalPlayer.Name, hp, maxHp, 55, GUI.HealthBarElements)
-end
-
--- ---------- Gas pack ----------
--- Live-verified path (2026-08-20):
---     Workspace.<playerName>.attachment_Gaspack.Gaspack.Interaction   -- a PART
--- carrying Amount and MaxAmount as NUMBER attributes (measured: 4180.8 / 4400; the part also has
--- Moveable, OriginalSize and Type). The gaspack is an ATTACHMENT model on the character, so it is
--- simply absent when none is worn — every step below is nil-guarded and returns nil in that case,
--- which is what the caller uses to decide whether to draw anything at all.
 ClearGasBar = function()
     for _, el in ipairs(GUI.GasBarElements) do
         pcall(function() el:Remove() end)
@@ -4584,45 +4572,255 @@ ClearGasBar = function()
     GUI.GasBarHandle = nil   -- the handle points at removed objects; never reuse it
 end
 
--- Returns (amount, maxAmount) or nil when no gaspack is worn.
-local function ReadGas(playerName)
-    local ch = Workspace:FindFirstChild(playerName)
-    if not ch then return nil end
-    local att = ch:FindFirstChild("attachment_Gaspack")
-    local pack = att and att:FindFirstChild("Gaspack")
-    local inter = pack and pack:FindFirstChild("Interaction")
-    if not inter then return nil end
-    local a, m
-    pcall(function() a = inter:GetAttribute("Amount") end)
-    pcall(function() m = inter:GetAttribute("MaxAmount") end)
-    a, m = tonumber(a), tonumber(m)
-    if not a then return nil end
-    return a, (m and m > 0) and m or 100
-end
+-- ============================================================
+-- SLIM HUD BARS (v8.2): personal health + ODM gas
+-- One look for both, the same as the standalone GasBar.lua: a label centred above a thin bar,
+-- green > 50%, yellow > 20%, red below. Drag either one by its label or its bar; the spot is saved
+-- with the config. Both refresh IN PLACE (no Remove + rebuild), so neither ever blinks.
+-- Everything lives in this do-block: the main chunk is near Luau's 200-local limit.
+-- ============================================================
+do
+    local LABEL_H = 20                        -- the label sits this far above the bar
+    local FONT = Drawing.Fonts.SystemBold     -- the health bar's font, used for both labels
+    local C3 = Color3.fromRGB
+    GUI.SlimLabelH = LABEL_H                  -- the drag code grabs the label too
 
--- Reuses DrawHealthBarWidget so the gas bar is pixel-identical to the health bar (same shadow,
--- rounded body, accent strip, percent + "n / max" numbers and fill). Only the label and the numbers
--- differ, so there is no second widget to keep in sync.
-BuildGasBar = function()
-    ClearGasBar()
-    if not GUI.GasBarVisible then return end
-    local gas, maxGas = ReadGas(LocalPlayer.Name)
-    -- No pack worn: say so rather than drawing a misleading empty bar.
-    local label = gas and "Gas" or "Gas  (no pack)"
-    GUI.GasBarHandle = DrawHealthBarWidget(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH,
-        label, gas or 0, maxGas or 100, 55, GUI.GasBarElements)
-end
+    local function barColor(frac)
+        if frac > 0.5 then return C3(90, 200, 120) end
+        if frac > 0.2 then return C3(235, 190, 70) end
+        return C3(225, 70, 60)
+    end
 
--- Periodic refresh. Mutates the existing widget rather than rebuilding it, so the bar never blinks.
--- A FULL rebuild happens only when the label itself has to change, i.e. when a gaspack is put on or
--- taken off — that is rare, and it is the one case where the text is not just a number.
-UpdateGasBar = function()
-    local h = GUI.GasBarHandle
-    if not (GUI.GasBarVisible and h) then return end
-    local gas, maxGas = ReadGas(LocalPlayer.Name)
-    local want = gas and "Gas" or "Gas  (no pack)"
-    if h.label ~= want then BuildGasBar(); return end
-    UpdateBarWidget(h, gas or 0, maxGas or 100, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW)
+    -- First build with no saved spot: gas centred above the hotbar, health to its left.
+    local function defaultPos(which, w)
+        local vp = nil
+        pcall(function() vp = Workspace.CurrentCamera.ViewportSize end)
+        local vx, vy = vp and vp.X or 1920, vp and vp.Y or 1080
+        local y = math.floor(vy - 150)
+        if which == "gas" then return math.floor((vx - w) / 2), y end
+        return math.floor(vx / 2 - w - 190), y
+    end
+
+    local function draw(px, py, pw, ph, elems)
+        local function add(o) o.Visible = true; elems[#elems + 1] = o; return o end
+        local function sq(col, z, filled, a)
+            local s = Drawing.new("Square")
+            s.Color = col; s.Filled = filled; s.Transparency = a; s.ZIndex = z
+            s.Corner = 4; s.Thickness = 1
+            return add(s)
+        end
+        local h = {}
+        h.bg = sq(C3(14, 14, 16), 55, true, 0.85)
+        h.fill = sq(C3(90, 200, 120), 56, true, 1)
+        h.border = sq(C3(60, 60, 66), 57, false, 1)
+        local t = Drawing.new("Text")
+        t.Size = 15; t.Outline = true; t.Center = true; t.ZIndex = 58
+        t.Color = C3(235, 235, 235); t.Font = FONT; t.Text = ""
+        h.label = add(t)
+        h.bg.Position, h.bg.Size = Vector2.new(px, py), Vector2.new(pw, ph)
+        h.border.Position, h.border.Size = Vector2.new(px, py), Vector2.new(pw, ph)
+        h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(0, ph - 4)
+        h.label.Position = Vector2.new(px + math.floor(pw / 2), py - LABEL_H)
+        return h
+    end
+
+    -- `status` replaces the numbers (searching, no gear) and hides the fill.
+    local function update(h, title, val, maxVal, px, py, pw, ph, status)
+        if not h then return end
+        pcall(function()
+            if status then
+                h.fill.Visible = false
+                h.label.Text = title .. "  " .. status
+                return
+            end
+            local inf = (maxVal == math.huge)
+            local m = (maxVal and maxVal > 0) and maxVal or 100
+            local frac = inf and 1 or math.max(0, math.min(1, val / m))
+            local fw = math.floor((pw - 4) * frac + 0.5)
+            h.fill.Position, h.fill.Size = Vector2.new(px + 2, py + 2), Vector2.new(fw, ph - 4)
+            h.fill.Color = barColor(frac)
+            h.fill.Visible = fw > 0
+            if inf then
+                h.label.Text = title .. "  INF"
+            else
+                h.label.Text = string.format("%s  %d%%   %d / %d", title, math.floor(frac * 100 + 0.5),
+                    math.floor(val + 0.5), math.floor(m + 0.5))
+            end
+        end)
+    end
+
+    -- ---------- health ----------
+    BuildHealthBar = function()
+        ClearHealthBar()
+        if not GUI.HealthBarVisible then return end
+        if GUI.HealthBarX == nil or GUI.HealthBarY == nil then
+            GUI.HealthBarX, GUI.HealthBarY = defaultPos("hp", GUI.HealthBarW)
+        end
+        GUI.HealthBarHandle = draw(GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH,
+            GUI.HealthBarElements)
+        GUI.UpdateHealthBar()
+    end
+    GUI.UpdateHealthBar = function()
+        local h = GUI.HealthBarHandle
+        if not (GUI.HealthBarVisible and h) then return end
+        local hp, maxHp = ReadPlayerHealth(LocalPlayer.Name)
+        update(h, "HP", hp, maxHp, GUI.HealthBarX, GUI.HealthBarY, GUI.HealthBarW, GUI.HealthBarH)
+    end
+
+    -- ---------- ODM gear gas ----------
+    -- The gas the check-gas monologue reports lives in ClientGearHandler's gear state table, rebuilt
+    -- on every equip: { gas = <left>, maxGas = 800, gasConsumption = 6, gasBoostingConsumption = 12,
+    -- ... } (live 2026-11-09). One getgc finds it, then the two numbers are read straight from
+    -- memory. (The old source, the gaspack's Amount/MaxAmount attributes, is a different tank.)
+    local NODE_SPAN = 2048   -- a 64-slot hash part (32-byte slots): every field of the table is inside
+    local ODM = { cands = {}, nextScan = 0, backoff = 3, char = nil, prev = nil, status = "searching..." }
+    GUI.ODMGas = ODM
+
+    local function num(kind, a)
+        local ok, v = pcall(memory_read, kind, a)
+        if ok and type(v) == "number" and v == v then return v end
+        return nil
+    end
+    local function addrOf(e)
+        local a = e and e.addr
+        if type(a) == "number" then return a end
+        if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+        return nil
+    end
+    -- A slot is [value 8][extra 4][type tag 4][key pointer 8 ...]. It still holds its field while
+    -- the tag says number (3) and the key pointer is the one seen at scan time.
+    local function slotOf(e)
+        local a = addrOf(e)
+        if not a then return nil end
+        local k = num("uint64", a + 16)
+        if not k or k == 0 then return nil end
+        return { a = a, key = k }
+    end
+    local function slotOK(s)
+        return num("int", s.a + 12) == 3 and num("uint64", s.a + 16) == s.key
+    end
+
+    -- Every live gear table: a numeric gasBoostingConsumption with exactly one numeric gas and one
+    -- numeric maxGas in the same hash part. Function-constant look-alikes never have all three.
+    local function scan()
+        local ok, entries = pcall(function() return getgc({ "gasBoostingConsumption", "maxGas", "gas" }) end)
+        if not ok or type(entries) ~= "table" then return {} end
+        local by = { gasBoostingConsumption = {}, maxGas = {}, gas = {} }
+        for _, e in pairs(entries) do
+            if type(e) == "table" and e.type == "number" and by[e.key] then
+                local a = addrOf(e)
+                if a then table.insert(by[e.key], { e = e, a = a }) end
+            end
+        end
+        local found = {}
+        for _, anchor in ipairs(by.gasBoostingConsumption) do
+            local gE, mE, nG, nM = nil, nil, 0, 0
+            for _, r in ipairs(by.gas) do
+                if math.abs(r.a - anchor.a) < NODE_SPAN then gE = r.e; nG = nG + 1 end
+            end
+            for _, r in ipairs(by.maxGas) do
+                if math.abs(r.a - anchor.a) < NODE_SPAN then mE = r.e; nM = nM + 1 end
+            end
+            if nG == 1 and nM == 1 then
+                local g, m = slotOf(gE), slotOf(mE)
+                -- `last` starts at the value seen now, so the very next change already counts
+                if g and m then found[#found + 1] = { gas = g, max = m, last = num("double", g.a), changed = 0 } end
+            end
+        end
+        return found
+    end
+
+    local function charAddr()
+        local a = nil
+        pcall(function()
+            local c = LocalPlayer.Character
+            a = c and tostring(c.Address) or nil
+        end)
+        return a
+    end
+
+    -- After a respawn the old gear table can linger until Lua frees it, holding its last number.
+    -- Several candidates: show the one whose gas moved most recently; while none has moved, prefer
+    -- one that is not the table shown before the respawn (the newer one).
+    local function pick()
+        local best = nil
+        for _, c in ipairs(ODM.cands) do
+            if not best or c.changed > best.changed
+               or (c.changed == best.changed and best.gas.a == ODM.prev and c.gas.a ~= ODM.prev) then
+                best = c
+            end
+        end
+        return best
+    end
+
+    -- (gas, maxGas), or (nil, status). A scan is announced one call BEFORE it runs, so the label
+    -- says "searching..." while getgc holds the VM.
+    local function readODM()
+        if type(getgc) ~= "function" or type(memory_read) ~= "function" then return nil, "unavailable" end
+        local now = os.clock()
+        local ch = charAddr()
+        if ch ~= ODM.char then              -- respawned: the gear table is rebuilt
+            local first = not ODM.charSeen   -- the first read is not a respawn: search at once
+            ODM.charSeen = true
+            ODM.char = ch
+            if ODM.active then ODM.prev = ODM.active.gas.a end
+            ODM.cands, ODM.active, ODM.backoff = {}, nil, 3
+            ODM.nextScan = first and now or now + 2
+            ODM.status, ODM.announced = "searching...", false
+        end
+        local keep = {}
+        for _, c in ipairs(ODM.cands) do
+            if slotOK(c.gas) and slotOK(c.max) then
+                local v = num("double", c.gas.a)
+                if v and c.last and v ~= c.last then c.changed = now end
+                c.last = v
+                keep[#keep + 1] = c
+            end
+        end
+        ODM.cands = keep
+        if #keep == 0 then
+            if now < ODM.nextScan then return nil, ODM.status end
+            if not ODM.announced then
+                ODM.announced = true
+                return nil, "searching..."
+            end
+            ODM.announced = false
+            ODM.cands = scan()
+            if #ODM.cands == 0 then
+                ODM.nextScan = os.clock() + ODM.backoff
+                ODM.backoff = math.min(ODM.backoff * 2, 30)
+                ODM.status = "-- (no gear)"
+                return nil, ODM.status
+            end
+            ODM.backoff = 3
+        end
+        ODM.active = pick()
+        local c = ODM.active
+        if not c then return nil, "--" end
+        local g, m = num("double", c.gas.a), num("double", c.max.a)
+        if g and m and m > 0 then return g, m end
+        return nil, "--"
+    end
+
+    BuildGasBar = function()
+        ClearGasBar()
+        if not GUI.GasBarVisible then return end
+        if GUI.GasBarX == nil or GUI.GasBarY == nil then
+            GUI.GasBarX, GUI.GasBarY = defaultPos("gas", GUI.GasBarW)
+        end
+        GUI.GasBarHandle = draw(GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, GUI.GasBarElements)
+        UpdateGasBar()
+    end
+    UpdateGasBar = function()
+        local h = GUI.GasBarHandle
+        if not (GUI.GasBarVisible and h) then return end
+        local g, m = readODM()
+        if g then
+            update(h, "GAS", g, m, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH)
+        else
+            update(h, "GAS", 0, 1, GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH, m)
+        end
+    end
 end
 
 -- Clear a single monitor bar
@@ -7077,6 +7275,7 @@ saveConfig = function()
             playerEsp    = PLAYER_ESP.Enabled,
             plAutoUpdate = GUI.PLAutoUpdate,
             healthBar    = GUI.HealthBarVisible,
+            gasBar       = GUI.GasBarVisible,
             counter      = GUI.CounterVisible,
             dmgIndicator = GUI.DmgIndicatorEnabled,
             deathLog     = DEATHLOG.Enabled,
@@ -7119,6 +7318,8 @@ saveConfig = function()
         panels = {
             healthBarX  = GUI.HealthBarX,
             healthBarY  = GUI.HealthBarY,
+            gasBarX     = GUI.GasBarX,
+            gasBarY     = GUI.GasBarY,
             counterX    = GUI.CounterX,
             counterY    = GUI.CounterY,
             playerListX = GUI.PlayerListX, playerListY = GUI.PlayerListY, playerListW = GUI.PlayerListW, playerListH = GUI.PlayerListH,
@@ -7182,6 +7383,7 @@ loadConfig = function()
         if type(f.playerEsp)    == "boolean" then PLAYER_ESP.Enabled       = f.playerEsp    end
         if type(f.plAutoUpdate) == "boolean" then GUI.PLAutoUpdate         = f.plAutoUpdate end
         if type(f.healthBar)    == "boolean" then GUI.HealthBarVisible     = f.healthBar    end
+        if type(f.gasBar)       == "boolean" then GUI.GasBarVisible        = f.gasBar       end
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.dmgIndicator) == "boolean" then GUI.DmgIndicatorEnabled  = f.dmgIndicator end
         if type(f.actorEsp)     == "boolean" then ACTOR_ESP.Enabled        = f.actorEsp     end
@@ -7245,6 +7447,8 @@ loadConfig = function()
     if type(data.panels) == "table" then
         if type(data.panels.healthBarX)  == "number" then GUI.HealthBarX  = data.panels.healthBarX  end
         if type(data.panels.healthBarY)  == "number" then GUI.HealthBarY  = data.panels.healthBarY  end
+        if type(data.panels.gasBarX)     == "number" then GUI.GasBarX     = data.panels.gasBarX     end
+        if type(data.panels.gasBarY)     == "number" then GUI.GasBarY     = data.panels.gasBarY     end
         if type(data.panels.counterX)    == "number" then GUI.CounterX    = data.panels.counterX    end
         if type(data.panels.counterY)    == "number" then GUI.CounterY    = data.panels.counterY    end
         if type(data.panels.playerListX) == "number" then GUI.PlayerListX = data.panels.playerListX end
@@ -12064,10 +12268,10 @@ end)()
         local secInd = tab:Section("Indicators", "Right", "On-screen overlays")
         secInd:Toggle("Health Bar", GUI.HealthBarVisible, function(v)
             GUI.HealthBarVisible = v; BuildHealthBar()
-        end)
+        end):Tooltip("your health as a slim bar. Drag its label or bar to move it; the spot is saved")
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
-        end):Tooltip("gaspack Amount / MaxAmount, drag to move - reports no pack when none is worn")
+        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Drag to move; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
         secInd:Toggle("Velocity Indicator", GUI.VeloOpen, function(v) GUI.VeloOpen = v end)
 
