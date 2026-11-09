@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.8"
+GUI.Version = "v8.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7454,6 +7454,8 @@ saveConfig = function()
             playerListX = GUI.PlayerListX, playerListY = GUI.PlayerListY, playerListW = GUI.PlayerListW, playerListH = GUI.PlayerListH,
             enchantsX   = GUI.EnchantsX,   enchantsY   = GUI.EnchantsY,   enchantsW   = GUI.EnchantsW,   enchantsH   = GUI.EnchantsH,
             rsDiffX     = GUI.RSDiffX,     rsDiffY     = GUI.RSDiffY,     rsDiffW     = GUI.RSDiffW,     rsDiffH     = GUI.RSDiffH,
+            veloX       = GUI.VeloX,       veloY       = GUI.VeloY,
+            menu        = GUI.MenuRect and GUI.MenuRect() or nil,
         },
         -- HUD bar gradients (Style -> Health / Gas Gradient): 2-5 {r,g,b} stops each, empty end first,
         -- plus the presets you saved
@@ -7593,6 +7595,9 @@ loadConfig = function()
         if type(data.panels.rsDiffY)     == "number" then GUI.RSDiffY     = data.panels.rsDiffY     end
         if type(data.panels.rsDiffW)     == "number" then GUI.RSDiffW     = math.max(560, data.panels.rsDiffW) end
         if type(data.panels.rsDiffH)     == "number" then GUI.RSDiffH     = math.max(400, data.panels.rsDiffH) end
+        if type(data.panels.veloX)       == "number" then GUI.VeloX       = data.panels.veloX       end
+        if type(data.panels.veloY)       == "number" then GUI.VeloY       = data.panels.veloY       end
+        if type(data.panels.menu)        == "table"  then GUI.LayoutMenu  = data.panels.menu        end
     end
     -- Gradients: a stop list is used only if it is 2-5 {r,g,b} triples; anything else keeps the default.
     if type(data.gradients) == "table" and GUI.Grad then
@@ -7704,6 +7709,92 @@ end
 
 -- Load saved config BEFORE building the menu so the first paint reflects on-disk state
 pcall(loadConfig)
+
+-- Settings > Layout. Every position lives in the config's `panels` section, so the latest save
+-- wins: "Save GUI Positions", Save Config, or a panel saving itself when you let go of it. On GUI
+-- rather than chunk locals: the main chunk is close to Lua's 200-local limit.
+GUI.LayoutKeys = {   -- config key -> GUI field
+    healthBarX = "HealthBarX", healthBarY = "HealthBarY", gasBarX = "GasBarX", gasBarY = "GasBarY",
+    counterX = "CounterX", counterY = "CounterY",
+    playerListX = "PlayerListX", playerListY = "PlayerListY", playerListW = "PlayerListW", playerListH = "PlayerListH",
+    enchantsX = "EnchantsX", enchantsY = "EnchantsY", enchantsW = "EnchantsW", enchantsH = "EnchantsH",
+    rsDiffX = "RSDiffX", rsDiffY = "RSDiffY", rsDiffW = "RSDiffW", rsDiffH = "RSDiffH",
+    veloX = "VeloX", veloY = "VeloY",
+}
+-- The menu window's rect. The lib publishes it as a fresh _G.RQGeo every frame it renders; before
+-- the first frame, keep the spot that was loaded.
+function GUI.MenuRect()
+    local g = _G.RQGeo
+    if type(g) == "table" and tonumber(g.wx) and tonumber(g.wy) then
+        return { x = math.floor(g.wx + 0.5), y = math.floor(g.wy + 0.5), w = tonumber(g.ww), h = tonumber(g.wh) }
+    end
+    return GUI.LayoutMenu
+end
+-- The config file as a table ({} when there is none yet). nil + reason when it exists but cannot be
+-- read, so a positions-only save never replaces a config it could not parse.
+function GUI.ReadConfigFile()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then return nil, "readfile not available" end
+    local exists = false
+    pcall(function() exists = isfile(CONFIG_PATH) end)
+    if not exists then return {} end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(CONFIG_PATH)) end)
+    if not (ok and type(data) == "table") then return nil, "the saved config could not be read" end
+    return data
+end
+function GUI.WriteConfigFile(data)
+    if type(writefile) ~= "function" then return false, "writefile not available" end
+    local ok, err = pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then
+            makefolder(CONFIG_DIR)
+        end
+        writefile(CONFIG_PATH, HttpService:JSONEncode(data))
+    end)
+    return ok, ok and nil or tostring(err)
+end
+-- Positions only: rewrites the config's `panels` section and leaves every other saved setting alone.
+function GUI.SaveLayout()
+    local data, err = GUI.ReadConfigFile()
+    if not data then return false, err end
+    if type(data.panels) ~= "table" then data.panels = {} end
+    for ck, gk in pairs(GUI.LayoutKeys) do
+        if type(GUI[gk]) == "number" then data.panels[ck] = math.floor(GUI[gk] + 0.5) end
+    end
+    data.panels.menu = GUI.MenuRect()
+    return GUI.WriteConfigFile(data)
+end
+function GUI.ClearLayout()
+    GUI.LayoutMenu = nil
+    local data, err = GUI.ReadConfigFile()
+    if not data then return false, err end
+    if type(data.panels) ~= "table" then return true end
+    for ck in pairs(GUI.LayoutKeys) do data.panels[ck] = nil end
+    data.panels.menu = nil
+    return GUI.WriteConfigFile(data)
+end
+-- A layout saved on a bigger screen must not strand anything off this one.
+do
+    local vw, vh = 1920, 1080
+    pcall(function() local vp = Workspace.CurrentCamera.ViewportSize; vw, vh = vp.X, vp.Y end)
+    for _, gk in pairs(GUI.LayoutKeys) do
+        local v, axis = GUI[gk], gk:sub(-1)
+        if type(v) == "number" then
+            if axis == "X" then GUI[gk] = math.max(0, math.min(v, vw - 40))
+            elseif axis == "Y" then GUI[gk] = math.max(0, math.min(v, vh - 20)) end
+        end
+    end
+    local m = GUI.LayoutMenu
+    if type(m) == "table" and tonumber(m.x) and tonumber(m.y) then
+        local w, h = tonumber(m.w), tonumber(m.h)
+        GUI.LayoutMenu = {
+            x = math.max(0, math.min(tonumber(m.x), vw - 80)),
+            y = math.max(0, math.min(tonumber(m.y), vh - 40)),
+            w = (w and w >= 400 and w <= vw) and w or nil,
+            h = (h and h >= 300 and h <= vh) and h or nil,
+        }
+    else
+        GUI.LayoutMenu = nil
+    end
+end
 
 -- NOTE: we intentionally do NOT auto-load the RS snapshot here.
 -- The decode pass for a large saved snapshot is single-threaded and
@@ -12187,10 +12278,12 @@ end)()
             end
         end
     end)
+    local lay = GUI.LayoutMenu
     local window = Lib:CreateWindow({
         title     = "Requiem",
         subtitle  = "Bro you don't go 290 velo",
-        size      = Vector2.new(640, 580),
+        size      = (lay and lay.w and lay.h) and Vector2.new(lay.w, lay.h) or Vector2.new(640, 580),
+        position  = lay and Vector2.new(lay.x, lay.y) or nil,   -- nil = the lib centres it
         -- Deliberately NO `badge` here. The fork was patched to draw one and it could never work:
         -- the lib scales every ZIndex by 10000 (so the patch's 629997 asked for 6,299,970,000, past
         -- int32) and it multiplies the badge alpha by the sidebar hover spring, which sits at 0
@@ -14551,6 +14644,24 @@ end)()
         secLook:Slider("Rainbow Speed", math.floor((RUITHEME.rainbowSpeed or 0.35) * 100), 1, 5, 150, "", function(v) RUITHEME.rainbowSpeed = (tonumber(v) or 35) / 100 end)
         pcall(function() secLook:Colorpicker("Accent", RUITHEME.baseAccent, function(c) RUITHEME.baseAccent = c; RUITHEME.baseAccentB = c end) end)
         secLook:Slider("Opacity", math.floor((RUITHEME.opacity or 1) * 100), 1, 30, 100, "%", function(v) RUITHEME.opacity = (tonumber(v) or 100) / 100 end)
+
+        local secLay = setTab:Section("Layout", "Left", "Where the menu and panels open")
+        secLay:Button("Save GUI Positions", function()
+            local ok, err = GUI.SaveLayout()
+            if ok then
+                uiNotify("Layout", "Saved - the menu and panels open here next time", 4)
+            else
+                uiNotify("Layout", "Could not save: " .. tostring(err), 5, "warning")
+            end
+        end)
+        secLay:Button("Clear Saved Positions", function()
+            local ok, err = GUI.ClearLayout()
+            if ok then
+                uiNotify("Layout", "Cleared - next load uses the default spots", 4)
+            else
+                uiNotify("Layout", "Could not clear: " .. tostring(err), 5, "warning")
+            end
+        end)
 
         -- Unload key. InputLoop just polls iskeypressed(GUI.CloseKey), so rebinding is only a
         -- matter of moving that number; End is the default, not a hardcoded rule. Persisted as
