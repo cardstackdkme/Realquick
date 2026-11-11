@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.9"
+GUI.Version = "v9.0"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4959,9 +4959,13 @@ end
 -- ({ Pack = { card, card, card }, AllowFlipAll = true, PreviewInsight = true, ... }) sits in Lua
 -- memory from the moment the pack is dealt. Misc -> Read Cards runs ONE getgc (a ~10 s freeze, so
 -- only on click, NEVER by itself), finds that props table, and reads each card's Name / Rarity /
--- Description straight from memory. The overlay then follows each card's frame in
--- PlayerGui.Space3D: "[ RARITY ]" in the rarity colour + the name in white above the card, the
--- description under it.
+-- Description straight from memory. "[ RARITY ]" in the rarity colour + the name in white go above
+-- each card, the description under it.
+-- Where the cards are: each is drawn on a 3D part, Workspace.Space3DAdornee (one per card, in front
+-- of the camera; it tilts and bobs). Its four corners through WorldToScreen give the card's exact box
+-- in Drawing space. The PlayerGui.Space3D "Anchor" frames are ZERO-SIZE points (v8.9 first build
+-- trusted them and drew nothing); they are only used to tell the pack is open and to read a
+-- flipped card's name.
 -- Table layout (verified live 2026-11-11): header +8 array size (int), +32 array part, +40 hash
 -- part; array slot 16 bytes (value 8, type tag at +12); hash slot 32 bytes (value 8, tag at +12,
 -- key pointer at +16); a string's text at +24. Tags: 1 boolean, 3 number, 5 string, 6 table.
@@ -5049,40 +5053,80 @@ do
         return (#cards > 0) and cards or nil
     end
 
-    -- the cards' frames on screen, left to right. A card's front and back can be two anchors in the
-    -- same spot, so anchors are grouped by position: one slot per card.
-    local function findSlots()
+    -- The pack screen's anchors, left to right: nil = the pack is closed. A card's front and back can
+    -- be two anchors in the same spot, so they are grouped by position (one group per card).
+    local function findAnchors()
         local s3
         pcall(function() s3 = LocalPlayer.PlayerGui:FindFirstChild("Space3D") end)
         if not s3 then return nil end
         local raw = {}
         pcall(function()
             for _, a in ipairs(s3:GetChildren()) do
-                if a.Name == "Anchor" then
-                    local p, s = a.AbsolutePosition, a.AbsoluteSize
-                    if p and s and s.X > 4 and s.Y > 4 then raw[#raw + 1] = { inst = a, cx = p.X + s.X / 2, w = s.X } end
-                end
+                if a.Name == "Anchor" then raw[#raw + 1] = { inst = a, x = a.AbsolutePosition.X } end
             end
         end)
-        if #raw == 0 then return nil end
-        table.sort(raw, function(u, v) return u.cx < v.cx end)
-        local slots = {}
+        table.sort(raw, function(u, v) return u.x < v.x end)
+        local groups = {}
         for _, r in ipairs(raw) do
-            local last = slots[#slots]
-            if last and math.abs(r.cx - last.cx) < last.w * 0.3 then
+            local last = groups[#groups]
+            if last and math.abs(r.x - last.x) < 20 then
                 last.insts[#last.insts + 1] = r.inst
             else
-                slots[#slots + 1] = { inst = r.inst, insts = { r.inst }, cx = r.cx, w = r.w }
+                groups[#groups + 1] = { x = r.x, insts = { r.inst } }
             end
         end
-        -- AbsolutePosition starts under the top bar unless the screen ignores it; Drawing starts at the top
-        local inset, ign = 0, true
-        pcall(function() ign = s3.IgnoreGuiInset end)
-        if ign == false then
-            inset = 36
-            pcall(function() local v = game:GetService("GuiService"):GetGuiInset(); if v and v.Y then inset = v.Y end end)
+        return groups
+    end
+    -- The cards' 3D parts. Workspace:GetChildren() is a big list, so this runs only on Read Cards and
+    -- then at most every 2 s while the cards are missing; the parts are kept between frames.
+    local function findParts()
+        local list = {}
+        pcall(function()
+            for _, p in ipairs(workspace:GetChildren()) do
+                if p.Name == "Space3DAdornee" then list[#list + 1] = p end
+            end
+        end)
+        return list
+    end
+    -- A part's box on screen (Drawing space, so no top-bar offset): its four corners, projected.
+    -- nil if any corner is off screen. (No error() here: Matcha's pcall does not catch it.)
+    local function partRect(p)
+        local x0, y0, x1, y1, bad
+        pcall(function()
+            local pos, s, cf = p.Position, p.Size, p.CFrame
+            local r, u = cf.RightVector * (s.X / 2), cf.UpVector * (s.Y / 2)
+            for _, c in ipairs({ pos - r + u, pos + r + u, pos - r - u, pos + r - u }) do
+                local sp, on = WorldToScreen(c)
+                if not (sp and on) then bad = true; break end
+                x0 = x0 and math.min(x0, sp.X) or sp.X
+                x1 = x1 and math.max(x1, sp.X) or sp.X
+                y0 = y0 and math.min(y0, sp.Y) or sp.Y
+                y1 = y1 and math.max(y1, sp.Y) or sp.Y
+            end
+        end)
+        if bad or not (x0 and y0 and x1 and y1) or x1 - x0 < 4 or y1 - y0 < 4 then return nil end
+        return x0, y0, x1 - x0, y1 - y0
+    end
+    -- The cached parts that still exist, left to right by their projected centre. A part that is off
+    -- screen right now KEEPS its place in the order (only its own text hides), so one hidden card
+    -- can't shift every label after it. Two parts in the same spot (a front and a back) are one card.
+    local function liveParts()
+        local raw = {}
+        for i, p in ipairs(CR.parts or {}) do
+            local alive, x = false, nil
+            pcall(function() alive = p.Parent ~= nil end)
+            if alive then
+                pcall(function() local sp = WorldToScreen(p.Position); x = sp and sp.X end)
+                raw[#raw + 1] = { part = p, x = x or (i * 100000) }
+            end
         end
-        return slots, inset
+        table.sort(raw, function(u, v) return u.x < v.x end)
+        local out = {}
+        for _, r in ipairs(raw) do
+            local last = out[#out]
+            if not (last and math.abs(r.x - last.x) < 20) then out[#out + 1] = r end
+        end
+        return out
     end
 
     -- ONE getgc, on click only. The props table's AllowFlipAll / PreviewInsight booleans are the
@@ -5117,10 +5161,11 @@ do
         end
         -- an old pack can linger in memory until Lua cleans it up: prefer the one whose card count
         -- matches the cards on screen
-        local slots = findSlots()
+        CR.parts, CR.partsAt = findParts(), os.clock()
+        local onScreen = #liveParts()
         local best = found[1]
         for _, c in ipairs(found) do
-            if slots and #c == #slots then best = c; break end
+            if onScreen > 0 and #c == onScreen then best = c; break end
         end
         CR.cards, CR.order, CR.dirty = best, {}, true
         for i = 1, #best do CR.order[i] = i end
@@ -5204,18 +5249,17 @@ do
         end
     end
 
-    local function place(slots, inset)
+    -- slots = the cards' parts, left to right (from liveParts); the boxes are re-projected every frame
+    -- so the text rides the cards' bob and tilt
+    local function place(slots)
         local nudge = tonumber(GUI.CardNudge) or 0
         for k, s in ipairs(slots) do
             local v = CR.vis[CR.order[k] or k]
             local c = CR.cards[CR.order[k] or k]
             if v and c then
-                local x, y, w, h
-                pcall(function()
-                    local p, z = s.inst.AbsolutePosition, s.inst.AbsoluteSize
-                    x, y, w, h = p.X, p.Y + inset + nudge, z.X, z.Y
-                end)
+                local x, y, w, h = partRect(s.part)
                 if x then
+                    y = y + nudge
                     local cx = x + w / 2
                     -- title above the card: [ RARITY ] in colour, then the name in white, centred as one line
                     local tw = textW(v.tag, v.tag.Text, TITLE)
@@ -5244,6 +5288,10 @@ do
                             o.Visible = false
                         end
                     end
+                else
+                    -- this card is off screen right now: hide just its text
+                    v.tag.Visible, v.name.Visible = false, false
+                    for d = 1, MAX_LINES do v.desc[d].Visible = false end
                 end
             end
         end
@@ -5263,24 +5311,29 @@ do
     local gen = {}
     _G.__RQ_CARDS = gen
     task.spawn(function()
-        local slots, inset, nextScan = nil, 0, 0
+        local slots, nextScan = nil, 0
         while GUI.Running and _G.__RQ_CARDS == gen do
             local now = os.clock()
             if now >= nextScan then
                 nextScan = now + 0.4
-                slots, inset = findSlots()
-                if not slots and CR.cards then
+                local groups = CR.cards and findAnchors() or nil
+                if not groups and CR.cards then
                     -- the pack closed: these cards are gone, never show them on the next pack
-                    CR.cards = nil
+                    CR.cards, CR.parts, slots = nil, nil, nil
                     CR.status = "Pack closed - press Read Cards on the next one"
                     clear()
-                elseif slots and CR.cards then
-                    pcall(fixOrder, slots)
+                elseif groups then
+                    slots = liveParts()
+                    if #slots == 0 and now - (CR.partsAt or 0) > 2 then
+                        CR.parts, CR.partsAt = findParts(), now
+                        slots = liveParts()
+                    end
+                    pcall(fixOrder, groups)
                 end
             end
             if CR.cards and CR.dirty then build() end
-            if slots and CR.cards and GUI.CardOverlay then
-                pcall(place, slots, inset or 0)
+            if slots and #slots > 0 and CR.cards and GUI.CardOverlay then
+                pcall(place, slots)
             else
                 hideAll()
             end
