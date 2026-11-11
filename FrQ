@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v8.8"
+GUI.Version = "v8.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4953,6 +4953,343 @@ do
     end
 end
 
+-- ============================================================
+-- CARD READER (v8.9): the enchantment pack's cards, read BEFORE you flip them
+-- The face-down cards on screen are only card backs, but the pack component's props table
+-- ({ Pack = { card, card, card }, AllowFlipAll = true, PreviewInsight = true, ... }) sits in Lua
+-- memory from the moment the pack is dealt. Misc -> Read Cards runs ONE getgc (a ~10 s freeze, so
+-- only on click, NEVER by itself), finds that props table, and reads each card's Name / Rarity /
+-- Description straight from memory. The overlay then follows each card's frame in
+-- PlayerGui.Space3D: "[ RARITY ]" in the rarity colour + the name in white above the card, the
+-- description under it.
+-- Table layout (verified live 2026-11-11): header +8 array size (int), +32 array part, +40 hash
+-- part; array slot 16 bytes (value 8, type tag at +12); hash slot 32 bytes (value 8, tag at +12,
+-- key pointer at +16); a string's text at +24. Tags: 1 boolean, 3 number, 5 string, 6 table.
+-- Everything lives in this do-block: the main chunk is near Luau's 200-local limit.
+-- ============================================================
+do
+    local CR = { cards = nil, order = {}, vis = {}, els = {}, made = 0, status = "Open a pack, then press Read Cards" }
+    GUI.CardReader = CR
+    if GUI.CardOverlay == nil then GUI.CardOverlay = true end
+    GUI.CardNudge = GUI.CardNudge or 0
+    local BOLD, REG = Drawing.Fonts.SystemBold, Drawing.Fonts.System
+    local TITLE, DESC, LINE_H, MAX_LINES = 18, 14, 17, 5
+    local WHITE = Color3.fromRGB(255, 255, 255)
+    -- the game's rarity numbers (Common.Progression.Enchantments.Rarities)
+    local RARITY = {
+        [1] = { "COMMON",    Color3.fromRGB(170, 170, 170) },
+        [2] = { "UNCOMMON",  Color3.fromRGB(90, 210, 100) },
+        [3] = { "RARE",      Color3.fromRGB(70, 140, 255) },
+        [4] = { "EPIC",      Color3.fromRGB(175, 90, 255) },
+        [5] = { "LEGENDARY", Color3.fromRGB(255, 205, 50) },
+        [6] = { "MYTHIC",    Color3.fromRGB(255, 70, 70) },
+        [7] = { "UNIQUE",    Color3.fromRGB(255, 120, 220) },
+        [8] = { "SPECIAL",   Color3.fromRGB(255, 150, 40) },
+    }
+
+    local function rd(kind, a)
+        if type(a) ~= "number" then return nil end
+        local ok, v = pcall(memory_read, kind, a)
+        if ok then return v end
+        return nil
+    end
+    -- getgc reports .addr as a hex STRING on this build and as a number on others: take both
+    local function addrOf(e)
+        local a = e and e.addr
+        if type(a) == "number" then return a end
+        if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+        return nil
+    end
+    local function ptr(a)
+        local p = rd("uintptr", a)
+        if type(p) == "number" and p > 65536 then return p end
+        return nil
+    end
+    local function str(p)
+        if not p then return nil end
+        local s = rd("string", p + 24)
+        if type(s) == "string" and #s > 0 and #s < 400 then return s end
+        return nil
+    end
+
+    -- one card table -> { name, rarity, desc } (one pass over its hash part)
+    local function readCard(t)
+        local node = t and ptr(t + 40)
+        if not node then return nil end
+        local c = {}
+        for i = 0, 63 do
+            local n = node + 32 * i
+            local tt = rd("int", n + 12)
+            if tt == nil then break end
+            if tt == 3 or tt == 5 then
+                local k = str(ptr(n + 16))
+                if k == "Name" and tt == 5 then c.name = str(ptr(n))
+                elseif k == "Rarity" and tt == 3 then c.rarity = rd("double", n)
+                elseif k == "Description" and tt == 5 then c.desc = str(ptr(n))
+                elseif k == "description" and tt == 5 and not c.desc then c.desc = str(ptr(n)) end
+            end
+        end
+        if not c.name then return nil end
+        c.rarity = math.floor(tonumber(c.rarity) or 1)
+        c.desc = c.desc or ""
+        return c
+    end
+    -- the Pack list -> its cards, in the game's order
+    local function readPack(t)
+        local n, arr = rd("int", t + 8), ptr(t + 32)
+        if type(n) ~= "number" or n < 1 or n > 8 or not arr then return nil end
+        local cards = {}
+        for i = 0, n - 1 do
+            local e = arr + 16 * i
+            if rd("int", e + 12) == 6 then
+                local c = readCard(ptr(e))
+                if c then cards[#cards + 1] = c end
+            end
+        end
+        return (#cards > 0) and cards or nil
+    end
+
+    -- the cards' frames on screen, left to right. A card's front and back can be two anchors in the
+    -- same spot, so anchors are grouped by position: one slot per card.
+    local function findSlots()
+        local s3
+        pcall(function() s3 = LocalPlayer.PlayerGui:FindFirstChild("Space3D") end)
+        if not s3 then return nil end
+        local raw = {}
+        pcall(function()
+            for _, a in ipairs(s3:GetChildren()) do
+                if a.Name == "Anchor" then
+                    local p, s = a.AbsolutePosition, a.AbsoluteSize
+                    if p and s and s.X > 4 and s.Y > 4 then raw[#raw + 1] = { inst = a, cx = p.X + s.X / 2, w = s.X } end
+                end
+            end
+        end)
+        if #raw == 0 then return nil end
+        table.sort(raw, function(u, v) return u.cx < v.cx end)
+        local slots = {}
+        for _, r in ipairs(raw) do
+            local last = slots[#slots]
+            if last and math.abs(r.cx - last.cx) < last.w * 0.3 then
+                last.insts[#last.insts + 1] = r.inst
+            else
+                slots[#slots + 1] = { inst = r.inst, insts = { r.inst }, cx = r.cx, w = r.w }
+            end
+        end
+        -- AbsolutePosition starts under the top bar unless the screen ignores it; Drawing starts at the top
+        local inset, ign = 0, true
+        pcall(function() ign = s3.IgnoreGuiInset end)
+        if ign == false then
+            inset = 36
+            pcall(function() local v = game:GetService("GuiService"):GetGuiInset(); if v and v.Y then inset = v.Y end end)
+        end
+        return slots, inset
+    end
+
+    -- ONE getgc, on click only. The props table's AllowFlipAll / PreviewInsight booleans are the
+    -- anchors; its Pack field is a few slots away in the same hash part.
+    function CR.read()
+        local ok, entries = pcall(function() return getgc({ "AllowFlipAll", "PreviewInsight" }) end)
+        if not ok or type(entries) ~= "table" then
+            CR.status = "Scan failed"
+            return 0
+        end
+        local found, seen = {}, {}
+        for _, e in pairs(entries) do
+            local a = type(e) == "table" and addrOf(e)
+            if a and rd("int", a + 12) == 1 then   -- a real boolean field, not a function-constant look-alike
+                for k = -16, 16 do
+                    local n = a + 32 * k
+                    if rd("int", n + 12) == 6 and str(ptr(n + 16)) == "Pack" then
+                        local t = ptr(n)
+                        if t and not seen[t] then
+                            seen[t] = true
+                            local cards = readPack(t)
+                            if cards then found[#found + 1] = cards end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+        if #found == 0 then
+            CR.cards, CR.status = nil, "No cards found - is the pack open?"
+            return 0
+        end
+        -- an old pack can linger in memory until Lua cleans it up: prefer the one whose card count
+        -- matches the cards on screen
+        local slots = findSlots()
+        local best = found[1]
+        for _, c in ipairs(found) do
+            if slots and #c == #slots then best = c; break end
+        end
+        CR.cards, CR.order, CR.dirty = best, {}, true
+        for i = 1, #best do CR.order[i] = i end
+        local names = {}
+        for _, c in ipairs(best) do names[#names + 1] = c.name end
+        CR.status = "Read: " .. table.concat(names, ", ") .. ((#found > 1) and "  (" .. #found .. " packs in memory)" or "")
+        return #best
+    end
+
+    local function wrap(text, maxChars)
+        local lines, cur = {}, ""
+        for word in tostring(text):gmatch("%S+") do
+            if cur == "" then cur = word
+            elseif #cur + 1 + #word <= maxChars then cur = cur .. " " .. word
+            else lines[#lines + 1] = cur; cur = word end
+        end
+        if cur ~= "" then lines[#lines + 1] = cur end
+        return lines
+    end
+    -- real width when this Matcha build has TextBounds, else an estimate
+    local function textW(o, s, size)
+        local w
+        pcall(function() local b = o.TextBounds; if b and b.X and b.X > 0 then w = b.X end end)
+        return w or (#s * size * 0.55)
+    end
+
+    local function clear()
+        for _, o in ipairs(CR.els) do pcall(function() o:Remove() end) end
+        CR.els, CR.vis, CR.made = {}, {}, 0
+    end
+    local function hideAll()
+        if CR.hidden then return end
+        for _, o in ipairs(CR.els) do pcall(function() o.Visible = false end) end
+        CR.hidden = true
+    end
+    GUI.CardReaderClear = function() clear(); CR.cards = nil end
+
+    local function newText(size, font, center)
+        local t = Drawing.new("Text")
+        t.Size = size; t.Font = font; t.Center = center; t.Outline = true
+        t.ZIndex = 60; t.Visible = false; t.Text = ""; t.Color = WHITE
+        CR.els[#CR.els + 1] = t
+        return t
+    end
+    -- (re)build the text objects when a new read lands
+    local function build()
+        clear()
+        for i, c in ipairs(CR.cards) do
+            local r = RARITY[c.rarity] or { "RARITY " .. c.rarity, WHITE }
+            local v = { tag = newText(TITLE, BOLD, false), name = newText(TITLE, BOLD, false), desc = {} }
+            v.tag.Text, v.tag.Color = "[ " .. r[1] .. " ]", r[2]
+            v.name.Text = " " .. c.name
+            v.lines = {}
+            for d = 1, MAX_LINES do v.desc[d] = newText(DESC, REG, true) end
+            CR.vis[i] = v
+        end
+        CR.made, CR.dirty, CR.wrapW = #CR.cards, false, nil
+    end
+
+    -- after a flip, the face shows the real name: if it is on a different spot than we assumed,
+    -- swap so the unflipped cards line up too
+    local function fixOrder(slots)
+        for k, s in ipairs(slots) do
+            for _, inst in ipairs(s.insts) do
+                pcall(function()
+                    for _, d in ipairs(inst:GetDescendants()) do
+                        if d.ClassName == "TextLabel" then
+                            local txt = d.Text
+                            for j, c in ipairs(CR.cards) do
+                                if c.name == txt and CR.order[k] ~= j then
+                                    for m = 1, #CR.order do
+                                        if CR.order[m] == j then CR.order[m] = CR.order[k]; break end
+                                    end
+                                    CR.order[k] = j
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end
+
+    local function place(slots, inset)
+        local nudge = tonumber(GUI.CardNudge) or 0
+        for k, s in ipairs(slots) do
+            local v = CR.vis[CR.order[k] or k]
+            local c = CR.cards[CR.order[k] or k]
+            if v and c then
+                local x, y, w, h
+                pcall(function()
+                    local p, z = s.inst.AbsolutePosition, s.inst.AbsoluteSize
+                    x, y, w, h = p.X, p.Y + inset + nudge, z.X, z.Y
+                end)
+                if x then
+                    local cx = x + w / 2
+                    -- title above the card: [ RARITY ] in colour, then the name in white, centred as one line
+                    local tw = textW(v.tag, v.tag.Text, TITLE)
+                    local nw = textW(v.name, v.name.Text, TITLE)
+                    local x0, ty = cx - (tw + nw) / 2, y - TITLE - 10
+                    v.tag.Position, v.name.Position = Vector2.new(x0, ty), Vector2.new(x0 + tw, ty)
+                    v.tag.Visible, v.name.Visible = true, true
+                    -- description under the card, wrapped to the card's width
+                    local ww = math.max(w, 170)
+                    if v.wrapW ~= math.floor(ww) then
+                        v.wrapW = math.floor(ww)
+                        local lines = wrap("Description : " .. c.desc, math.max(12, math.floor(ww / (DESC * 0.5))))
+                        if #lines > MAX_LINES then
+                            lines[MAX_LINES] = lines[MAX_LINES] .. " .."
+                            for d = #lines, MAX_LINES + 1, -1 do lines[d] = nil end
+                        end
+                        v.lines = lines
+                        for d = 1, MAX_LINES do v.desc[d].Text = lines[d] or "" end
+                    end
+                    for d = 1, MAX_LINES do
+                        local o = v.desc[d]
+                        if v.lines[d] then
+                            o.Position = Vector2.new(cx, y + h + 10 + (d - 0.5) * LINE_H)   -- Center=true: the line's middle
+                            o.Visible = true
+                        else
+                            o.Visible = false
+                        end
+                    end
+                end
+            end
+        end
+        -- a card that has no slot (fewer frames than cards) stays hidden
+        for i, v in ipairs(CR.vis) do
+            local shown = false
+            for k = 1, #slots do if (CR.order[k] or k) == i then shown = true end end
+            if not shown then
+                v.tag.Visible, v.name.Visible = false, false
+                for d = 1, MAX_LINES do v.desc[d].Visible = false end
+            end
+        end
+        CR.hidden = false
+    end
+
+    -- 30 Hz overlay. Its own generation token, so a re-run of the script never stacks loops.
+    local gen = {}
+    _G.__RQ_CARDS = gen
+    task.spawn(function()
+        local slots, inset, nextScan = nil, 0, 0
+        while GUI.Running and _G.__RQ_CARDS == gen do
+            local now = os.clock()
+            if now >= nextScan then
+                nextScan = now + 0.4
+                slots, inset = findSlots()
+                if not slots and CR.cards then
+                    -- the pack closed: these cards are gone, never show them on the next pack
+                    CR.cards = nil
+                    CR.status = "Pack closed - press Read Cards on the next one"
+                    clear()
+                elseif slots and CR.cards then
+                    pcall(fixOrder, slots)
+                end
+            end
+            if CR.cards and CR.dirty then build() end
+            if slots and CR.cards and GUI.CardOverlay then
+                pcall(place, slots, inset or 0)
+            else
+                hideAll()
+            end
+            task.wait(1 / 30)
+        end
+        clear()
+    end)
+end
+
 -- Clear a single monitor bar
 local function ClearMonitorBar(name)
     local bar = GUI.MonitorBars[name]
@@ -5276,6 +5613,7 @@ UnloadScript = function()
     GUI.HealthBarVisible = false
     ClearGasBar()
     GUI.GasBarVisible = false
+    pcall(function() if GUI.CardReaderClear then GUI.CardReaderClear() end end)
     ClearAllMonitorBars()
     -- Clean up damage floaters
     for _, f in ipairs(GUI.DmgIndicatorFloaters) do
@@ -7458,6 +7796,8 @@ saveConfig = function()
         -- HUD bar gradients (Style -> Health / Gas Gradient): 2-5 {r,g,b} stops each, empty end first,
         -- plus the presets you saved
         gradients   = GUI.Grad and { gas = GUI.Grad.gas, hp = GUI.Grad.hp, presets = GUI.Grad.presets } or nil,
+        -- Misc -> Card Reader
+        cardReader  = { overlay = GUI.CardOverlay ~= false, nudge = GUI.CardNudge or 0 },
     }
     task.spawn(function()
         pcall(function()
@@ -7573,6 +7913,10 @@ loadConfig = function()
     if type(data.animal) == "table" then
         if type(data.animal.fontIndex)  == "number" and TITAN_FONTS[data.animal.fontIndex]          then ANIMAL.FontIndex  = data.animal.fontIndex  end
         if type(data.animal.colorIndex) == "number" and TITAN_COLOR_PRESETS[data.animal.colorIndex] then ANIMAL.ColorIndex = data.animal.colorIndex end
+    end
+    if type(data.cardReader) == "table" then
+        if type(data.cardReader.overlay) == "boolean" then GUI.CardOverlay = data.cardReader.overlay end
+        if type(data.cardReader.nudge) == "number" then GUI.CardNudge = math.max(-80, math.min(80, math.floor(data.cardReader.nudge))) end
     end
     if type(data.panels) == "table" then
         if type(data.panels.healthBarX)  == "number" then GUI.HealthBarX  = data.panels.healthBarX  end
@@ -14459,6 +14803,46 @@ end)()
             AP.Presses, AP.Registered, AP.Err = 0, 0, 0
             uiNotify("Auto Parry", "relearning", 2)
         end)
+    end)
+    -- ===== Tab: Misc =====
+    tabBuild(function()
+        local tab = window:Tab("Misc", "star")
+        local CR = GUI.CardReader
+        if not CR then return end
+        local sec = tab:Section("Card Reader", "Left", "Enchantment cards, before you flip")
+        -- the slider fires every frame while dragged: save once it settles, not per frame
+        local function saveSoon()
+            GUI._crSaveAt = os.clock() + 1
+            if GUI._crSaving then return end
+            GUI._crSaving = true
+            task.spawn(function()
+                while os.clock() < (GUI._crSaveAt or 0) do task.wait(0.25) end
+                GUI._crSaving = false
+                pcall(saveConfig)
+            end)
+        end
+        sec:Button("Read Cards  (~10s)", function()
+            if CR.busy then return end
+            CR.busy = true
+            CR.status = "Scanning memory... (~10s freeze)"
+            pcall(uiNotify, "Card Reader", "Scanning memory... (~10s freeze)", 4)
+            task.spawn(function()
+                task.wait(0.2)   -- let the notice draw before the freeze
+                local n = 0
+                pcall(function() n = CR.read() end)
+                CR.busy = false
+                pcall(uiNotify, "Card Reader", (n > 0) and ("Read " .. n .. " cards") or tostring(CR.status), 4)
+            end)
+        end):Tooltip("one memory scan (the game freezes ~10s). Press it while the cards are on screen")
+        sec:Toggle("Show Overlay", GUI.CardOverlay ~= false, function(v)
+            GUI.CardOverlay = v == true
+            saveSoon()
+        end)
+        sec:Slider("Height Nudge", GUI.CardNudge or 0, 1, -80, 80, "px", function(v)
+            GUI.CardNudge = math.floor(tonumber(v) or 0)
+            saveSoon()
+        end):Tooltip("moves the text up (-) or down (+) if it doesn't sit right on the cards")
+        sec:Label(function() return tostring(CR.status or "") end)
     end)
     -- ===== Tab: Logs =====
     tabBuild(function()
