@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.2"
+GUI.Version = "v9.3"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4465,7 +4465,6 @@ do
     GUI.CardNudge = GUI.CardNudge or 0
     local BOLD, REG = Drawing.Fonts.SystemBold, Drawing.Fonts.System
     local TITLE, DESC, HEAD, LINE_H, MAX_LINES = 18, 14, 15, 17, 5
-    local GAP = 4                                    -- px between "[ RARITY ]" and the name
     local WHITE = Color3.fromRGB(255, 255, 255)
     local HEAD_COL = Color3.fromRGB(110, 215, 255)  -- "[ Enchant Description ]": light cyan
     if GUI.CardFreeze == nil then GUI.CardFreeze = true end
@@ -4675,15 +4674,6 @@ do
         if cur ~= "" then lines[#lines + 1] = cur end
         return lines
     end
-    -- Width of `s` in SF Bold. NOT Drawing's TextBounds: on Matcha it reported a width so short
-    -- that "[ COMMON ]" ran into the name (v9.0/v9.1). GUI.TextW (per-letter advance widths) runs
-    -- ~5% wide in game, hence the 0.95; an underestimate collides, so never go below the estimate.
-    local function textW(s, size)
-        local w
-        if GUI.TextW then pcall(function() w = GUI.TextW(s, size) end) end
-        return math.max((tonumber(w) or 0) * 0.95, #s * size * 0.5)
-    end
-
     local function clear()
         for _, o in ipairs(CR.els) do pcall(function() o:Remove() end) end
         CR.els, CR.vis, CR.made = {}, {}, 0
@@ -4708,7 +4698,7 @@ do
         clear()
         for i, c in ipairs(CR.cards) do
             local r = RARITY[c.rarity] or { "RARITY " .. c.rarity, WHITE }
-            local v = { tag = newText(TITLE, BOLD, false), name = newText(TITLE, BOLD, false),
+            local v = { tag = newText(TITLE, BOLD, true), name = newText(TITLE, BOLD, true),
                 head = newText(HEAD, BOLD, true), desc = {} }
             v.tag.Text, v.tag.Color = "[ " .. r[1] .. " ]", r[2]
             v.name.Text = c.name
@@ -4779,10 +4769,12 @@ do
     -- card is positioned once and then left completely alone.
     local function layout(v, c, x, y, w, h)
         local cx = x + w / 2
-        -- above the card: "[ RARITY ]" in its colour, a gap, the name in white, centred as one line
-        local tw, nw = textW(v.tag.Text, TITLE), textW(v.name.Text, TITLE)
-        local x0, ty = cx - (tw + GAP + nw) / 2, y - TITLE - 10
-        v.tag.Position, v.name.Position = Vector2.new(x0, ty), Vector2.new(x0 + tw + GAP, ty)
+        -- above the card, two centred lines: "[ RARITY ]" in its colour on top, the name in white
+        -- under it, just above the card. Each is centred on its own (Center = true: the Position is
+        -- the line's middle), so nothing is measured and the two can never overlap.
+        local nameY = y - 10 - TITLE / 2
+        v.name.Position = Vector2.new(cx, nameY)
+        v.tag.Position = Vector2.new(cx, nameY - TITLE - 2)
         v.tag.Visible, v.name.Visible = true, true
         -- under the card: "[ Enchant Description ]" in cyan, then the description in white below it,
         -- wrapped to the card's width (Center = true: each Position is the line's middle)
