@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.3"
+GUI.Version = "v9.4"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12437,86 +12437,6 @@ end)()
             uiNotify("Auto Parry", "relearning", 2)
         end)
     end)
-    -- ===== Tab: Logs =====
-    tabBuild(function()
-        local tab = window:Tab("Logs", "skull")
-        local sec = tab:Section("Death Log Webhook", "Left", "Discord death feed")
-        sec:Toggle("Enable Death Log", DEATHLOG.Enabled, function(v)
-            DEATHLOG.Enabled = v
-            if v then
-                -- Re-seed so deaths already on the ground don't spam the webhook.
-                DEATHLOG.Seeded = false; DEATHLOG.NextPollAt = 0; DEATHLOG.Pending = {}
-            else
-                DEATHLOG.Pending = {}
-            end
-        end)
-        sec:Button("Fetch Current Ragdolls", function()
-            local sentNow = deathFetchAllNow()
-            uiNotify("Death Log", "Fetched " .. tostring(sentNow) .. " ragdoll(s) to webhook", 3)
-        end)
-        -- Everyone in this server with the Actor flag, to the ACTOR webhook as one message.
-        -- Works with the Death Log switched off, like the button above.
-        local sendActors = sec:Button("Send Actors", function()
-            -- A double click must not post twice to a channel that has been deleted for spam.
-            if (os.clock() - (DEATHLOG.ActorsSentAt or -10)) < 5 then
-                uiNotify("Actors", "Wait a few seconds before sending again", 3)
-                return
-            end
-            DEATHLOG.ActorsSentAt = os.clock()
-            -- ~5ms per player: off the UI thread
-            task.spawn(function()
-                local names, total, err = DEATHLOG.SendActors()
-                if #names == 0 then
-                    uiNotify("Actors", "No actors in this server (" .. tostring(total) .. " players). Nothing sent.", 4)
-                elseif err then
-                    uiNotify("Actors", "Not posted - Discord says: " .. tostring(err), 8)
-                else
-                    local shown = table.concat(names, ", ")
-                    if #shown > 140 then shown = shown:sub(1, 137) .. "..." end
-                    uiNotify("Actors", tostring(#names) .. " sent to webhook: " .. shown, 6)
-                end
-            end)
-        end)
-        pcall(function()
-            sendActors:Tooltip("Posts every player in this server with the Actor flag to the actor list webhook: count, server and names, then all of them on one line of game.Workspace.<name>")
-        end)
-        pcall(function()
-            sec:Label(function()
-                if not DEATHLOG.Enabled then return "Status:  Inactive" end
-                if DEATHLOG.Seeded then return "Status:  Active   (sent " .. tostring(DEATHLOG.SentCount) .. ")" end
-                return "Status:  Seeding existing ragdolls..."
-            end)
-        end)
-
-        -- The game's current background music: its name and id, as a blue embed, to the songs
-        -- webhook. Off the UI thread: the name lookup and the post each block for about a second.
-        local secMusic = tab:Section("Music", "Right", "Current song to Discord")
-        local sendSong = secMusic:Button("Send Current Song", function()
-            if (os.clock() - (DEATHLOG.SongSentAt or -10)) < 5 then
-                uiNotify("Music", "Wait a few seconds before sending again", 3)
-                return
-            end
-            DEATHLOG.SongSentAt = os.clock()
-            -- Straight away: the send takes 10-15s with the song attached, and the only popup
-            -- used to come at the very end, so a press looked like it did nothing.
-            uiNotify("Music", "Sending the current song... (progress shows in Discord)", 4)
-            task.spawn(function()
-                local name, id, err, audio = DEATHLOG.SendSong()
-                if err and not id then
-                    uiNotify("Music", "Nothing sent - " .. tostring(err), 5)
-                elseif err then
-                    uiNotify("Music", "Not posted - " .. tostring(err), 8)
-                else
-                    uiNotify("Music", "Sent: " .. tostring(name) .. "  (" .. tostring(id) .. ")"
-                        .. (audio and ("  -  " .. audio) or ""), 6)
-                end
-            end)
-        end)
-        pcall(function()
-            sendSong:Tooltip("Posts the song the game is playing right now - its name and id - to the songs webhook. With SongHelper running on this PC the song itself is attached as an mp3.")
-        end)
-    end)
-
     -- ===== Tab: Misc =====
     tabBuild(function()
         local tab = window:Tab("Misc", "grid")
@@ -12989,6 +12909,86 @@ end)()
                 secCR:Label(function() return tostring(CR.status or "") end)
             end
         end
+    end)
+
+    -- ===== Tab: Logs =====
+    tabBuild(function()
+        local tab = window:Tab("Logs", "skull")
+        local sec = tab:Section("Death Log Webhook", "Left", "Discord death feed")
+        sec:Toggle("Enable Death Log", DEATHLOG.Enabled, function(v)
+            DEATHLOG.Enabled = v
+            if v then
+                -- Re-seed so deaths already on the ground don't spam the webhook.
+                DEATHLOG.Seeded = false; DEATHLOG.NextPollAt = 0; DEATHLOG.Pending = {}
+            else
+                DEATHLOG.Pending = {}
+            end
+        end)
+        sec:Button("Fetch Current Ragdolls", function()
+            local sentNow = deathFetchAllNow()
+            uiNotify("Death Log", "Fetched " .. tostring(sentNow) .. " ragdoll(s) to webhook", 3)
+        end)
+        -- Everyone in this server with the Actor flag, to the ACTOR webhook as one message.
+        -- Works with the Death Log switched off, like the button above.
+        local sendActors = sec:Button("Send Actors", function()
+            -- A double click must not post twice to a channel that has been deleted for spam.
+            if (os.clock() - (DEATHLOG.ActorsSentAt or -10)) < 5 then
+                uiNotify("Actors", "Wait a few seconds before sending again", 3)
+                return
+            end
+            DEATHLOG.ActorsSentAt = os.clock()
+            -- ~5ms per player: off the UI thread
+            task.spawn(function()
+                local names, total, err = DEATHLOG.SendActors()
+                if #names == 0 then
+                    uiNotify("Actors", "No actors in this server (" .. tostring(total) .. " players). Nothing sent.", 4)
+                elseif err then
+                    uiNotify("Actors", "Not posted - Discord says: " .. tostring(err), 8)
+                else
+                    local shown = table.concat(names, ", ")
+                    if #shown > 140 then shown = shown:sub(1, 137) .. "..." end
+                    uiNotify("Actors", tostring(#names) .. " sent to webhook: " .. shown, 6)
+                end
+            end)
+        end)
+        pcall(function()
+            sendActors:Tooltip("Posts every player in this server with the Actor flag to the actor list webhook: count, server and names, then all of them on one line of game.Workspace.<name>")
+        end)
+        pcall(function()
+            sec:Label(function()
+                if not DEATHLOG.Enabled then return "Status:  Inactive" end
+                if DEATHLOG.Seeded then return "Status:  Active   (sent " .. tostring(DEATHLOG.SentCount) .. ")" end
+                return "Status:  Seeding existing ragdolls..."
+            end)
+        end)
+
+        -- The game's current background music: its name and id, as a blue embed, to the songs
+        -- webhook. Off the UI thread: the name lookup and the post each block for about a second.
+        local secMusic = tab:Section("Music", "Right", "Current song to Discord")
+        local sendSong = secMusic:Button("Send Current Song", function()
+            if (os.clock() - (DEATHLOG.SongSentAt or -10)) < 5 then
+                uiNotify("Music", "Wait a few seconds before sending again", 3)
+                return
+            end
+            DEATHLOG.SongSentAt = os.clock()
+            -- Straight away: the send takes 10-15s with the song attached, and the only popup
+            -- used to come at the very end, so a press looked like it did nothing.
+            uiNotify("Music", "Sending the current song... (progress shows in Discord)", 4)
+            task.spawn(function()
+                local name, id, err, audio = DEATHLOG.SendSong()
+                if err and not id then
+                    uiNotify("Music", "Nothing sent - " .. tostring(err), 5)
+                elseif err then
+                    uiNotify("Music", "Not posted - " .. tostring(err), 8)
+                else
+                    uiNotify("Music", "Sent: " .. tostring(name) .. "  (" .. tostring(id) .. ")"
+                        .. (audio and ("  -  " .. audio) or ""), 6)
+                end
+            end)
+        end)
+        pcall(function()
+            sendSong:Tooltip("Posts the song the game is playing right now - its name and id - to the songs webhook. With SongHelper running on this PC the song itself is attached as an mp3.")
+        end)
     end)
 
     -- ===== Settings tab (built-in) =====
