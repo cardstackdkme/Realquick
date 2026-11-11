@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.1"
+GUI.Version = "v9.2"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4464,8 +4464,11 @@ do
     if GUI.CardOverlay == nil then GUI.CardOverlay = true end
     GUI.CardNudge = GUI.CardNudge or 0
     local BOLD, REG = Drawing.Fonts.SystemBold, Drawing.Fonts.System
-    local TITLE, DESC, LINE_H, MAX_LINES = 18, 14, 17, 5
+    local TITLE, DESC, HEAD, LINE_H, MAX_LINES = 18, 14, 15, 17, 5
+    local GAP = 4                                    -- px between "[ RARITY ]" and the name
     local WHITE = Color3.fromRGB(255, 255, 255)
+    local HEAD_COL = Color3.fromRGB(110, 215, 255)  -- "[ Enchant Description ]": light cyan
+    if GUI.CardFreeze == nil then GUI.CardFreeze = true end
     -- the game's rarity numbers (Common.Progression.Enchantments.Rarities)
     local RARITY = {
         [1] = { "COMMON",    Color3.fromRGB(170, 170, 170) },
@@ -4672,12 +4675,13 @@ do
         if cur ~= "" then lines[#lines + 1] = cur end
         return lines
     end
-    -- real width when this Matcha build has TextBounds, else GUI.TextW, else an estimate
-    local function textW(o, s, size)
+    -- Width of `s` in SF Bold. NOT Drawing's TextBounds: on Matcha it reported a width so short
+    -- that "[ COMMON ]" ran into the name (v9.0/v9.1). GUI.TextW (per-letter advance widths) runs
+    -- ~5% wide in game, hence the 0.95; an underestimate collides, so never go below the estimate.
+    local function textW(s, size)
         local w
-        pcall(function() local b = o.TextBounds; if b and b.X and b.X > 0 then w = b.X end end)
-        if not w and GUI.TextW then pcall(function() w = GUI.TextW(s, size) end) end   -- SF Bold widths
-        return w or (#s * size * 0.55)
+        if GUI.TextW then pcall(function() w = GUI.TextW(s, size) end) end
+        return math.max((tonumber(w) or 0) * 0.95, #s * size * 0.5)
     end
 
     local function clear()
@@ -4687,6 +4691,7 @@ do
     local function hideAll()
         if CR.hidden then return end
         for _, o in ipairs(CR.els) do pcall(function() o.Visible = false end) end
+        for _, v in ipairs(CR.vis) do v.at = nil end   -- shown again = laid out again
         CR.hidden = true
     end
     GUI.CardReaderClear = function() clear(); CR.cards = nil end
@@ -4703,14 +4708,47 @@ do
         clear()
         for i, c in ipairs(CR.cards) do
             local r = RARITY[c.rarity] or { "RARITY " .. c.rarity, WHITE }
-            local v = { tag = newText(TITLE, BOLD, false), name = newText(TITLE, BOLD, false), desc = {} }
+            local v = { tag = newText(TITLE, BOLD, false), name = newText(TITLE, BOLD, false),
+                head = newText(HEAD, BOLD, true), desc = {} }
             v.tag.Text, v.tag.Color = "[ " .. r[1] .. " ]", r[2]
-            v.name.Text = " " .. c.name
+            v.name.Text = c.name
+            v.head.Text, v.head.Color = "[ Enchant Description ]", HEAD_COL
             v.lines = {}
             for d = 1, MAX_LINES do v.desc[d] = newText(DESC, REG, true) end
             CR.vis[i] = v
         end
-        CR.made, CR.dirty, CR.wrapW = #CR.cards, false, nil
+        CR.made, CR.dirty, CR.wrapW, CR.frozen = #CR.cards, false, nil, {}
+    end
+    local function hideCard(v)
+        v.tag.Visible, v.name.Visible, v.head.Visible = false, false, false
+        for d = 1, MAX_LINES do v.desc[d].Visible = false end
+        v.at = nil
+    end
+
+    -- A card's box: live from its part, or (Freeze Text, the default) LOCKED once the cards have
+    -- been seen for FREEZE_N frames (the median of those boxes). The cards are fixed to the camera,
+    -- so a locked box stays right while you look around; re-projecting at 30 Hz while the game
+    -- moves the cards on its own frames is what made the text jump when the camera turned.
+    local FREEZE_N = 8
+    local function median(t)
+        local c = {}
+        for i, v in ipairs(t) do c[i] = v end
+        table.sort(c)
+        return c[math.floor((#c + 1) / 2)]
+    end
+    local function boxFor(k, s)
+        if GUI.CardFreeze == false then return partRect(s.part) end
+        CR.frozen = CR.frozen or {}
+        local f = CR.frozen[k]
+        if f and f.box then return f.box[1], f.box[2], f.box[3], f.box[4] end
+        local x, y, w, h = partRect(s.part)
+        if not x then return nil end
+        f = f or { xs = {}, ys = {}, ws = {}, hs = {} }
+        CR.frozen[k] = f
+        local n = #f.xs + 1
+        f.xs[n], f.ys[n], f.ws[n], f.hs[n] = x, y, w, h
+        if n >= FREEZE_N then f.box = { median(f.xs), median(f.ys), median(f.ws), median(f.hs) } end
+        return x, y, w, h
     end
 
     -- after a flip, the face shows the real name: if it is on a different spot than we assumed,
@@ -4737,60 +4775,66 @@ do
         end
     end
 
-    -- slots = the cards' parts, left to right (from liveParts); the boxes are re-projected every frame
-    -- so the text rides the cards' bob and tilt
+    -- Lay out one card's text around its box. Only when the box (or the nudge) changed: a frozen
+    -- card is positioned once and then left completely alone.
+    local function layout(v, c, x, y, w, h)
+        local cx = x + w / 2
+        -- above the card: "[ RARITY ]" in its colour, a gap, the name in white, centred as one line
+        local tw, nw = textW(v.tag.Text, TITLE), textW(v.name.Text, TITLE)
+        local x0, ty = cx - (tw + GAP + nw) / 2, y - TITLE - 10
+        v.tag.Position, v.name.Position = Vector2.new(x0, ty), Vector2.new(x0 + tw + GAP, ty)
+        v.tag.Visible, v.name.Visible = true, true
+        -- under the card: "[ Enchant Description ]" in cyan, then the description in white below it,
+        -- wrapped to the card's width (Center = true: each Position is the line's middle)
+        local ww = math.max(w, 170)
+        if v.wrapW ~= math.floor(ww) then
+            v.wrapW = math.floor(ww)
+            local lines = wrap(c.desc, math.max(12, math.floor(ww / (DESC * 0.5))))
+            if #lines > MAX_LINES then
+                lines[MAX_LINES] = lines[MAX_LINES] .. " .."
+                for d = #lines, MAX_LINES + 1, -1 do lines[d] = nil end
+            end
+            v.lines = lines
+            for d = 1, MAX_LINES do v.desc[d].Text = lines[d] or "" end
+        end
+        local by = y + h + 10
+        v.head.Position, v.head.Visible = Vector2.new(cx, by + LINE_H / 2), true
+        for d = 1, MAX_LINES do
+            local o = v.desc[d]
+            if v.lines[d] then
+                o.Position = Vector2.new(cx, by + LINE_H * (d + 0.5))
+                o.Visible = true
+            else
+                o.Visible = false
+            end
+        end
+    end
+
+    -- slots = the cards' parts, left to right (from liveParts)
     local function place(slots)
         local nudge = tonumber(GUI.CardNudge) or 0
         for k, s in ipairs(slots) do
-            local v = CR.vis[CR.order[k] or k]
-            local c = CR.cards[CR.order[k] or k]
+            local i = CR.order[k] or k
+            local v, c = CR.vis[i], CR.cards[i]
             if v and c then
-                local x, y, w, h = partRect(s.part)
+                local x, y, w, h = boxFor(k, s)
                 if x then
                     y = y + nudge
-                    local cx = x + w / 2
-                    -- title above the card: [ RARITY ] in colour, then the name in white, centred as one line
-                    local tw = textW(v.tag, v.tag.Text, TITLE)
-                    local nw = textW(v.name, v.name.Text, TITLE)
-                    local x0, ty = cx - (tw + nw) / 2, y - TITLE - 10
-                    v.tag.Position, v.name.Position = Vector2.new(x0, ty), Vector2.new(x0 + tw, ty)
-                    v.tag.Visible, v.name.Visible = true, true
-                    -- description under the card, wrapped to the card's width
-                    local ww = math.max(w, 170)
-                    if v.wrapW ~= math.floor(ww) then
-                        v.wrapW = math.floor(ww)
-                        local lines = wrap("Description : " .. c.desc, math.max(12, math.floor(ww / (DESC * 0.5))))
-                        if #lines > MAX_LINES then
-                            lines[MAX_LINES] = lines[MAX_LINES] .. " .."
-                            for d = #lines, MAX_LINES + 1, -1 do lines[d] = nil end
-                        end
-                        v.lines = lines
-                        for d = 1, MAX_LINES do v.desc[d].Text = lines[d] or "" end
-                    end
-                    for d = 1, MAX_LINES do
-                        local o = v.desc[d]
-                        if v.lines[d] then
-                            o.Position = Vector2.new(cx, y + h + 10 + (d - 0.5) * LINE_H)   -- Center=true: the line's middle
-                            o.Visible = true
-                        else
-                            o.Visible = false
-                        end
+                    local at = v.at
+                    if not (at and at[1] == x and at[2] == y and at[3] == w and at[4] == h and at[5] == k) then
+                        v.at = { x, y, w, h, k }
+                        layout(v, c, x, y, w, h)
                     end
                 else
-                    -- this card is off screen right now: hide just its text
-                    v.tag.Visible, v.name.Visible = false, false
-                    for d = 1, MAX_LINES do v.desc[d].Visible = false end
+                    hideCard(v)   -- this card is off screen right now: hide just its text
                 end
             end
         end
-        -- a card that has no slot (fewer frames than cards) stays hidden
+        -- a card that has no slot (fewer parts than cards) stays hidden
         for i, v in ipairs(CR.vis) do
             local shown = false
             for k = 1, #slots do if (CR.order[k] or k) == i then shown = true end end
-            if not shown then
-                v.tag.Visible, v.name.Visible = false, false
-                for d = 1, MAX_LINES do v.desc[d].Visible = false end
-            end
+            if not shown then hideCard(v) end
         end
         CR.hidden = false
     end
@@ -4817,6 +4861,13 @@ do
                         slots = liveParts()
                     end
                     pcall(fixOrder, groups)
+                    -- re-lock the frozen spots when the screen size or the number of cards changes
+                    local key = tostring(#slots)
+                    pcall(function() local vp = workspace.CurrentCamera.ViewportSize; key = key .. ":" .. vp.X .. "x" .. vp.Y end)
+                    if CR.frozenKey ~= key then
+                        CR.frozenKey, CR.frozen = key, {}
+                        for _, v in ipairs(CR.vis) do v.at = nil end
+                    end
                 end
             end
             if CR.cards and CR.dirty then build() end
@@ -7256,7 +7307,7 @@ saveConfig = function()
         -- plus the presets you saved
         gradients   = GUI.Grad and { gas = GUI.Grad.gas, hp = GUI.Grad.hp, presets = GUI.Grad.presets } or nil,
         -- Misc -> Card Reader
-        cardReader  = { overlay = GUI.CardOverlay ~= false, nudge = GUI.CardNudge or 0 },
+        cardReader  = { overlay = GUI.CardOverlay ~= false, nudge = GUI.CardNudge or 0, freeze = GUI.CardFreeze ~= false },
     }
     task.spawn(function()
         pcall(function()
@@ -7353,6 +7404,7 @@ loadConfig = function()
     end
     if type(data.cardReader) == "table" then
         if type(data.cardReader.overlay) == "boolean" then GUI.CardOverlay = data.cardReader.overlay end
+        if type(data.cardReader.freeze) == "boolean" then GUI.CardFreeze = data.cardReader.freeze end
         if type(data.cardReader.nudge) == "number" then GUI.CardNudge = math.max(-80, math.min(80, math.floor(data.cardReader.nudge))) end
     end
     if type(data.panels) == "table" then
@@ -12934,6 +12986,10 @@ end)()
                     GUI.CardOverlay = v == true
                     saveSoonCR()
                 end)
+                secCR:Toggle("Freeze Text", GUI.CardFreeze ~= false, function(v)
+                    GUI.CardFreeze = v == true
+                    saveSoonCR()
+                end):Tooltip("on: the text locks in place once the cards settle, so it can't jitter when you turn the camera. off: it follows the cards' bob")
                 secCR:Slider("Height Nudge", GUI.CardNudge or 0, 1, -80, 80, "px", function(v)
                     GUI.CardNudge = math.floor(tonumber(v) or 0)
                     saveSoonCR()
