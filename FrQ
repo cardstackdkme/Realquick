@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.4"
+GUI.Version = "v9.5"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -111,6 +111,18 @@ GUI.GasBarH = 14
 GUI.GasBarDragging = false
 GUI.GasBarDragOX = 0
 GUI.GasBarDragOY = 0
+
+-- The gas PACK you wear (Tools -> Indicators -> Gaspack Bar): the original 260x40 bar, the same
+-- widget as the old health bar. Separate from the Gas Bar above, which is the ODM gear's gas.
+GUI.GaspackBarVisible = false
+GUI.GaspackBarElements = {}
+GUI.GaspackBarX = 20
+GUI.GaspackBarY = 350
+GUI.GaspackBarW = 260
+GUI.GaspackBarH = 40
+GUI.GaspackBarDragging = false
+GUI.GaspackBarDragOX = 0
+GUI.GaspackBarDragOY = 0
 
 GUI.HealthBarVisible = false
 GUI.HealthBarElements = {}
@@ -3327,6 +3339,43 @@ local function InputLoop()
             end
         end
 
+        -- Gaspack bar drag + refresh: same shape as the two bars above (snaps, moves only while the
+        -- menu is open, saves its spot when you let go). 4x a second: two attribute reads.
+        if GUI.GaspackBarVisible and #GUI.GaspackBarElements > 0 then
+            local pmx, pmy = Mouse.X, Mouse.Y
+            local pDown = ismouse1pressed()
+            local onPack = IsInside(pmx, pmy, GUI.GaspackBarX, GUI.GaspackBarY, GUI.GaspackBarW, GUI.GaspackBarH)
+            if GUI.GaspackBarDragging then
+                if pDown then
+                    local nx, ny = GUI.Snap("gaspack", pmx - GUI.GaspackBarDragOX, pmy - GUI.GaspackBarDragOY, GUI.GaspackBarW, GUI.GaspackBarH)
+                    local ddx, ddy = nx - GUI.GaspackBarX, ny - GUI.GaspackBarY
+                    if ddx ~= 0 or ddy ~= 0 then
+                        GUI.GaspackBarX, GUI.GaspackBarY = GUI.GaspackBarX + ddx, GUI.GaspackBarY + ddy
+                        GUI._pbMoved = true
+                        for _, el in ipairs(GUI.GaspackBarElements) do
+                            pcall(function()
+                                if el.Position then el.Position = Vector2.new(el.Position.X + ddx, el.Position.Y + ddy) end
+                            end)
+                        end
+                    end
+                else
+                    GUI.GaspackBarDragging = false
+                    GUI.SnapGuides(nil, nil)
+                    if GUI._pbMoved then GUI._pbMoved = false; pcall(saveConfig) end
+                end
+            elseif pDown and onPack and not GUI.Dragging and not GUI.CounterDragging
+                   and not GUI.HealthBarDragging and not GUI.GasBarDragging and GUI._menuUp then
+                GUI.GaspackBarDragging = true
+                GUI.GaspackBarDragOX = pmx - GUI.GaspackBarX
+                GUI.GaspackBarDragOY = pmy - GUI.GaspackBarY
+            end
+            local pnow = os.clock()
+            if pnow - (GUI._pbRefreshAt or 0) >= 0.25 then
+                GUI._pbRefreshAt = pnow
+                GUI.UpdateGaspackBar()
+            end
+        end
+
         -- Monitor bars drag + auto-refresh (independent). Whole block is
         -- gated on `next(GUI.MonitorBars)` so we don't poll Mouse / fire
         -- ismouse1pressed every frame when no monitor bars exist (which
@@ -3773,9 +3822,9 @@ local function InputLoop()
         -- duration), and it halves background CPU when the menu is off.
         local interactive = GUI.Visible
             or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
-            or GUI.CounterVisible or GUI.HealthBarVisible or GUI.GasBarVisible
+            or GUI.CounterVisible or GUI.HealthBarVisible or GUI.GasBarVisible or GUI.GaspackBarVisible
             or GUI.ListeningForKey or GUI.ListeningForCloseKey
-            or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging or GUI.GasBarDragging
+            or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging or GUI.GasBarDragging or GUI.GaspackBarDragging
             or GUI.PlayerListDragging or GUI.EnchantsDragging or GUI.RSDiffDragging
             or next(GUI.MonitorBars) ~= nil
         task.wait(interactive and 0.016 or 0.033)
@@ -4029,6 +4078,54 @@ local function UpdateBarWidget(h, val, maxVal, px, py, pw)
         h.fill.Color = col
         h.hl.Size = Vector2.new(math.max(1, fw - 2), 2)
     end)
+end
+
+-- ---------- Gaspack bar (v9.5) ----------
+-- The gas PACK you wear (the backpack tank you refill the ODM gear from), NOT the ODM gas the Gas
+-- Bar shows. v8.2's slim Gas Bar took over this bar's name and toggle; it is back as its own bar in
+-- the original look: the old health widget above (rounded body, colour strip, % and "n / max").
+-- Live-verified path (2026-08-20): Workspace.<you>.attachment_Gaspack.Gaspack.Interaction, a part
+-- with NUMBER attributes Amount / MaxAmount (measured 4180.8 / 4400). It is absent when no pack is
+-- worn: every step is nil-guarded and the bar says "(no pack)". Everything on GUI: the main chunk
+-- is near Lua's 200-local limit.
+do
+    local function readGaspack()
+        local ch = Workspace:FindFirstChild(LocalPlayer.Name)
+        local att = ch and ch:FindFirstChild("attachment_Gaspack")
+        local pack = att and att:FindFirstChild("Gaspack")
+        local inter = pack and pack:FindFirstChild("Interaction")
+        if not inter then return nil end
+        local a, m
+        pcall(function() a = inter:GetAttribute("Amount") end)
+        pcall(function() m = inter:GetAttribute("MaxAmount") end)
+        a, m = tonumber(a), tonumber(m)
+        if not a then return nil end
+        return a, (m and m > 0) and m or 100
+    end
+    local function labelFor(a) return a and "Gaspack" or "Gaspack  (no pack)" end
+    GUI.ClearGaspackBar = function()
+        for _, el in ipairs(GUI.GaspackBarElements) do pcall(function() el:Remove() end) end
+        GUI.GaspackBarElements = {}
+        GUI.GaspackBarHandle = nil   -- points at removed objects: never reuse it
+    end
+    GUI.BuildGaspackBar = function()
+        GUI.ClearGaspackBar()
+        if not GUI.GaspackBarVisible then return end
+        local a, m
+        pcall(function() a, m = readGaspack() end)
+        GUI.GaspackBarHandle = DrawHealthBarWidget(GUI.GaspackBarX, GUI.GaspackBarY, GUI.GaspackBarW,
+            GUI.GaspackBarH, labelFor(a), a or 0, m or 100, 55, GUI.GaspackBarElements)
+    end
+    -- In place, so it never blinks. A full rebuild only when the label changes (a pack put on or
+    -- taken off), the one case where the text is not just a number.
+    GUI.UpdateGaspackBar = function()
+        local h = GUI.GaspackBarHandle
+        if not (GUI.GaspackBarVisible and h) then return end
+        local a, m
+        pcall(function() a, m = readGaspack() end)
+        if h.label ~= labelFor(a) then GUI.BuildGaspackBar(); return end
+        UpdateBarWidget(h, a or 0, m or 100, GUI.GaspackBarX, GUI.GaspackBarY, GUI.GaspackBarW)
+    end
 end
 
 ClearGasBar = function()
@@ -5199,6 +5296,8 @@ UnloadScript = function()
     GUI.HealthBarVisible = false
     ClearGasBar()
     GUI.GasBarVisible = false
+    pcall(function() GUI.ClearGaspackBar() end)
+    GUI.GaspackBarVisible = false
     pcall(function() if GUI.CardReaderClear then GUI.CardReaderClear() end end)
     ClearAllMonitorBars()
     -- Clean up damage floaters
@@ -7255,6 +7354,7 @@ saveConfig = function()
             plLive       = GUI.PLAutoUpdate ~= false,
             healthBar    = GUI.HealthBarVisible,
             gasBar       = GUI.GasBarVisible,
+            gaspackBar   = GUI.GaspackBarVisible,
             counter      = GUI.CounterVisible,
             snapDrag     = GUI.SnapOn ~= false,
             panelsFollow = GUI.PanelsFollowMenu ~= false,
@@ -7288,6 +7388,8 @@ saveConfig = function()
             healthBarY  = GUI.HealthBarY,
             gasBarX     = GUI.GasBarX,
             gasBarY     = GUI.GasBarY,
+            gaspackBarX = GUI.GaspackBarX,
+            gaspackBarY = GUI.GaspackBarY,
             counterX    = GUI.CounterX,
             counterY    = GUI.CounterY,
             playerListX = GUI.PlayerListX, playerListY = GUI.PlayerListY, playerListW = GUI.PlayerListW, playerListH = GUI.PlayerListH,
@@ -7354,6 +7456,7 @@ loadConfig = function()
         if type(f.plLive)       == "boolean" then GUI.PLAutoUpdate         = f.plLive       end
         if type(f.healthBar)    == "boolean" then GUI.HealthBarVisible     = f.healthBar    end
         if type(f.gasBar)       == "boolean" then GUI.GasBarVisible        = f.gasBar       end
+        if type(f.gaspackBar)   == "boolean" then GUI.GaspackBarVisible    = f.gaspackBar   end
         if type(f.counter)      == "boolean" then GUI.CounterVisible       = f.counter      end
         if type(f.snapDrag)     == "boolean" then GUI.SnapOn               = f.snapDrag     end
         if type(f.panelsFollow) == "boolean" then GUI.PanelsFollowMenu     = f.panelsFollow end
@@ -7404,6 +7507,8 @@ loadConfig = function()
         if type(data.panels.healthBarY)  == "number" then GUI.HealthBarY  = data.panels.healthBarY  end
         if type(data.panels.gasBarX)     == "number" then GUI.GasBarX     = data.panels.gasBarX     end
         if type(data.panels.gasBarY)     == "number" then GUI.GasBarY     = data.panels.gasBarY     end
+        if type(data.panels.gaspackBarX) == "number" then GUI.GaspackBarX = data.panels.gaspackBarX end
+        if type(data.panels.gaspackBarY) == "number" then GUI.GaspackBarY = data.panels.gaspackBarY end
         if type(data.panels.counterX)    == "number" then GUI.CounterX    = data.panels.counterX    end
         if type(data.panels.counterY)    == "number" then GUI.CounterY    = data.panels.counterY    end
         if type(data.panels.playerListX) == "number" then GUI.PlayerListX = data.panels.playerListX end
@@ -7459,6 +7564,7 @@ loadConfig = function()
     -- Re-build dependent panels so they reflect the loaded state
     if GUI.HealthBarVisible then BuildHealthBar() else ClearHealthBar() end
     if GUI.GasBarVisible   then BuildGasBar()    else ClearGasBar()    end
+    if GUI.GaspackBarVisible then GUI.BuildGaspackBar() else GUI.ClearGaspackBar() end
     if GUI.CounterVisible   then BuildCounterPanel() end
 end
 
@@ -7509,6 +7615,7 @@ resetConfigToDefaults = function()
 
     ClearHealthBar()
     ClearGasBar()
+    pcall(function() GUI.ClearGaspackBar() end)
     for _, el in ipairs(GUI.CounterElements) do pcall(function() el:Remove() end) end
     GUI.CounterElements = {}
     GUI.CounterGasText = nil
@@ -7530,6 +7637,7 @@ pcall(loadConfig)
 -- rather than chunk locals: the main chunk is close to Lua's 200-local limit.
 GUI.LayoutKeys = {   -- config key -> GUI field
     healthBarX = "HealthBarX", healthBarY = "HealthBarY", gasBarX = "GasBarX", gasBarY = "GasBarY",
+    gaspackBarX = "GaspackBarX", gaspackBarY = "GaspackBarY",
     counterX = "CounterX", counterY = "CounterY",
     playerListX = "PlayerListX", playerListY = "PlayerListY", playerListW = "PlayerListW", playerListH = "PlayerListH",
     enchantsX = "EnchantsX", enchantsY = "EnchantsY", enchantsW = "EnchantsW", enchantsH = "EnchantsH",
@@ -7632,6 +7740,11 @@ GUI.SnapPanels = {   -- key -> x, y, w, h while it is on screen
     gas = function()
         if GUI.GasBarVisible and #(GUI.GasBarElements or {}) > 0 then
             return GUI.GasBarX, GUI.GasBarY, GUI.GasBarW, GUI.GasBarH
+        end
+    end,
+    gaspack = function()
+        if GUI.GaspackBarVisible and #(GUI.GaspackBarElements or {}) > 0 then
+            return GUI.GaspackBarX, GUI.GaspackBarY, GUI.GaspackBarW, GUI.GaspackBarH
         end
     end,
     counter = function()
@@ -11483,6 +11596,9 @@ end)()
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
         end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. With the menu open, drag it to move it; the spot is saved")
+        secInd:Toggle("Gaspack Bar", GUI.GaspackBarVisible, function(v)
+            GUI.GaspackBarVisible = v; GUI.BuildGaspackBar()
+        end):Tooltip("the gas pack you wear (the tank you refill your gear from), in the original bar look. Says (no pack) when none is worn. With the menu open, drag it to move it; the spot is saved")
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
 
         -- ---------- Hiddens: stop the game's own readouts being drawn on your screen ----------
