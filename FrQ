@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.7"
+GUI.Version = "v9.8"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11694,6 +11694,42 @@ end)()
                 uiNotify("Hiddens", "Remove Blind: " .. tostring(why) .. ". Nothing else was changed.", 7)
             end
             _G.RQBlind = { found = found, done = done, why = why, t = os.clock() }
+        end)
+
+        -- BLIND ACTIVE badge: while the game still has you blinded (a PlayerGui.PlayerBlindness GUI
+        -- exists), a small red pill sits in the bottom-left corner, so after Remove Blind you still
+        -- know you are meant to be blind. One FindFirstChild (~2 ms) every 0.5 s; drawn with Drawing,
+        -- so it shows above the black panel too. Removed when the script unloads.
+        task.spawn(function()
+            local TXT, SIZE = "BLIND ACTIVE", 13
+            local bg = Drawing.new("Square")
+            bg.Color, bg.Filled, bg.Corner, bg.Transparency, bg.ZIndex, bg.Visible =
+                Color3.fromRGB(190, 35, 35), true, 5, 0.9, 120, false
+            local t = Drawing.new("Text")
+            t.Text, t.Size, t.Color, t.Outline, t.Center, t.ZIndex, t.Visible =
+                TXT, SIZE, Color3.fromRGB(255, 255, 255), false, false, 121, false
+            pcall(function() t.Font = Drawing.Fonts.SystemBold end)
+            local w = 12 + GUI.TextW(TXT, SIZE) + 12
+            local h = SIZE + 10
+            while GUI.Running do
+                local on = false
+                pcall(function()
+                    local lp = Players.LocalPlayer
+                    local pg = lp and lp:FindFirstChild("PlayerGui")
+                    on = pg ~= nil and pg:FindFirstChild("PlayerBlindness") ~= nil
+                end)
+                if on then
+                    local vh = 1080
+                    pcall(function() vh = Workspace.CurrentCamera.ViewportSize.Y end)
+                    local x, y = 14, vh - 72 - h
+                    bg.Size, bg.Position = Vector2.new(w, h), Vector2.new(x, y)
+                    t.Position = Vector2.new(x + 12, y + 5)
+                end
+                bg.Visible, t.Visible = on, on
+                task.wait(0.5)
+            end
+            pcall(function() bg:Remove() end)
+            pcall(function() t:Remove() end)
         end)
     end)
 
