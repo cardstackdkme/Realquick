@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.6"
+GUI.Version = "v9.7"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11619,60 +11619,81 @@ end)()
         end)
 
         -- Remove Blind: the game's "blind" command drops a ScreenGui, PlayerGui.PlayerBlindness, holding
-        -- one black Frame five screens wide. Matcha can neither read nor set GUI properties through the
-        -- API, so this clears that ScreenGui's Enabled byte in memory (your screen only).
-        -- MEASURED LIVE (2026-11-14): Enabled sits at +1037 (offsets.imtheo.lol ScreenGui_Enabled) and
-        -- reads 1 on all 138 ScreenGuis in PlayerGui. Before writing, the same byte must read 1 on most
-        -- of the other ScreenGuis and 0/1 on the blind one; otherwise nothing is written, so a Roblox
-        -- update that moves the field can't make this poke the wrong memory.
-        local BLIND_ENABLED = 1037
+        -- one black Frame sized UDim2(5,0,5,0) (five screens wide, centred). Matcha can neither read nor
+        -- set GUI properties through the API, so this shrinks that Frame to nothing in memory (your
+        -- screen only).
+        -- MEASURED LIVE (2026-11-14) on the blind Frame: Size = UDim2 at +712 (X scale float, X offset
+        -- int, Y scale float, Y offset int; read 5,0,5,0) and AbsoluteSize at +252 (two floats; read
+        -- 9600,5400 = 5 x 1920x1080). v9.6 cleared a byte at ScreenGui+1037 (a published
+        -- "Enabled" offset): it read back 0 but the blind stayed and the byte returned to 1, so that is
+        -- not Enabled on this build and is no longer touched.
+        -- Before writing, the Frame's AbsoluteSize must equal what its Size gives on this screen
+        -- (within a few px); otherwise nothing is written, so a Roblox update that moves the fields
+        -- can't make this poke the wrong memory.
+        local SIZE_OFF, ABS_OFF = 712, 252
         local function guiAddr(inst)
             local a = inst and inst.Address
             if type(a) == "number" then return a end
             if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
             return nil
         end
-        local function readByte(a)
-            local ok, v = pcall(memory_read, "byte", a)
-            if ok and type(v) == "number" then return v end
+        local function rd(t, a)
+            local ok, v = pcall(memory_read, t, a)
+            if ok and type(v) == "number" and v == v then return v end
             return nil
+        end
+        local function shrink(f)
+            local a = guiAddr(f)
+            if not a then return "no address" end
+            local sx, ox = rd("float", a + SIZE_OFF), rd("int", a + SIZE_OFF + 4)
+            local sy, oy = rd("float", a + SIZE_OFF + 8), rd("int", a + SIZE_OFF + 12)
+            local ax, ay = rd("float", a + ABS_OFF), rd("float", a + ABS_OFF + 4)
+            if not (sx and ox and sy and oy and ax and ay) then return "unreadable" end
+            if sx == 0 and ox == 0 and sy == 0 and oy == 0 then return "ok" end
+            local vx, vy
+            pcall(function()
+                local v = workspace.CurrentCamera.ViewportSize
+                vx, vy = v.X, v.Y
+            end)
+            if not (vx and vy and vx > 0 and vy > 0) then return "no viewport size" end
+            -- the inset can make the viewport differ from the GUI area by a few dozen px per scale unit
+            local tolX, tolY = 8 + 2 * math.abs(sx) * 60, 8 + 2 * math.abs(sy) * 60
+            if math.abs(ax - (sx * vx + ox)) > tolX or math.abs(ay - (sy * vy + oy)) > tolY then
+                return "fields moved"
+            end
+            pcall(memory_write, "float", a + SIZE_OFF, 0)
+            pcall(memory_write, "int", a + SIZE_OFF + 4, 0)
+            pcall(memory_write, "float", a + SIZE_OFF + 8, 0)
+            pcall(memory_write, "int", a + SIZE_OFF + 12, 0)
+            pcall(memory_write, "float", a + ABS_OFF, 0)
+            pcall(memory_write, "float", a + ABS_OFF + 4, 0)
+            if rd("float", a + SIZE_OFF) == 0 and rd("float", a + SIZE_OFF + 8) == 0 then return "ok" end
+            return "write refused"
         end
         secHid:Button("Remove Blind", function()
             local lp = Players.LocalPlayer
             local pg = lp and lp:FindFirstChild("PlayerGui")
             if not pg then uiNotify("Hiddens", "PlayerGui not found", 4) return end
-            local blinds, checked, good = {}, 0, 0
+            local found, done, why = 0, 0, nil
             for _, g in ipairs(pg:GetChildren()) do
-                local a = guiAddr(g)
-                if a and g.ClassName == "ScreenGui" then
-                    if g.Name == "PlayerBlindness" then
-                        blinds[#blinds + 1] = a
-                    elseif checked < 12 then
-                        checked = checked + 1
-                        if readByte(a + BLIND_ENABLED) == 1 then good = good + 1 end
+                if g.Name == "PlayerBlindness" then
+                    for _, f in ipairs(g:GetChildren()) do
+                        if f.ClassName == "Frame" or f.ClassName == "ImageLabel" then
+                            found = found + 1
+                            local r = shrink(f)
+                            if r == "ok" then done = done + 1 else why = r end
+                        end
                     end
                 end
             end
-            if #blinds == 0 then uiNotify("Hiddens", "You aren't blinded (no PlayerBlindness GUI)", 4) return end
-            if checked < 4 or good < checked - 2 then
-                uiNotify("Hiddens", "Remove Blind: the Enabled field moved in a Roblox update. Nothing was changed.", 7)
-                return
-            end
-            local cleared = 0
-            for _, a in ipairs(blinds) do
-                local b = readByte(a + BLIND_ENABLED)
-                if b == 1 then
-                    pcall(memory_write, "byte", a + BLIND_ENABLED, 0)
-                    if readByte(a + BLIND_ENABLED) == 0 then cleared = cleared + 1 end
-                elseif b == 0 then
-                    cleared = cleared + 1
-                end
-            end
-            if cleared == #blinds then
-                uiNotify("Hiddens", "Blind removed", 4)
+            if found == 0 then
+                uiNotify("Hiddens", "You aren't blinded (no PlayerBlindness GUI)", 4)
+            elseif done == found then
+                uiNotify("Hiddens", "Blind removed. Still black? Resize the Roblox window once (or F11 twice).", 7)
             else
-                uiNotify("Hiddens", "Remove Blind: couldn't clear it (" .. cleared .. "/" .. #blinds .. ")", 6)
+                uiNotify("Hiddens", "Remove Blind: " .. tostring(why) .. ". Nothing else was changed.", 7)
             end
+            _G.RQBlind = { found = found, done = done, why = why, t = os.clock() }
         end)
     end)
 
