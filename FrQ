@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.20"
+GUI.Version = "v9.21"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -319,7 +319,7 @@ local TITAN = {
     FontIndex = 2,
     ColorIndex = 1,
     Objects = {},
-    SlammerLabels = false,   -- orange SLAMMER tag on Slammer titans (see Slammer labels below)
+    SlammerESP = false,      -- Slammer ESP: orange skeleton + SLAMMER label on Slammers only, own toggle
     Slammers = {},           -- [titan id] = true, filled by TITAN.SlammerTick
 }
 
@@ -2349,6 +2349,7 @@ titanApplyColor = function()
         if data.headCircle then data.headCircle.Color = c end
         for _, ln in ipairs(data.wireLines) do ln.Color = c end
         data.nameTag.Color = c
+        data.slamTinted = false
     end
 end
 
@@ -2425,7 +2426,7 @@ local function titanRegisterObj(titanModel)
         nameTag.Visible = false
         local slamTag = Drawing.new("Text")
         slamTag.Text = "SLAMMER"
-        slamTag.Color = Color3.fromRGB(255, 150, 40)
+        slamTag.Color = TITAN.SLAM_COLOR or Color3.fromRGB(255, 150, 40)
         slamTag.Size = 15
         slamTag.Font = TITAN_FONTS[TITAN.FontIndex].font
         slamTag.Center = true
@@ -2453,7 +2454,7 @@ local function titanScan()
 end
 
 local function titanUpdate()
-    if not TITAN.Enabled then
+    if not TITAN.Enabled and not TITAN.SlammerESP then
         for _, data in pairs(TITAN.Objects) do
             for _, ln in ipairs(data.boneLines) do ln.Visible = false end
             for _, dot in pairs(data.jointDots) do dot.Visible = false end
@@ -2479,9 +2480,14 @@ local function titanUpdate()
             data.nameTag.Visible = false; if data.slamTag then data.slamTag.Visible = false end
         end
 
-        if not model or not model.Parent then
+        -- Slammer ESP owns its Slammers: always drawn as an orange skeleton with the SLAMMER label,
+        -- whether or not Titan ESP is on. With Titan ESP off, every other titan is hidden.
+        local isSlam = TITAN.SlammerESP and TITAN.Slammers[id] == true
+        if data.slamTinted ~= isSlam then TITAN.SlamTint(data, isSlam) end
+
+        if not model or not model.Parent or (not TITAN.Enabled and not isSlam) then
             hideAll()
-        elseif isBones then
+        elseif isBones or isSlam then
             for _, ln in ipairs(data.wireLines) do ln.Visible = false end
 
             local screenParts = {}
@@ -2533,7 +2539,7 @@ local function titanUpdate()
 
                 for name, dot in pairs(data.jointDots) do
                     local sc = screenParts[name]
-                    if sc and TITAN.ShowJointDots then
+                    if sc and TITAN.ShowJointDots and TITAN.Enabled then
                         dot.Position = Vector2.new(sc.X, sc.Y)
                         dot.Visible = true
                     else
@@ -2543,7 +2549,7 @@ local function titanUpdate()
 
                 if data.headCircle then
                     local headSc = screenParts["Head"]
-                    if headSc and TITAN.ShowHeadCircle then
+                    if headSc and TITAN.ShowHeadCircle and TITAN.Enabled then
                         data.headCircle.Position = Vector2.new(headSc.X, headSc.Y)
                         data.headCircle.Visible = true
                     else
@@ -2551,7 +2557,7 @@ local function titanUpdate()
                     end
                 end
 
-                if TITAN.ShowNameTag then
+                if TITAN.ShowNameTag and TITAN.Enabled and not isSlam then
                     data.nameTag.Position = Vector2.new(topScreenX, topScreenY - 20)
                     data.nameTag.Text = "Titan"
                     data.nameTag.Visible = true
@@ -2671,11 +2677,19 @@ end
 -- Workspace.Titans for 3 s (its table exists by then), at most once a minute, and never with no
 -- titans. Switching the toggle on scans at once (still at most once per 10 s). A titan that never
 -- shows up in any record is given up on after 3 scans. Debug state: _G.RQSlammer.
+TITAN.SLAM_COLOR = Color3.fromRGB(255, 150, 40)
+-- Tint (or un-tint) one titan's skeleton for Slammer ESP. Only called when the state flips.
+TITAN.SlamTint = function(data, on)
+    local c = on and TITAN.SLAM_COLOR or TITAN.ESPColor
+    for _, ln in ipairs(data.boneLines) do ln.Color = c end
+    for _, ln in ipairs(data.wireLines) do ln.Color = c end
+    data.slamTinted = on
+end
 TITAN.SlamTag = function(data, id, x, y)
     local tag = data.slamTag
     if not tag then return end
-    if TITAN.SlammerLabels and TITAN.Slammers[id] then
-        tag.Position = Vector2.new(x, y - (TITAN.ShowNameTag and 38 or 20))
+    if TITAN.SlammerESP and TITAN.Slammers[id] then
+        tag.Position = Vector2.new(x, y - 20)
         tag.Visible = true
     else
         tag.Visible = false
@@ -2800,7 +2814,7 @@ local function scan()
     _G.RQSlammer = dbg
 end
 
--- Called from ESPLoop's periodic block (~1 s) while Titan ESP and Slammer Labels are on.
+-- Called from ESPLoop's periodic block (~1 s) while Slammer ESP is on.
 TITAN.SlammerTick = function(force)
     if scanning then return end
     local live = liveIds()
@@ -7387,7 +7401,7 @@ local function ESPLoop()
         -- Check what's active
         local oreOn = anyOreEnabled()
         local anyActive = oreOn or MARCS.Enabled or GEAR.Enabled or RESUPPLY.Enabled
-            or TITAN.Enabled or ANIMAL.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
+            or TITAN.Enabled or TITAN.SlammerESP or ANIMAL.Enabled or ACTOR_ESP.Enabled or DEATHLOG.Enabled
             or LANDMINE.Enabled or GUI.CounterVisible or ACTOR_ESP.Classify
 
         -- If nothing is active, sleep longer
@@ -7439,7 +7453,7 @@ local function ESPLoop()
             if LANDMINE.Enabled then LANDMINE.update(); wasOn.landmine = true
             elseif wasOn.landmine then LANDMINE.hide(); wasOn.landmine = false end
 
-            if TITAN.Enabled then titanUpdate(); wasOn.titan = true
+            if TITAN.Enabled or TITAN.SlammerESP then titanUpdate(); wasOn.titan = true
             elseif wasOn.titan then
                 for _, data in pairs(TITAN.Objects) do
                     for _, ln in ipairs(data.boneLines) do ln.Visible = false end
@@ -7496,9 +7510,9 @@ local function ESPLoop()
                 if RESUPPLY.Enabled or GUI.CounterVisible then resupplyScan(); resupplyCleanup() end
                 if RESUPPLY.Enabled or GUI.CounterVisible then updateResupplyCounter() end
                 if LANDMINE.Enabled then LANDMINE.scan(); LANDMINE.cleanup() end
-                if TITAN.Enabled then
+                if TITAN.Enabled or TITAN.SlammerESP then
                     titanScan(); titanCleanup()
-                    if TITAN.SlammerLabels and TITAN.SlammerTick then TITAN.SlammerTick() end
+                    if TITAN.SlammerESP and TITAN.SlammerTick then TITAN.SlammerTick() end
                 end
                 if ANIMAL.Enabled then animalScan(); animalCleanup() end
                 if GUI.CounterVisible then
@@ -7540,7 +7554,7 @@ saveConfig = function()
             resupply     = RESUPPLY.Enabled,
             landmine     = LANDMINE.Enabled,
             titan        = TITAN.Enabled,
-            slammerLabels = TITAN.SlammerLabels,
+            slammerEsp   = TITAN.SlammerESP,
             animal       = ANIMAL.Enabled,
             plLive       = GUI.PLAutoUpdate ~= false,
             healthBar    = GUI.HealthBarVisible,
@@ -7641,7 +7655,7 @@ loadConfig = function()
             LANDMINE.NeedFull   = f.landmine    -- restored ON: sweep once so it paints immediately
         end
         if type(f.titan)        == "boolean" then TITAN.Enabled            = f.titan        end
-        if type(f.slammerLabels) == "boolean" then TITAN.SlammerLabels    = f.slammerLabels end
+        if type(f.slammerEsp)   == "boolean" then TITAN.SlammerESP         = f.slammerEsp   end
         if type(f.animal)       == "boolean" then ANIMAL.Enabled           = f.animal       end
         -- plLive, not the old plAutoUpdate: that one was saved "off" while it did nothing, and
         -- reading it would now start every existing setup with a frozen list.
@@ -7778,7 +7792,7 @@ resetConfigToDefaults = function()
     GEAR.Enabled             = false
     RESUPPLY.Enabled         = false
     TITAN.Enabled            = false
-    TITAN.SlammerLabels      = false
+    TITAN.SlammerESP         = false
     ANIMAL.Enabled           = false
     ACTOR_ESP.Enabled        = false
     GUI.PLAutoUpdate         = true
@@ -11315,10 +11329,10 @@ end)()
 
         local secEnt = tab:Section("Entity ESP", "Right", "Living things")
         secEnt:Toggle("Titan", TITAN.Enabled, function(v) TITAN.Enabled = v end)
-        secEnt:Toggle("Slammer Labels", TITAN.SlammerLabels, function(v)
-            TITAN.SlammerLabels = v == true
-            if TITAN.SlammerLabels and TITAN.Enabled and TITAN.SlammerTick then pcall(TITAN.SlammerTick, true) end
-        end):Tooltip("orange SLAMMER tag above Slammer titans (needs Titan on). Read from the game's own titan list: it checks when a new titan appears, at most once a minute, and each check freezes the menu and ESP for about 5 s")
+        secEnt:Toggle("Slammer ESP", TITAN.SlammerESP, function(v)
+            TITAN.SlammerESP = v == true
+            if TITAN.SlammerESP and TITAN.SlammerTick then pcall(TITAN.SlammerTick, true) end
+        end):Tooltip("orange skeleton + SLAMMER label on Slammer titans only, separate from Titan. With Titan on too, Slammers switch to the orange look. Read from the game's own titan list: it checks when a new titan appears, at most once a minute, and each check freezes the menu and ESP for about 5 s")
         secEnt:Toggle("Animals", ANIMAL.Enabled, function(v) ANIMAL.Enabled = v end)
         secEnt:Toggle("Actors", ACTOR_ESP.Enabled, function(v)
             ACTOR_ESP.Enabled = v
