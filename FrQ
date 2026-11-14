@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.5"
+GUI.Version = "v9.6"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11616,6 +11616,63 @@ end)()
         pcall(function() GUI._uiHV.item.noSave = true end)
         pcall(function()
             GUI._uiHV:SetText(GUI.HideVelocity == true and "Show Velocity" or "Hide Velocity")
+        end)
+
+        -- Remove Blind: the game's "blind" command drops a ScreenGui, PlayerGui.PlayerBlindness, holding
+        -- one black Frame five screens wide. Matcha can neither read nor set GUI properties through the
+        -- API, so this clears that ScreenGui's Enabled byte in memory (your screen only).
+        -- MEASURED LIVE (2026-11-14): Enabled sits at +1037 (offsets.imtheo.lol ScreenGui_Enabled) and
+        -- reads 1 on all 138 ScreenGuis in PlayerGui. Before writing, the same byte must read 1 on most
+        -- of the other ScreenGuis and 0/1 on the blind one; otherwise nothing is written, so a Roblox
+        -- update that moves the field can't make this poke the wrong memory.
+        local BLIND_ENABLED = 1037
+        local function guiAddr(inst)
+            local a = inst and inst.Address
+            if type(a) == "number" then return a end
+            if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
+            return nil
+        end
+        local function readByte(a)
+            local ok, v = pcall(memory_read, "byte", a)
+            if ok and type(v) == "number" then return v end
+            return nil
+        end
+        secHid:Button("Remove Blind", function()
+            local lp = Players.LocalPlayer
+            local pg = lp and lp:FindFirstChild("PlayerGui")
+            if not pg then uiNotify("Hiddens", "PlayerGui not found", 4) return end
+            local blinds, checked, good = {}, 0, 0
+            for _, g in ipairs(pg:GetChildren()) do
+                local a = guiAddr(g)
+                if a and g.ClassName == "ScreenGui" then
+                    if g.Name == "PlayerBlindness" then
+                        blinds[#blinds + 1] = a
+                    elseif checked < 12 then
+                        checked = checked + 1
+                        if readByte(a + BLIND_ENABLED) == 1 then good = good + 1 end
+                    end
+                end
+            end
+            if #blinds == 0 then uiNotify("Hiddens", "You aren't blinded (no PlayerBlindness GUI)", 4) return end
+            if checked < 4 or good < checked - 2 then
+                uiNotify("Hiddens", "Remove Blind: the Enabled field moved in a Roblox update. Nothing was changed.", 7)
+                return
+            end
+            local cleared = 0
+            for _, a in ipairs(blinds) do
+                local b = readByte(a + BLIND_ENABLED)
+                if b == 1 then
+                    pcall(memory_write, "byte", a + BLIND_ENABLED, 0)
+                    if readByte(a + BLIND_ENABLED) == 0 then cleared = cleared + 1 end
+                elseif b == 0 then
+                    cleared = cleared + 1
+                end
+            end
+            if cleared == #blinds then
+                uiNotify("Hiddens", "Blind removed", 4)
+            else
+                uiNotify("Hiddens", "Remove Blind: couldn't clear it (" .. cleared .. "/" .. #blinds .. ")", 6)
+            end
         end)
     end)
 
