@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.21"
+GUI.Version = "v9.30"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -320,7 +320,7 @@ local TITAN = {
     ColorIndex = 1,
     Objects = {},
     SlammerESP = false,      -- Slammer ESP: orange skeleton + SLAMMER label on Slammers only, own toggle
-    Slammers = {},           -- [titan id] = true, filled by TITAN.SlammerTick
+    Slammers = {},           -- [titan id] = true: the dive watch (TITAN.SlammerTick) or Scan Slammers
 }
 
 -- R15 bone connections: {partA, partB}
@@ -2661,22 +2661,28 @@ local function titanCleanup()
     end
 end
 
--- ===== Slammer labels =====
--- A Slammer's model is identical to a normal titan's (rig named "Default", no attributes). Its type
--- lives only in the game's client titan table (ClientTitanHandler: id, scale, isSupporter, variant,
--- root, inactive, ...). require() doesn't work in Matcha, so the table is reached through
--- getgc("isSupporter") (a key only titan tables have: 24 records vs 1715 for "variant"): each record is
--- the address of that value slot inside a Luau hash-node array, and the sibling `variant`, `id` and
--- `inactive` slots are read from the same array.
--- MEASURED LIVE (2026-11-14): nodes are 32 bytes (value +0, type tag int +12: 1 bool / 3 number /
--- 5 string, key TString* +16); TString length int +20, chars +24. Each titan shows twice: its creation
--- payload (inactive nil) and its live table (inactive false; true once dead). id = the Workspace.Titans
--- child's Name.
--- getgc walks the whole Lua heap: MEASURED 4.8 s whatever the key, and Matcha's thread (menu, every
--- ESP) is frozen meanwhile. So a scan only runs when a titan that is not classified yet has been in
--- Workspace.Titans for 3 s (its table exists by then), at most once a minute, and never with no
--- titans. Switching the toggle on scans at once (still at most once per 10 s). A titan that never
--- shows up in any record is given up on after 3 scans. Debug state: _G.RQSlammer.
+-- ===== Slammer ESP: finding the Slammers =====
+-- A Slammer's model is identical to a normal titan's (rig named "Default", same parts and proportions,
+-- no attributes, sizes overlap). Two ways to tell them apart, neither automatic getgc:
+--
+-- 1) DIVE WATCH (always on with Slammer ESP, free). The Slammer's only move of its own is its dive
+--    (Client.Entities.Titans.Types.Slammer.Actions.Slammer.SlammerTitanDive; nothing else in the game
+--    dives). Its animations are the `Dives` list in ReplicatedStorage.Common.Animations.Titans. Once a
+--    second, each titan's playing animations are read from memory (Animator.ActiveAnimations linked
+--    list, the bridge's read_anim_ids walk); a titan playing a dive is a Slammer until it is gone.
+--    Limit (game code): a Slammer only dives with 2+ players within 200 studs, every 15 s at most.
+--    MEASURED LIVE (2026-11-14): Animator+2336 -> list head; node -> next at +0, AnimationTrack* at +16;
+--    AnimationTrack+160 -> Animation; Animation+168 -> AnimationId string; every hop class-checked
+--    (Instance+24 -> ClassDescriptor, +8 -> class-name string), so stale offsets read as nothing.
+--
+-- 2) SCAN SLAMMERS button (manual, ~5 s freeze). Reads the game's client titan table
+--    (ClientTitanHandler: id, variant, inactive, ...) through getgc("isSupporter"): each record is the
+--    address of that value slot in a Luau hash-node array, and the sibling `variant`, `id` and
+--    `inactive` slots are read next to it (nodes are 32 bytes: value +0, type tag int +12 [1 bool /
+--    3 number / 5 string], key TString* +16; TString length int +20, chars +24). getgc walks the whole
+--    Lua heap (MEASURED 4.1-4.8 s whatever the key) and Matcha's thread (menu, every ESP, pins) is
+--    frozen meanwhile, so it only ever runs when you press the button.
+-- Debug state: _G.RQSlammer.
 TITAN.SLAM_COLOR = Color3.fromRGB(255, 150, 40)
 -- Tint (or un-tint) one titan's skeleton for Slammer ESP. Only called when the state flips.
 TITAN.SlamTint = function(data, on)
@@ -2696,17 +2702,108 @@ TITAN.SlamTag = function(data, id, x, y)
     end
 end
 ;(function()
+local DIVES = { ["84590093365567"] = true, ["127128126598226"] = true, ["124249158555570"] = true }
+local ACTIVE, NODE_TRACK, TRACK_ANIM, ANIM_ID, CLASS_DESC, CLASS_NAME = 2336, 16, 160, 168, 24, 8
 local NODE, SPAN = 32, 31
-local COOLDOWN, FORCE_GAP, SETTLE, MAX_MISSES = 60, 10, 3, 3
-local classified, misses, firstSeen = {}, {}, {}
+local SCAN_GAP = 10
 local lastScan, scanning = -math.huge, false
-local keyNames = {}   -- key TString* -> text (Luau interns strings: one pointer per name); reset per scan
+local animators = {}        -- [titan id] = Animator address (stable while the titan exists)
+local why = nil             -- set when the dive watch can't read animations
+local tracksSeen = 0        -- tracks read in total; stays 0 if the offsets went stale
+local dbg = { dives = 0, scans = 0 }
+_G.RQSlammer = dbg
 
 local function rd(t, a)
     local ok, v = pcall(memory_read, t, a)
     if ok then return v end
     return nil
 end
+local function rptr(x)
+    if type(x) ~= "number" or x <= 4096 then return nil end
+    local v = rd("uintptr_t", x)
+    if type(v) == "number" and v > 4096 then return v end
+    return nil
+end
+local function rstr(x)
+    if type(x) ~= "number" or x <= 4096 then return nil end
+    local s = rd("string", x)
+    if type(s) == "string" then return s end
+    return nil
+end
+local function className(inst)
+    local d = rptr(inst and inst + CLASS_DESC)
+    return d and rstr(rptr(d + CLASS_NAME)) or nil
+end
+local function liveTitans()
+    local list = {}
+    pcall(function()
+        local f = Workspace:FindFirstChild("Titans")
+        if f then list = f:GetChildren() end
+    end)
+    return list
+end
+
+-- ---------- 1) dive watch ----------
+local function animatorOf(m, id)
+    local a = animators[id]
+    if a then return a end
+    pcall(function()
+        local rig = m:FindFirstChild("Default") or m:FindFirstChildOfClass("Model")
+        local ac = rig and rig:FindFirstChildOfClass("AnimationController")
+        local an = ac and ac:FindFirstChildOfClass("Animator")
+        a = an and tonumber(an.Address) or nil
+    end)
+    if a then animators[id] = a end
+    return a
+end
+local function isDiving(animator)
+    local head = rptr(animator + ACTIVE)
+    if not head then return false end
+    local node, guard = rptr(head), 0
+    while node and node ~= head and guard < 24 do
+        guard = guard + 1
+        local track = rptr(node + NODE_TRACK)
+        if track and className(track) == "AnimationTrack" then
+            tracksSeen = tracksSeen + 1
+            local anim = rptr(track + TRACK_ANIM)
+            if anim and className(anim) == "Animation" then
+                local id = rstr(rptr(anim + ANIM_ID))
+                if id and DIVES[id:match("%d+") or ""] then return true end
+            end
+        end
+        node = rptr(node)
+    end
+    return false
+end
+local watchTicks = 0
+local function diveWatch(titans)
+    local live = {}
+    for _, m in ipairs(titans) do
+        local id = m.Name
+        live[id] = true
+        if not TITAN.Slammers[id] then
+            local a = animatorOf(m, id)
+            if a and isDiving(a) then
+                TITAN.Slammers[id] = true
+                dbg.dives = dbg.dives + 1
+                dbg.lastDive = id
+            end
+        end
+    end
+    for id in pairs(animators) do if not live[id] then animators[id] = nil end end
+    for id in pairs(TITAN.Slammers) do if not live[id] then TITAN.Slammers[id] = nil end end
+    -- titans always play an idle/walk, so many ticks with titans around and not one track read means
+    -- the offsets moved in a Roblox update: say so once, the Scan button still works
+    watchTicks = watchTicks + 1
+    if not why and watchTicks >= 10 and tracksSeen == 0 and #titans > 0 then
+        why = "can't read titan animations (Roblox update?) - use Scan Slammers"
+        dbg.why = why
+        pcall(function() uiNotify("Slammer ESP", "Dive watch " .. why, 8) end)
+    end
+end
+
+-- ---------- 2) manual scan ----------
+local keyNames = {}   -- key TString* -> text (Luau interns strings: one pointer per name); reset per scan
 local function str(p, maxLen)
     if type(p) ~= "number" or p < 65536 then return nil end
     local len = rd("int", p + 20)
@@ -2736,110 +2833,85 @@ local function valueAt(a)
     if tt == 1 then return (rd("int", a) or 0) ~= 0 end
     return nil
 end
-local function liveIds()
-    local ids = {}
-    pcall(function()
-        local f = Workspace:FindFirstChild("Titans")
-        if f then for _, m in ipairs(f:GetChildren()) do ids[m.Name] = true end end
-    end)
-    return ids
-end
 local function addrOf(e)
     local a = e.addr
     if type(a) == "number" then return a end
     if type(a) == "string" then return tonumber(a) or tonumber((a:gsub("^0[xX]", "")), 16) end
     return nil
 end
-
 local function scan()
     local t0 = os.clock()
     keyNames = {}
-    local live = liveIds()
-    local dbg = { records = 0, titanRecords = 0 }
+    local live = {}
+    for _, m in ipairs(liveTitans()) do live[m.Name] = true end
     local ok, res = pcall(getgc, "isSupporter")
-    if not ok or type(res) ~= "table" then
-        dbg.why = "getgc failed: " .. tostring(res)
-    else
-        local seen, slam, dead = {}, {}, {}
-        for _, e in pairs(res) do
-            if type(e) == "table" then
-                dbg.records = dbg.records + 1
-                local slot = addrOf(e)
-                if slot and keyAt(slot) == "isSupporter" then
-                    local id, idK, inactive, inK, v, vK = nil, math.huge, nil, math.huge, nil, math.huge
-                    for k = -SPAN, SPAN do
-                        if k ~= 0 then
-                            local a = slot + NODE * k
-                            local key = keyAt(a)
-                            local ak = math.abs(k)
-                            if key == "id" and ak < idK then
-                                local val = valueAt(a)
-                                if val ~= nil then id, idK = tostring(val), ak end
-                            elseif key == "inactive" and ak < inK then
-                                inactive, inK = valueAt(a), ak
-                            elseif key == "variant" and ak < vK then
-                                local val = valueAt(a)
-                                if type(val) == "string" then v, vK = val, ak end
-                            end
-                        end
-                    end
-                    if id and v and live[id] then
-                        dbg.titanRecords = dbg.titanRecords + 1
-                        seen[id] = true
-                        if v == "slammer" then slam[id] = true end
-                        if inactive == true then dead[id] = true end
+    if not ok or type(res) ~= "table" then return nil, "getgc failed: " .. tostring(res) end
+    local slam, dead = {}, {}
+    for _, e in pairs(res) do
+        local slot = type(e) == "table" and addrOf(e) or nil
+        if slot and keyAt(slot) == "isSupporter" then
+            local id, idK, inactive, inK, v, vK = nil, math.huge, nil, math.huge, nil, math.huge
+            for k = -SPAN, SPAN do
+                if k ~= 0 then
+                    local a = slot + NODE * k
+                    local key = keyAt(a)
+                    local ak = math.abs(k)
+                    if key == "id" and ak < idK then
+                        local val = valueAt(a)
+                        if val ~= nil then id, idK = tostring(val), ak end
+                    elseif key == "inactive" and ak < inK then
+                        inactive, inK = valueAt(a), ak
+                    elseif key == "variant" and ak < vK then
+                        local val = valueAt(a)
+                        if type(val) == "string" then v, vK = val, ak end
                     end
                 end
             end
-        end
-        local slammers = {}
-        for id in pairs(live) do
-            if seen[id] then
-                classified[id], misses[id] = true, nil
-                if slam[id] and not dead[id] then slammers[id] = true end
-            else
-                misses[id] = (misses[id] or 0) + 1
-                if misses[id] >= MAX_MISSES then classified[id] = true end
-                -- known from an earlier scan and not seen dying: keep it
-                if TITAN.Slammers[id] then slammers[id] = true end
+            if id and live[id] then
+                if v == "slammer" then slam[id] = true end
+                if inactive == true then dead[id] = true end
             end
         end
-        TITAN.Slammers = slammers
     end
-    local ids = {}
-    for id in pairs(TITAN.Slammers) do ids[#ids + 1] = id end
-    dbg.ids = ids
-    dbg.lastScan = os.clock()
+    local n = 0
+    for id in pairs(slam) do
+        if not dead[id] then TITAN.Slammers[id] = true; n = n + 1 end
+    end
+    dbg.scans = dbg.scans + 1
     dbg.scanMs = math.floor((os.clock() - t0) * 1000 + 0.5)
-    _G.RQSlammer = dbg
+    return n
 end
 
--- Called from ESPLoop's periodic block (~1 s) while Slammer ESP is on.
-TITAN.SlammerTick = function(force)
+-- Scan Slammers button. One getgc; freezes the menu/ESP for ~5 s, so it is never automatic.
+TITAN.SlammerScanNow = function()
     if scanning then return end
-    local live = liveIds()
-    for id in pairs(classified) do if not live[id] then classified[id] = nil end end
-    for id in pairs(misses) do if not live[id] then misses[id] = nil end end
-    for id in pairs(firstSeen) do if not live[id] then firstSeen[id] = nil end end
-    for id in pairs(TITAN.Slammers) do if not live[id] then TITAN.Slammers[id] = nil end end
-    local now, any, settled = os.clock(), false, false
-    for id in pairs(live) do
-        any = true
-        if not firstSeen[id] then firstSeen[id] = now end
-        if not classified[id] and now - firstSeen[id] >= SETTLE then settled = true end
+    if os.clock() - lastScan < SCAN_GAP then
+        uiNotify("Slammer ESP", "Scanned a moment ago - wait a few seconds", 3)
+        return
     end
-    if not any then return end
-    if force == true then
-        if now - lastScan < FORCE_GAP then return end
-    elseif not settled or now - lastScan < COOLDOWN then
+    if #liveTitans() == 0 then
+        uiNotify("Slammer ESP", "No titans loaded near you to scan", 4)
         return
     end
     lastScan, scanning = os.clock(), true
+    uiNotify("Slammer ESP", "Scanning... (~5 s freeze)", 3)
     task.spawn(function()
-        local ok, err = pcall(scan)
-        if not ok then _G.RQSlammer = { why = "scan error: " .. tostring(err), lastScan = os.clock() } end
+        task.wait(0.1)   -- let the toast draw before the freeze
+        local ok, n, err = pcall(scan)
         scanning = false
+        if ok and n then
+            local total = 0
+            for _ in pairs(TITAN.Slammers) do total = total + 1 end
+            uiNotify("Slammer ESP", n .. " Slammer" .. (n == 1 and "" or "s") .. " found (" .. total .. " tagged now)", 5)
+        else
+            uiNotify("Slammer ESP", "Scan failed: " .. tostring(ok and err or n), 6)
+        end
     end)
+end
+
+-- Called from ESPLoop's periodic block (~1 s) while Slammer ESP is on: the dive watch only.
+TITAN.SlammerTick = function()
+    pcall(diveWatch, liveTitans())
 end
 end)()
 
@@ -11331,8 +11403,10 @@ end)()
         secEnt:Toggle("Titan", TITAN.Enabled, function(v) TITAN.Enabled = v end)
         secEnt:Toggle("Slammer ESP", TITAN.SlammerESP, function(v)
             TITAN.SlammerESP = v == true
-            if TITAN.SlammerESP and TITAN.SlammerTick then pcall(TITAN.SlammerTick, true) end
-        end):Tooltip("orange skeleton + SLAMMER label on Slammer titans only, separate from Titan. With Titan on too, Slammers switch to the orange look. Read from the game's own titan list: it checks when a new titan appears, at most once a minute, and each check freezes the menu and ESP for about 5 s")
+        end):Tooltip("orange skeleton + SLAMMER label on Slammer titans only, separate from Titan. A Slammer is tagged the moment it dives (free, no freeze; it only dives with 2+ players near it), or press Scan Slammers to find them all at once")
+        secEnt:Button("Scan Slammers  (~5s freeze)", function()
+            if TITAN.SlammerScanNow then TITAN.SlammerScanNow() end
+        end)
         secEnt:Toggle("Animals", ANIMAL.Enabled, function(v) ANIMAL.Enabled = v end)
         secEnt:Toggle("Actors", ACTOR_ESP.Enabled, function(v)
             ACTOR_ESP.Enabled = v
