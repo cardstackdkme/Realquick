@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.8"
+GUI.Version = "v9.9"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11730,6 +11730,37 @@ end)()
             end
             pcall(function() bg:Remove() end)
             pcall(function() t:Remove() end)
+        end)
+
+        -- Blind Self: the opposite of Remove Blind. A full-screen black square, like the game's blind,
+        -- that stays until you switch it off. Drawn at ZIndex 1, under every other Drawing: the menu
+        -- (lib ZIndex 100000+), ESP and HUD bars (9+) and the BLIND ACTIVE pill stay visible on top,
+        -- so you can always switch it back off. Sized to the viewport every 0.25 s (window resizes).
+        -- Never saved to a config, so a reload always starts with it off.
+        GUI.BlindSelf = false
+        local selfBlind = Drawing.new("Square")
+        selfBlind.Color, selfBlind.Filled, selfBlind.Transparency, selfBlind.ZIndex, selfBlind.Visible =
+            Color3.fromRGB(0, 0, 0), true, 1, 1, false
+        local function placeSelfBlind()
+            local vw, vh = 1920, 1080
+            pcall(function() local v = Workspace.CurrentCamera.ViewportSize; vw, vh = v.X, v.Y end)
+            selfBlind.Position = Vector2.new(-20, -80)
+            selfBlind.Size = Vector2.new(vw + 40, vh + 160)
+        end
+        local uiBS = secHid:Toggle("Blind Self", false, function(v)
+            GUI.BlindSelf = v == true
+            if GUI.BlindSelf then placeSelfBlind() end
+            selfBlind.Visible = GUI.BlindSelf
+        end)
+        pcall(function() uiBS:Tooltip("Blacks out your screen like the game's blind, until you switch it off. The menu, ESP and HUD bars stay on top. Your screen only.") end)
+        pcall(function() uiBS.item.noSave = true end)
+        task.spawn(function()
+            while GUI.Running do
+                if GUI.BlindSelf then placeSelfBlind() end
+                task.wait(0.25)
+            end
+            GUI.BlindSelf = false
+            pcall(function() selfBlind:Remove() end)
         end)
     end)
 
