@@ -25,7 +25,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.9"
+GUI.Version = "v9.10"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11726,6 +11726,7 @@ end)()
                     t.Position = Vector2.new(x + 12, y + 5)
                 end
                 bg.Visible, t.Visible = on, on
+                GUI._blindPillOn = on
                 task.wait(0.5)
             end
             pcall(function() bg:Remove() end)
@@ -11741,16 +11742,34 @@ end)()
         local selfBlind = Drawing.new("Square")
         selfBlind.Color, selfBlind.Filled, selfBlind.Transparency, selfBlind.ZIndex, selfBlind.Visible =
             Color3.fromRGB(0, 0, 0), true, 1, 1, false
+        -- SELF BLIND ACTIVE pill: purple, same corner and look as the red BLIND ACTIVE pill; when
+        -- both show, this one sits just above the red one.
+        local SB_TXT, SB_SIZE = "SELF BLIND ACTIVE", 13
+        local sbBg = Drawing.new("Square")
+        sbBg.Color, sbBg.Filled, sbBg.Corner, sbBg.Transparency, sbBg.ZIndex, sbBg.Visible =
+            Color3.fromRGB(120, 60, 200), true, 5, 0.9, 120, false
+        local sbT = Drawing.new("Text")
+        sbT.Text, sbT.Size, sbT.Color, sbT.Outline, sbT.Center, sbT.ZIndex, sbT.Visible =
+            SB_TXT, SB_SIZE, Color3.fromRGB(255, 255, 255), false, false, 121, false
+        pcall(function() sbT.Font = Drawing.Fonts.SystemBold end)
+        local sbW, sbH = 12 + GUI.TextW(SB_TXT, SB_SIZE) + 12, SB_SIZE + 10
         local function placeSelfBlind()
             local vw, vh = 1920, 1080
             pcall(function() local v = Workspace.CurrentCamera.ViewportSize; vw, vh = v.X, v.Y end)
             selfBlind.Position = Vector2.new(-20, -80)
             selfBlind.Size = Vector2.new(vw + 40, vh + 160)
+            local y = vh - 72 - sbH
+            if GUI._blindPillOn then y = y - sbH - 6 end
+            sbBg.Size, sbBg.Position = Vector2.new(sbW, sbH), Vector2.new(14, y)
+            sbT.Position = Vector2.new(14 + 12, y + 5)
+        end
+        local function showSelfBlind(on)
+            if on then placeSelfBlind() end
+            selfBlind.Visible, sbBg.Visible, sbT.Visible = on, on, on
         end
         local uiBS = secHid:Toggle("Blind Self", false, function(v)
             GUI.BlindSelf = v == true
-            if GUI.BlindSelf then placeSelfBlind() end
-            selfBlind.Visible = GUI.BlindSelf
+            showSelfBlind(GUI.BlindSelf)
         end)
         pcall(function() uiBS:Tooltip("Blacks out your screen like the game's blind, until you switch it off. The menu, ESP and HUD bars stay on top. Your screen only.") end)
         pcall(function() uiBS.item.noSave = true end)
@@ -11761,6 +11780,8 @@ end)()
             end
             GUI.BlindSelf = false
             pcall(function() selfBlind:Remove() end)
+            pcall(function() sbBg:Remove() end)
+            pcall(function() sbT:Remove() end)
         end)
     end)
 
