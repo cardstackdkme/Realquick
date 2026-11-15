@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.31"
+GUI.Version = "v9.32"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4603,11 +4603,29 @@ do
         pcall(function() j = tostring(game.JobId or "") end)
         return j
     end
-    -- a re-run in the same server: reuse the slots found last time (checked by slotOK every read)
+    -- A re-run in the same server reuses the slots found last time (_G); after a MATCHA restart
+    -- (which wipes _G) they come from RQ/RQGasCache.json, kept per server (v9.32). Either way
+    -- slotOK checks every slot on every read (number tag + the same key pointer), so a stale one
+    -- just reads as "Reload Gas" and is never trusted.
+    local GAS_CACHE = CONFIG_DIR .. "/RQGasCache.json"
     do
         local saved = _G.RQGasSlots
+        if not (type(saved) == "table" and saved.job == jobId() and type(saved.cands) == "table") then
+            saved = nil
+            pcall(function()
+                if type(isfile) == "function" and isfile(GAS_CACHE) then saved = HttpService:JSONDecode(readfile(GAS_CACHE)) end
+            end)
+        end
         if type(saved) == "table" and saved.job == jobId() and type(saved.cands) == "table" then
-            ODM.cands = saved.cands
+            local ok = {}
+            for _, c in ipairs(saved.cands) do
+                if type(c) == "table" and type(c.gas) == "table" and type(c.max) == "table"
+                    and tonumber(c.gas.a) and tonumber(c.gas.key) and tonumber(c.max.a) and tonumber(c.max.key) then
+                    ok[#ok + 1] = c
+                end
+            end
+            ODM.cands = ok
+            _G.RQGasSlots = { job = jobId(), cands = ok }
         end
     end
 
@@ -4642,6 +4660,10 @@ do
         ODM.cands, ODM.active = found, nil
         ODM.status = (#found == 0) and "No gear - Reload Gas" or nil
         _G.RQGasSlots = { job = jobId(), cands = found }
+        pcall(function()
+            if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then makefolder(CONFIG_DIR) end
+            writefile(GAS_CACHE, HttpService:JSONEncode({ job = jobId(), cands = found }))
+        end)
         return #found
     end
 
@@ -12129,6 +12151,90 @@ end)()
             return a and string.format("%.0f", a) or nil   -- %.0f: tostring() on a big number gives sci-notation
         end
         local function gcNum(v) local n = tonumber(v); if n and n == n then return n end return nil end
+        -- FILE CACHE (v9.32). _G survives a script re-run but NOT a Matcha restart (a crash is one),
+        -- and then Load Values meant another 10-15 s scan for values this server already gave us.
+        -- So the found slots are also kept per server in RQ/RQCharCache.json, as the very getgc
+        -- records (applygc gets back exactly what getgc returned). Same server = same game memory,
+        -- so the addresses still hold; a rejoin (new JobId) ignores the file. Nothing is trusted
+        -- blindly: each restored slot must still be a NUMBER slot whose key is THIS field's name, with
+        -- a sane value, and a key is restored only if ALL its copies pass. Anything else is simply
+        -- found again by the next scan, so a stale slot can never be written to.
+        local CACHE_PATH = CONFIG_DIR .. "/RQCharCache.json"
+        local function slotHolds(key, e, cfg)
+            local a = gcAddr(e)
+            if not a or type(memory_read) ~= "function" then return nil end
+            local okT, tag = pcall(memory_read, "int", a + 12)
+            if not (okT and tag == 3) then return nil end                      -- a number slot
+            local okK, kp = pcall(memory_read, "uintptr", a + 16)
+            if not (okK and type(kp) == "number" and kp > 65536) then return nil end
+            local okS, name = pcall(memory_read, "string", kp + 24)
+            if not (okS and name == key) then return nil end                   -- keyed by THIS field
+            local okV, v = pcall(memory_read, "double", a)
+            if not (okV and type(v) == "number" and v == v and v >= cfg.lo and v <= cfg.hi) then return nil end
+            return v
+        end
+        -- Every write goes through here: applygc, then READ IT BACK. A record rebuilt from the file
+        -- cache may not be one applygc accepts (unverifiable offline), so a value that did not land
+        -- is written directly -- but only into a slot that still checks out as THIS field's number
+        -- slot (slotHolds). True only when the slot now holds `value`.
+        local function landWrite(key, e, value)
+            pcall(function() applygc({ e }, key, value) end)
+            local a = gcAddr(e)
+            if not a or type(memory_read) ~= "function" then return true end   -- can't check: trust applygc
+            local function back()
+                local ok, v = pcall(memory_read, "double", a)
+                return ok and gcNum(v) or nil
+            end
+            local v = back()
+            if v and math.abs(v - value) < 0.0001 then return true end
+            local cfg = CFG[key]
+            if cfg and type(memory_write) == "function" and slotHolds(key, e, cfg) then
+                pcall(memory_write, "double", a, value)
+                v = back()
+                return v ~= nil and math.abs(v - value) < 0.0001
+            end
+            return false
+        end
+        local fileRestored = 0
+        if not reuse then
+            local data
+            pcall(function()
+                if type(isfile) == "function" and isfile(CACHE_PATH) then data = HttpService:JSONDecode(readfile(CACHE_PATH)) end
+            end)
+            if type(data) == "table" and data.job == JOB and type(data.keys) == "table" then
+                for k, list in pairs(data.keys) do
+                    local cfg = CFG[k]
+                    if cfg and type(list) == "table" and #list > 0 then
+                        local good = {}
+                        for _, e in ipairs(list) do
+                            local v = type(e) == "table" and e.key == k and slotHolds(k, e, cfg)
+                            if v then e.value = tostring(v); good[#good + 1] = e end
+                        end
+                        if #good == #list then cache[k] = good; fileRestored = fileRestored + 1 end
+                    end
+                end
+            end
+        end
+        local cacheEnc = nil
+        local function saveCache()   -- writes only when the found slots changed
+            local keys = {}
+            for k, list in pairs(cache) do
+                if CFG[k] and type(list) == "table" and #list > 0 then
+                    local out = {}
+                    for i, e in ipairs(list) do
+                        out[i] = { key = e.key, value = e.value, type = e.type, tbl = e.tbl, vtt = e.vtt, addr = e.addr }
+                    end
+                    keys[k] = out
+                end
+            end
+            local ok, enc = pcall(function() return HttpService:JSONEncode({ job = JOB, keys = keys }) end)
+            if not ok or type(enc) ~= "string" or enc == cacheEnc then return end
+            cacheEnc = enc
+            pcall(function()
+                if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then makefolder(CONFIG_DIR) end
+                writefile(CACHE_PATH, enc)
+            end)
+        end
         -- RETIRED KEYS. The _G cache is keyed by JobId and survives a script re-run, so a key that an
         -- OLDER build scanned stays in it forever even after its slider is deleted. Two consequences,
         -- both real:
@@ -12173,6 +12279,7 @@ end)()
         end
         -- CFG[k] guard is load-bearing: without it a retired key's leftovers report the tab as loaded.
         for k, entries in pairs(cache) do if CFG[k] and #entries > 0 then warmed = true; break end end
+        if warmed then saveCache() end   -- e.g. reused from _G: make sure a Matcha restart keeps them too
         -- `bb` rides along on the same JobId key: it holds the BlunderBuss's resolved GC slots + the
         -- last value written to each, so a script RE-RUN in the same server reuses them instead of
         -- re-fingerprinting a heap we have already edited (the stock-value test can only pass once).
@@ -12222,6 +12329,9 @@ end)()
         if retiredFixed > 0 then
             notif("Character", "Reverted " .. retiredFixed .. " value(s) from removed sliders", 4)
         end
+        if fileRestored > 0 then
+            notif("Values", "Loaded from this server's cache - no scan needed", 4)
+        end
         local function keep(cfg, e)   -- is this getgc entry the real numeric config value (not a hash decoy)?
             if type(e) ~= "table" or e.type ~= "number" then return false end
             local v = tonumber(e.value); return v ~= nil and v >= cfg.lo and v <= cfg.hi
@@ -12247,6 +12357,7 @@ end)()
                 end
             end
             saveState()
+            saveCache()
             if found > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
             return found > 0
         end
@@ -12268,6 +12379,7 @@ end)()
             end
             cache[key] = safe
             if #safe > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
+            saveCache()
             return safe
         end
 
@@ -12277,7 +12389,24 @@ end)()
             local safe = entriesFor(key)
             if #safe == 0 then return false end
             if savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value); saveState() end
-            return (pcall(function() applygc(safe, key, value) end))
+            -- A manual write to a velocity key goes into Auto-Apply's bookkeeping too. Without it,
+            -- Apply Velocity (1.55) then Auto-Apply (1.8) treated 1.55 as your natural value and
+            -- stacked the boost on top of it (2.31).
+            local velKey = key == "GearMaxVelocityMultiplier" or key == "GearVelocityIncreaseRate"
+            local before
+            if velKey and type(memory_read) == "function" then
+                local okc, c0 = pcall(memory_read, "double", gcAddr(safe[1]))
+                before = okc and gcNum(c0) or nil
+            end
+            local all = true   -- every copy must really hold the value (no more "Applied" that changed nothing)
+            for _, e in ipairs(safe) do if not landWrite(key, e, value) then all = false end end
+            if velKey and all then
+                local last = velState.last[key]
+                if before and not (last and math.abs(before - last) <= 0.001) then velState.nat[key] = before end
+                velState.last[key] = value
+                saveState()
+            end
+            return all
         end
         -- CACHED SLOTS ONLY, never a sweep. Anything on a timer must use these: entriesFor() runs a
         -- full getgc (a ~10 s freeze) when a key's cache is empty, and a loop calling it every few
@@ -12446,10 +12575,12 @@ end)()
                             local nat = mine and (velState.nat[key] or base) or cur
                             velState.nat[key] = nat
                             target = nat + (veSlider(key) - base)
-                            if math.abs(cur - target) > 0.001 then pcall(function() applygc(safe, key, target) end) end
+                            if math.abs(cur - target) > 0.001 then
+                                for _, e in ipairs(safe) do landWrite(key, e, target) end
+                            end
                         else
                             target = veSlider(key)               -- no live read: plain overwrite
-                            pcall(function() applygc(safe, key, target) end)
+                            for _, e in ipairs(safe) do landWrite(key, e, target) end
                         end
                         velState.last[key] = target
                     end
@@ -12562,10 +12693,7 @@ end)()
                     local okR, cur = pcall(memory_read, "double", a)
                     cur = okR and gcNum(cur) or nil
                     if cur and cfg and cur >= cfg.lo and cur <= cfg.hi then
-                        pcall(function() applygc({ e }, key, value) end)
-                        local okB, back = pcall(memory_read, "double", a)
-                        back = okB and gcNum(back) or nil
-                        if back and math.abs(back - value) < 0.0001 then done = done + 1 end
+                        if landWrite(key, e, value) then done = done + 1 end
                     end
                 end
             end
@@ -12581,7 +12709,7 @@ end)()
                     for _, e in ipairs(entriesFor(key)) do
                         local o = orig[gcKey(e)]
                         if o ~= nil then
-                            pcall(function() applygc({ e }, key, o) end)
+                            landWrite(key, e, o)
                             n = n + 1
                         end
                     end
@@ -12786,7 +12914,7 @@ end)()
                 local fixed = 0
                 for _, e in ipairs(entriesFor("FIRE_SHAKE_FREQUENCY")) do
                     if (gcNum(e.value) or 0) == 0 then
-                        pcall(function() applygc({ e }, "FIRE_SHAKE_FREQUENCY", 12/100) end)
+                        landWrite("FIRE_SHAKE_FREQUENCY", e, 12/100)
                         fixed = fixed + 1
                     end
                 end
@@ -12849,7 +12977,7 @@ end)()
                         local o = tsOrig[gcKey(e)]
                         if o == nil and not shared then o = CFG[key] and CFG[key].fb end
                         if o ~= nil then
-                            pcall(function() applygc({ e }, key, o) end)
+                            landWrite(key, e, o)
                             n = n + 1
                         end
                     end
