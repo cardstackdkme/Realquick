@@ -6,7 +6,7 @@
 --   Mouse click sub-tabs     = switch sub-page (ESPs)
 --   Mouse drag header        = move window
 --   F3 (default)             = toggle GUI visibility (changeable in Settings)
---   End (default)            = unload script (changeable in Settings)
+--   Re-running the script stops the previous copy first (there is no unload key; stop it in Matcha)
 
 local Mouse = game:GetService("Players").LocalPlayer:GetMouse()
 local Players = game:GetService("Players")
@@ -18,6 +18,16 @@ local CONFIG_DIR       = "RQ"
 local CONFIG_PATH      = CONFIG_DIR .. "/RQConfig.json"
 local RS_SNAPSHOT_PATH = CONFIG_DIR .. "/rs_snapshot.json"
 
+-- Re-running Requiem stops the previous copy COMPLETELY first: every loop, Drawing and hook (v9.31).
+-- There is no unload key any more; to stop the script, stop it in Matcha. Before this, a re-run only
+-- destroyed the old menu window: every one of the old copy's background loops kept running next to
+-- the new copy's, so each re-run stacked another full set of scans until Matcha fell over.
+do
+    local prev = rawget(_G, "RequiemShutdown")
+    _G.RequiemShutdown = nil
+    if type(prev) == "function" then pcall(prev) end
+end
+
 local GUI = {}
 -- ============================================================
 -- SCRIPT VERSION — bump this on EVERY published change.
@@ -25,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.30"
+GUI.Version = "v9.31"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -51,11 +61,10 @@ GUI.BladeTotal = 0
 GUI.ToggleKey = 0x72     -- default F3 (Windows VK code)
 GUI.ListeningForKey = false
 GUI.WasToggleDown = false
-GUI.CloseKey = 0x23      -- default End — unloads the script
-GUI.ListeningForCloseKey = false
-GUI.WasCloseDown = false
-GUI.CloseKeyReady = false
 GUI.Running = true
+-- Until the full StopScript is published (further down), a re-run can still stop this copy's loops
+-- even if this load crashes half way: every loop checks GUI.Running.
+_G.RequiemShutdown = function() GUI.Running = false end
 GUI.ResetConfirmAt = nil   -- tick() of last Reset Config click; second click within 3s confirms
 
 -- Alignment offsets (tweak with debug.lua, then set here)
@@ -615,7 +624,7 @@ end
 -- Forward declarations
 local CreateContent
 local BuildCounterPanel
-local UnloadScript
+local StopScript
 local MoveCounterPanel
 local titanApplyColor
 local titanApplyFont
@@ -3341,7 +3350,7 @@ end
                     end
                 end
             end
-            task.wait(1 / 60)
+            task.wait((next(on) or next(drawn)) and 1 / 60 or 0.25)   -- nothing on: rest
         end
         for _, d in pairs(drawn) do free(d) end
     end)
@@ -3354,68 +3363,6 @@ end)()
 local function InputLoop()
     while GUI.Running do
         local toggleDown = iskeypressed(GUI.ToggleKey)
-
-        -- Close key = unload (skip first frame so a held-down key from
-        -- before script launch doesn't immediately unload). The bound key
-        -- is user-configurable in Settings; default is End.
-        --
-        -- Suspended while the Settings "Unload Script" widget is capturing: during capture the user
-        -- is pressing keys to CHOOSE one, so pressing the key that is currently bound would unload
-        -- the script instead of rebinding it. GUI._kbUnload is that control's handle and
-        -- handle.item.listening is true for exactly the capture window. Clearing CloseKeyReady also
-        -- forces whatever they pressed to be released before it can count as an unload.
-        -- Nil-safe: if the fork has no :Keybind the handle is never set and this is inert.
-        -- The suppression is TIME-BOUNDED, and that bound is load-bearing. A capture can be
-        -- stranded: the fork's arrow-key tab switch has no capture guard, so pressing an arrow to
-        -- bind it switches tab instead, the keybind item stops rendering, and only that item's own
-        -- render clears `listening`. An unbounded suppression would then be permanent -- and since
-        -- the branch below is the ONLY call site of UnloadScript in this file, the script would
-        -- become impossible to unload. 5s is far longer than a real rebind (you are already
-        -- holding the key down to complete it) and short enough to self-heal an abandoned one.
-        local kbItem = GUI._kbUnload and GUI._kbUnload.item
-        local capturing = type(kbItem) == "table" and kbItem.listening == true
-        if capturing then
-            GUI._kbCapAt = GUI._kbCapAt or os.clock()
-            if (os.clock() - GUI._kbCapAt) > 5 then
-                capturing = false
-                pcall(function() kbItem.listening = false end)   -- best-effort: unstick the fork too
-            end
-        else
-            GUI._kbCapAt = nil
-        end
-        local closeDown = iskeypressed(GUI.CloseKey)
-        -- Typing that key into the Player List search must not unload the script: treated like a
-        -- capture (disarm, and it has to be released before it counts again). PLTyping goes stale
-        -- 0.5s after the typing loop last ran, so this can never lock the unload key for good.
-        if capturing or (GUI.PLTyping and GUI.PLTyping(GUI.CloseKey)) then
-            GUI.CloseKeyReady = false
-        elseif GUI.CloseKeyReady then
-            if closeDown and not GUI.WasCloseDown then
-                UnloadScript()
-                return
-            end
-        else
-            if not closeDown then
-                GUI.CloseKeyReady = true
-            end
-        end
-        GUI.WasCloseDown = closeDown
-
-        -- Close keybind listening (independent, always runs). After capture
-        -- we reset CloseKeyReady so the just-captured key — which is by
-        -- definition currently down — doesn't immediately unload.
-        if GUI.ListeningForCloseKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.CloseKey = vk
-                    GUI.ListeningForCloseKey = false
-                    GUI.CloseKeyReady = false
-                    GUI.WasCloseDown = true
-                    task.wait(0.2)
-                    break
-                end
-            end
-        end
 
         if GUI.ListeningForKey then
             for _, vk in ipairs(VK_SCAN) do
@@ -4096,7 +4043,7 @@ local function InputLoop()
         local interactive = GUI.Visible
             or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
             or GUI.CounterVisible or GUI.HealthBarVisible or GUI.GasBarVisible or GUI.GaspackBarVisible
-            or GUI.ListeningForKey or GUI.ListeningForCloseKey
+            or GUI.ListeningForKey
             or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging or GUI.GasBarDragging or GUI.GaspackBarDragging
             or GUI.PlayerListDragging or GUI.EnchantsDragging or GUI.RSDiffDragging
             or next(GUI.MonitorBars) ~= nil
@@ -5238,7 +5185,7 @@ do
             else
                 hideAll()
             end
-            task.wait(1 / 30)
+            task.wait(CR.cards and 1 / 30 or 0.25)   -- no cards read: rest
         end
         clear()
     end)
@@ -5534,10 +5481,11 @@ local function DmgIndicatorLoop()
 end
 
 -- ============================================================
--- UNLOAD
+-- STOP: tears this copy down. Runs only when the script is re-run (the new copy calls it through
+-- _G.RequiemShutdown before starting anything), so two copies never run side by side.
 -- ============================================================
 
-UnloadScript = function()
+StopScript = function()
     GUI.Running = false
     _G.RQBlockInput = nil   -- never leave the shared-fork input gate stuck on after we're gone
     -- Tear down the INS-ui front-end first (its own input/render owns the menu).
@@ -5594,7 +5542,7 @@ UnloadScript = function()
         pcall(function() data.label:Remove() end)
     end
     MARCS.Objects = {}
-    -- Via a hook, NOT a direct reference: UnloadScript is defined above the
+    -- Via a hook, NOT a direct reference: StopScript is defined above the
     -- landmine engine, so naming LANDMINE here would resolve to a nil global.
     if GUI.LandmineCleanup then pcall(GUI.LandmineCleanup) end
     if GUI.PLSearchCleanup then pcall(GUI.PLSearchCleanup) end
@@ -5628,8 +5576,8 @@ UnloadScript = function()
     end
     ANIMAL.Objects = {}
     pcall(ACTOR_ESP.destroyAll)
-    uiNotify("Menu", "Unloaded!", 3)
 end
+_G.RequiemShutdown = StopScript
 
 -- ============================================================
 -- DEATH LOG WEBHOOK ENGINE
@@ -7226,7 +7174,7 @@ end)()
                     end
                 end
             end
-            task.wait(1 / 60)
+            task.wait((next(D.On) or next(drawn)) and 1 / 60 or 0.25)   -- nothing on: rest
         end
         for _, d in pairs(drawn) do
             for _, k in ipairs(KEYS) do pcall(function() d[k]:Remove() end) end
@@ -7420,7 +7368,7 @@ do
         LANDMINE.verifyCursor = i
     end
 
-    -- Reached from UnloadScript, which is defined above this block.
+    -- Reached from StopScript, which is defined above this block.
     function GUI.LandmineCleanup()
         for _, lbl in ipairs(LANDMINE.Labels) do pcall(function() lbl:Remove() end) end
         LANDMINE.Labels = {}
@@ -7614,7 +7562,6 @@ saveConfig = function()
     local data = {
         binds = {
             toggle     = GUI.ToggleKey,
-            close      = GUI.CloseKey,
         },
         settings = {
             maxDistance        = ESP.MaxDistance,
@@ -7701,7 +7648,6 @@ loadConfig = function()
 
     if type(data.binds) == "table" then
         if type(data.binds.toggle)     == "number" then GUI.ToggleKey     = data.binds.toggle     end
-        if type(data.binds.close)      == "number" then GUI.CloseKey      = data.binds.close      end
     end
     if type(data.settings) == "table" then
         if type(data.settings.maxDistance) == "number" then
@@ -7850,7 +7796,6 @@ end
 -- in-source default and writes that out as the new on-disk config.
 resetConfigToDefaults = function()
     GUI.ToggleKey     = 0x72   -- F3
-    GUI.CloseKey      = 0x23   -- End
 
     ESP.MaxDistance       = 50000
     MARCS.MaxDistance     = 50000
@@ -8382,7 +8327,7 @@ function PLI.focus(on)
         pcall(PLI.seed)
     end
 end
--- Reached from UnloadScript, which is defined above this engine.
+-- Reached from StopScript, which is defined above this engine.
 GUI.PLSearchCleanup = function() GUI.PLSearchFocused = false end
 
 -- v4.1/v4.2 anchored your HumanoidRootPart while this box had focus. That is gone; this one-time
@@ -9011,7 +8956,11 @@ task.spawn(function()
         R.down=down
         -- keep the typing heartbeat fresh right up to the yield, so a slow frame can't let it lapse
         if GUI.PLSearchFocused then GUI.PLTypingAt=os.clock() end
-        task.wait()
+        -- Nothing to draw or click (menu closed, no panel open, nothing held or typed): 10 Hz
+        -- instead of every frame. Opening the menu or a panel is picked up within 0.1 s.
+        local busy = geoLive or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
+            or R.dragKey or R.resizeKey or R.scrollOff or GUI.PLSearchFocused or down
+        if busy then task.wait() else task.wait(0.1) end
     end
 end)
 end)()  -- /Requiem UI smooth engine
@@ -9278,7 +9227,7 @@ local function undoPrevious()
     end
 end
 
--- Reached from UnloadScript, which is defined above this block.
+-- Reached from StopScript, which is defined above this block.
 GUI.HiddensCleanup = function()
     if engaged then pcall(setCount, -1); engaged = false end
 end
@@ -10663,7 +10612,9 @@ task.spawn(function()
         -- task.wait(1/120) actually costs 10.2ms (~98Hz). Sleeping 10ms per tick was the single
         -- largest source of "parries late". So we sprint only while a swing is actually in flight
         -- — a fraction of a second at a time — and idle cheaply the rest of the time.
-        if AP.Active then
+        if not AP.Enabled then
+            task.wait(0.1)          -- switched off: nothing to do but notice it being turned on
+        elseif AP.Active then
             task.wait()             -- ~3600Hz ceiling; real rate is set by the work below it
         elseif (AP.Near or 0) > 0 then
             task.wait(1 / 120)      -- someone nearby: stay responsive enough to catch a swing start
@@ -10705,7 +10656,9 @@ task.spawn(function()
                     end
                 end
             end
-            for i = used + 1, #ESPPool do ESPPool[i].Visible = false end
+            -- hide only what was shown last tick (not the whole pool, 15 times a second)
+            for i = used + 1, math.min(#ESPPool, GUI._apShown or #ESPPool) do ESPPool[i].Visible = false end
+            GUI._apShown = used
         end)
         task.wait(1 / 15)
     end
@@ -12228,6 +12181,43 @@ end)()
         -- entries they reference may be stale too, so throw the resolutions away and re-derive.
         if droppedAny then bbState.ts, bbState.ok, bbState.slots = nil, nil, nil end
         _G.RequiemCharVals = { job = JOB, cache = cache, savedDefault = savedDefault, warmed = warmed, bb = bbState }
+        -- Crash-proof memory of your REAL values (v9.31). savedDefault (your value before the first
+        -- change) and Velocity Auto-Apply's last write used to live only in _G, which a Matcha crash
+        -- wipes while the boosted value stays in the game. The next Load Values then recorded the
+        -- BOOSTED value as your default (Reset restored the boost; Auto-Apply's boost came out as 0),
+        -- and a re-run treated the boost as your new natural value and stacked another on top. Kept
+        -- per server in RQ/RQCharState.json; ignored after a rejoin (new JobId = fresh game memory).
+        local STATE_PATH = CONFIG_DIR .. "/RQCharState.json"
+        local velState = { nat = {}, last = {} }   -- Auto-Apply: the game's own value / our last write
+        do
+            local data
+            pcall(function()
+                if type(isfile) == "function" and isfile(STATE_PATH) then data = HttpService:JSONDecode(readfile(STATE_PATH)) end
+            end)
+            if type(data) == "table" and data.job == JOB then
+                for k, v in pairs(type(data.base) == "table" and data.base or {}) do
+                    if CFG[k] and savedDefault[k] == nil and tonumber(v) then savedDefault[k] = tonumber(v) end
+                end
+                local vel = type(data.vel) == "table" and data.vel or {}
+                for _, f in ipairs({ "nat", "last" }) do
+                    for k, v in pairs(type(vel[f]) == "table" and vel[f] or {}) do
+                        if CFG[k] and tonumber(v) then velState[f][k] = tonumber(v) end
+                    end
+                end
+            end
+        end
+        local stateEnc = nil
+        local function saveState()   -- writes only when something changed
+            local base = {}
+            for k, v in pairs(savedDefault) do if CFG[k] and tonumber(v) then base[k] = tonumber(v) end end
+            local ok, enc = pcall(function() return HttpService:JSONEncode({ job = JOB, base = base, vel = velState }) end)
+            if not ok or type(enc) ~= "string" or enc == stateEnc then return end
+            stateEnc = enc
+            pcall(function()
+                if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then makefolder(CONFIG_DIR) end
+                writefile(STATE_PATH, enc)
+            end)
+        end
         local function notif(t, m, d) uiNotify(t, m, d or 3) end
         if retiredFixed > 0 then
             notif("Character", "Reverted " .. retiredFixed .. " value(s) from removed sliders", 4)
@@ -12256,6 +12246,7 @@ end)()
                     if savedDefault[e.key] == nil then savedDefault[e.key] = tonumber(e.value) end
                 end
             end
+            saveState()
             if found > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
             return found > 0
         end
@@ -12285,8 +12276,19 @@ end)()
             if type(getgc) ~= "function" or type(applygc) ~= "function" then return false end
             local safe = entriesFor(key)
             if #safe == 0 then return false end
-            if savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value) end
+            if savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value); saveState() end
             return (pcall(function() applygc(safe, key, value) end))
+        end
+        -- CACHED SLOTS ONLY, never a sweep. Anything on a timer must use these: entriesFor() runs a
+        -- full getgc (a ~10 s freeze) when a key's cache is empty, and a loop calling it every few
+        -- seconds turned one lost slot into back-to-back freezes until Windows closed Matcha.
+        local function cachedFor(key) return cache[key] or {} end
+        local function liveValue(key)
+            local a = gcAddr(cachedFor(key)[1])
+            if not a or type(memory_read) ~= "function" then return nil end
+            local ok, r = pcall(memory_read, "double", a)
+            if ok and type(r) == "number" and r == r then return r end
+            return nil
         end
 
         local function reset(key)
@@ -12423,32 +12425,40 @@ end)()
             end
             veAutoGen = veAutoGen + 1
             local myGen = veAutoGen
-            local natural, lastWrite = {}, {}   -- per-key: game's current natural value / my last write
+            -- One loop even across re-runs: a newer run's loop ends this one.
+            local token = {}
+            _G.__RQ_VELAUTO = token
             task.spawn(function()
-                local canRead = type(memory_read) == "function"
-                while veAutoGen == myGen and GUI.Running do
-                    for _, key in ipairs({ "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }) do
-                        local safe = entriesFor(key)           -- cached filtered entries (fast; no re-scan)
+                local KEYS = { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }
+                while veAutoGen == myGen and GUI.Running and _G.__RQ_VELAUTO == token do
+                    local lost = false
+                    for _, key in ipairs(KEYS) do
+                        local safe = cachedFor(key)            -- found slots only: this loop NEVER scans
                         local base = savedDefault[key]
-                        if #safe > 0 and base then
-                            local cur
-                            if canRead and safe[1].addr then    -- instant live read at the value's address
-                                local ok, r = pcall(memory_read, "double", safe[1].addr)
-                                if ok then cur = tonumber(r) end
-                            end
-                            if cur then
-                                -- the game moved it since my last write (a buff applied/expired) -> new natural
-                                if lastWrite[key] == nil or math.abs(cur - lastWrite[key]) > 0.001 then
-                                    natural[key] = cur
-                                end
-                                local target = (natural[key] or cur) + (veSlider(key) - base)
-                                apply(key, target)
-                                lastWrite[key] = target
-                            else
-                                apply(key, veSlider(key))       -- no fast read (Unsafe off) -> plain overwrite
-                            end
+                        if #safe == 0 or base == nil then lost = true; break end
+                        local cur = liveValue(key)             -- instant read at the value's address
+                        local target
+                        if cur then
+                            -- Our own last write (this run's, or one from before a crash / re-run, kept in
+                            -- RQCharState.json)? Then the game's own value is still the one remembered.
+                            -- Anything else is the game's new value (a buff started or ended).
+                            local mine = velState.last[key] ~= nil and math.abs(cur - velState.last[key]) <= 0.001
+                            local nat = mine and (velState.nat[key] or base) or cur
+                            velState.nat[key] = nat
+                            target = nat + (veSlider(key) - base)
+                            if math.abs(cur - target) > 0.001 then pcall(function() applygc(safe, key, target) end) end
+                        else
+                            target = veSlider(key)               -- no live read: plain overwrite
+                            pcall(function() applygc(safe, key, target) end)
                         end
+                        velState.last[key] = target
                     end
+                    if lost then
+                        notif("Velocity", "Auto-Apply stopped: press Apply Velocity once to find the value again, then turn it back on", 6)
+                        pcall(function() uiVeAuto:Set(false) end)
+                        break
+                    end
+                    saveState()
                     task.wait(3)
                 end
             end)
@@ -12601,11 +12611,12 @@ end)()
         -- The ONE stat slot for `key`: inside the stat table, i.e. near the GearMaxVelocityMultiplier
         -- entry the Velocity pin already writes. Anything but exactly one candidate refuses -- the
         -- wrong slot would be some other table's number.
-        local function faEntry(key)
-            local anchor = entriesFor("GearMaxVelocityMultiplier")[1]
+        local function faEntry(key, cachedOnly)
+            local get = cachedOnly and cachedFor or entriesFor   -- the keeper loop must never scan
+            local anchor = get("GearMaxVelocityMultiplier")[1]
             local aa = anchor and gcAddr(anchor)
             local hits = {}
-            for _, e in ipairs(entriesFor(key)) do
+            for _, e in ipairs(get(key)) do
                 local a = gcAddr(e)
                 if a and (aa == nil or math.abs(a - aa) <= ATTR_WINDOW) then hits[#hits + 1] = e end
             end
@@ -12639,8 +12650,8 @@ end)()
             return natural * pct
         end
 
-        local function faWrite(key, pct)
-            local e, why = faEntry(key)
+        local function faWrite(key, pct, cachedOnly)
+            local e, why = faEntry(key, cachedOnly)
             if not e then return false, why end
             if not faKeyOK(key, e) then return false, key .. " slot moved - rejoin" end
             local cur = faRead(e)
@@ -12667,7 +12678,7 @@ end)()
                     task.wait(1)
                     if fa.gen ~= my or not fa.pct or not GUI.Running then break end
                     for _, key in ipairs({ FA_ACC, FA_REC }) do
-                        local ok, why = faWrite(key, key == FA_ACC and fa.pct.spread or fa.pct.recoil)
+                        local ok, why = faWrite(key, key == FA_ACC and fa.pct.spread or fa.pct.recoil, true)
                         if not ok then
                             fa.pct = nil
                             notif("Firearms", "Stopped - " .. tostring(why), 5)
@@ -13335,8 +13346,7 @@ end)()
                 -- Is the menu actually on screen? isrbxactive() cannot tell us: the menu is drawn
                 -- INSIDE Roblox, so Roblox stays focused while you use it. That matters because the
                 -- fork polls every key while open -- an injected E would be taken by a keybind
-                -- capture (click Unload Script -> rebind, and E becomes your unload key, so the
-                -- NEXT tap unloads the script) or typed into a textbox.
+                -- capture or typed into a textbox.
                 -- _G.RQGeo is rebuilt as a fresh table every frame the window renders, so table
                 -- identity is the heartbeat; a MINIMISED menu leaves it frozen at open=true, which
                 -- the 0.25s staleness check catches. Same test drawBadge uses.
@@ -13344,10 +13354,7 @@ end)()
                 local function menuBusy(now)
                     local g = _G.RQGeo
                     if g ~= geoRef then geoRef, geoAt = g, now end
-                    if type(g) == "table" and g.open == true and (now - geoAt) <= 0.25 then return true end
-                    -- belt and braces: the unload capture specifically
-                    local kb = GUI._kbUnload and GUI._kbUnload.item
-                    return type(kb) == "table" and kb.listening == true
+                    return type(g) == "table" and g.open == true and (now - geoAt) <= 0.25
                 end
 
                 while epGen == myGen and GUI.Running do
@@ -13649,38 +13656,6 @@ end)()
             end
         end)
 
-        -- Unload key. InputLoop just polls iskeypressed(GUI.CloseKey), so rebinding is only a
-        -- matter of moving that number; End is the default, not a hardcoded rule. Persisted as
-        -- binds.close, which means it survives only if you hit Save Config.
-        -- pcall'd like the other :Keybind uses: the method exists in the fork but not necessarily
-        -- in the upstream fallback lib, and an error here would drop the whole Settings tab.
-        local secKeys = setTab:Section("Keybinds", "Right", "Click, then press a key")
-        pcall(function()
-            GUI._kbUnload = secKeys:Keybind("Unload Script", GUI.VKToName(GUI.CloseKey), function(k)
-                local vk = GUI.VKFromName(k)
-                if not vk then
-                    -- Mouse buttons and anything else with no virtual-key mapping (m1/m2/mb3-5 are
-                    -- capturable by the fork but have no iskeypressed VK here). Leaving CloseKey
-                    -- alone is the safe failure -- an unbindable unload key would strand the script
-                    -- -- but the fork has ALREADY written the new name into the control, so simply
-                    -- returning would leave the pill advertising a key that does nothing while the
-                    -- real unload key still fires unannounced. Put the displayed value back.
-                    -- Set() re-enters this callback once with the old, valid name; that maps
-                    -- cleanly and stops there, so there is no recursion.
-                    uiNotify("Keybinds", "that key cannot be used - unload key unchanged", 3, "warning")
-                    pcall(function() GUI._kbUnload:Set(GUI.VKToName(GUI.CloseKey)) end)
-                    return
-                end
-                GUI.CloseKey = vk
-                -- The rebind is COMPLETED by a key press, so that key is physically down at this
-                -- instant. Without re-arming, InputLoop's next poll sees a fresh press edge on the
-                -- new key and unloads the script the moment you bind it. CloseKeyReady = false
-                -- makes the loop wait for a release first.
-                GUI.CloseKeyReady = false
-                GUI.WasCloseDown  = true
-            end, "click, then press any key to rebind unloading - Save Config to keep it")
-        end)
-
         local secAbout = setTab:Section("About", "Right", "Requiem")
         pcall(function() secAbout:Label(function() return "Menu key:   F3" end) end)
     end)
@@ -13699,7 +13674,7 @@ spawn(DmgIndicatorLoop)
 -- Expose GUI globally so debug.lua can access it
 pcall(function() getgenv().GUI = GUI end)
 
-print("Requiem loaded! " .. GetKeyName(GUI.ToggleKey) .. " = toggle. " .. GetKeyName(GUI.CloseKey) .. " = unload.")
+print("Requiem loaded! " .. GetKeyName(GUI.ToggleKey) .. " = toggle.")
 uiNotify("Requiem", "Loaded! " .. GetKeyName(GUI.ToggleKey) .. " to toggle", 3)
 
 return GUI
