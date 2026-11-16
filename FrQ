@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.32"
+GUI.Version = "v9.33"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6943,7 +6943,7 @@ end)()
 -- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
 -- ============================================================
 ;(function()
-    local DIRECT_BLOB = "c71d24b0:J2SHLudntIYV3TlioF6Muaf9T/OG1AekvSgLtIs5y33s4EQ+Bior0yQWVWF5XAE/vXNF/3qZhO9Ljf7/vg6KaDscmRbhz8eRrB542hMVmT1ZNRoQya0775hBGSD0TeHphZC24VW8IX+R3rhM3fzsIvCipprJqPFV4wf8vmuymfzGpEHF9SMBdArGw0CzU/3M8Mj2HVv2z/1kN/dXoV9oWapQJZN9wtbWXYhWXC6dHM4m/Z0pusNZ+IcLOufs1iZo2rLjHXMiFqy/TPODuzM973tW1pBqtmvmZYcUfK0p7rezvAl4C8oI8CHK03zegzflVpn0EFj1UkYkparLtxuviJOIQJPsLGjm0A6QAxTaEuLFt+qJL/+Db8JEqzyYuFFohtMIVNcjNhacvQ7MAZK/ReN2YiLerLPZxtOiDXqdpvOKf+I5dXMnxyj9h8Ktz9DyBLF+iJCd5D/iJMDm+FnNRt6v4OBU3qLzk9OT2/2NVGh8ojftMPLpQUHZh/xx6Nn5gyXkQExvSfDLVyvklglx1DpRy9KRBIAWTaGgOpy5xvGEP5HIOmlYpMzspG0y9N94P8z4RD5yIyEyfaTvw3v6g1ZA"
+    local DIRECT_BLOB = "c6911511:UX0gOM5pZju8kcnpmQe3BhCcSK2QTQ1f+Dm79WZSMsgbFD33XAyTMLJbtMc6m5WX8lfZvEuvmOew0VUJ1s16gN+OmIEbdPZNWhc1Wnb9+esQAH4xgXH+/5mDwmxRLUu9gqaFzPk7Wn1U5bdu40AWTvhr8hhmqr7lVeiFNLBejvOgAtUDplmBRmqdTTyw1ZDg1iPOi3JLW9HXgCOQPa6TcFAe167UPB4oBrp3sdN8fsCgevpop4gLi/58Jn3mknLWPVE+dxETji+bazaUvEsS5guiRh/iThRtQlaq+H5PH5yp/e7IR+7AQhDyJaV+oId/Nkz3XAZJ7h4aMW7Qy5Gc/Q06q1NnYNXYlvUKIXA6x2zpxLTvpXH4uDsy6VS0z5Jbzc2xnPL6uud8IYPAZIMGgWPj38YjOcz+wFwfBFa1eQuUJaWmspb5PRf5yr1hAj6DCKGQnwe+Xu8jc73spfuFTsgkiGZllSqJ7dPeKTiyWgQmQL1ji8v68funZJaChFBYFavUO4SMW5pOCl/KxuL2/S1VJ+Kdva5iBn3FRUSGPtvVNaKI/LfCztOpC6zS6WsPdkjySlqKvUuQm3kWDLsJlQOlKz7NcdK0GI/pHf177fWx5S72Sz9M6Mds7TVezan8hGsqf6REuchpOjlk0q/hU52TNMxbkTWxm3I="
     -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
     local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
 
