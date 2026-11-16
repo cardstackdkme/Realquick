@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.50"
+GUI.Version = "v9.51"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11254,9 +11254,12 @@ end)()
             return type(Lib) == "table"
         end
         local firstBody = fetchBody(UI_URLS[1])
-        if firstBody and not firstBody:find(PAGES_MARK, 1, true) then
-            local paged = fetchBody(PAGES_URL)
-            if paged and paged:find(PAGES_MARK, 1, true) then runBody(paged) end
+        if firstBody and firstBody:find(PAGES_MARK, 1, true) then
+            if runBody(firstBody) then GUI._uiPages = "realquick" end
+        elseif firstBody then
+            -- cache-buster, like the loader's: a just-pushed copy must not come back stale
+            local paged = fetchBody(PAGES_URL .. "?t=" .. tostring(os.time()))
+            if paged and paged:find(PAGES_MARK, 1, true) and runBody(paged) then GUI._uiPages = "dev" end
         end
         if type(Lib) ~= "table" and firstBody then runBody(firstBody) end
         for i = 2, #UI_URLS do
@@ -14028,6 +14031,11 @@ end)()
             { "Look & Layout", { "Appearance", "Panels", "Layout" } },
             { "Interface & Configs" },   -- Interface, Configs, System, About
         })
+        _G.RQPages = { lib = GUI._uiPages or "none",
+            esp = GUI._espTab and GUI._espTab._tab and GUI._espTab._tab.pages and #GUI._espTab._tab.pages or 0 }
+        if not GUI._uiPages then
+            uiNotify("Requiem", "Page tabs unavailable: the UI library without them loaded. Reload in a minute", 8)
+        end
     end)
 
     print("[Requiem] loaded with INS-ui front-end")
