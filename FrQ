@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.51"
+GUI.Version = "v9.52"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11225,11 +11225,181 @@ end)()
             "https://raw.githubusercontent.com/cardstackdkme/Vrrrrr/main/uilib.lua",          -- Verfall's fork (fallback)
             "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua",  -- upstream fallback
         }
-        -- Page bars (uilib "RQ patch #14") ship in the dev repo's copy until Realquick's has them. While
-        -- Realquick's lacks the patch, the dev copy is used instead, and only if it has it; once
-        -- Realquick's has it this costs nothing extra (one download, as before).
-        local PAGES_URL  = "https://raw.githubusercontent.com/ZimbabeStrongestSoldier/Claude...-/main/uilib.lua"
+        -- Page bars (uilib "RQ patch #14"): added to Realquick's library text in memory, right before it
+        -- runs (v9.52). No second download, and it always sits on the friend's latest library. If a step
+        -- no longer matches (the library changed there), the library runs as it is: one page per tab.
+        -- uilib RQ patch #14 (pages), applied to the downloaded library text before it runs.
+        -- Generated from uilib_pages_patch.py; every step must match exactly its count, or the
+        -- library runs unpatched (one long page per tab, as before).
+        local PAGES_STEPS = {
+            { [====[local function iA(di, eM, fl, eN, h3, iB, hy, iC)
+	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+]====],
+              [====[-- RQ patch #14: pages. A tab whose sections carry .page, and whose .pages lists the page names in
+-- order, shows a page bar at the top of its content and lays out only the active page's sections
+-- (a section with no .page belongs to the first page). Requiem sets these after building a tab; a
+-- tab with no pages, or just one, draws exactly as before. The bar is fixed: it does not scroll.
+local RQ_PAGE_H, RQ_PAGE_GAP = 30, 12
+local function rqPageBar(di, eM, hf, h3, iB, hy)
+	local ig = az.contentFade * az.drawVisible
+	local eq = az.hoverEffects ~= false
+	local acc = az._accentMid
+	local fnt = bA(aq)
+	di._pageAf = di._pageAf or {}
+	local x0 = h3
+	for _, p in ipairs(di.pages) do
+		local w = bC(p, 13, fnt) + 30
+		local dW = di.activePage == p
+		local hov = eq and not hf and cA(x0, iB, w, RQ_PAGE_H)
+		local af = bX(di._pageAf[p] or 0, dW and 1 or 0, 13)
+		di._pageAf[p] = af
+		b6(x0, iB, w, RQ_PAGE_H, acc, 31, 4, 0.13 * af * ig)
+		bi(x0, iB, w, RQ_PAGE_H, ak, 31, 4, an.cardStrk * af * ig)
+		b6(x0, iB, w, RQ_PAGE_H, ak, 31, 4, (hov and not dW and 0.07 or 0) * ig)
+		b6(x0 + w / 2 - 9 * af, iB + RQ_PAGE_H - 3, D(1, 18 * af), 2.5, acc, 32, 1.25, 0.95 * af * ig)
+		local a = (dW and 0.96 or (hov and 0.82 or 0.58)) * ig
+		bN(p, x0 + w / 2, bM(iB, RQ_PAGE_H, 13), dW and acc or ak, 13, aq, 32, true, false, nil, a)
+		if eM and not hf and cA(x0, iB, w, RQ_PAGE_H) then
+			if di.activePage ~= p then
+				di.activePage = p
+				di.scrollY, di.targetScrollY = 0, 0
+				az.contentFade = 0
+			end
+			eM = false
+		end
+		x0 = x0 + w + 8
+	end
+	local ly = iB + RQ_PAGE_H + RQ_PAGE_GAP / 2
+	bj(h3, ly, h3 + hy, ly, ak, 31, 1, an.hairline * ig)
+	return eM
+end
+local function iA(di, eM, fl, eN, h3, iB, hy, iC)
+	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+	local secs = di.sections
+	local pages = di.pages
+	if pages and #pages > 1 then
+		local valid = false
+		for _, p in ipairs(pages) do if p == di.activePage then valid = true break end end
+		if not valid then di.activePage = pages[1] end
+		-- a search result on another page: open that page first, then the normal scroll-to runs
+		local tgt = az._spotScrollTo
+		if tgt then
+			for _, X in ipairs(di.sections) do
+				for _, dM in ipairs(X.items) do
+					if dM == tgt and (X.page or pages[1]) ~= di.activePage then
+						di.activePage = X.page or pages[1]
+						di.scrollY, di.targetScrollY = 0, 0
+					end
+				end
+			end
+		end
+		eM = rqPageBar(di, eM, hf, h3, iB, hy)
+		iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
+		iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
+		local key = tostring(di.activePage) .. "#" .. #di.sections
+		if di._psKey ~= key then
+			local list = {}
+			for _, X in ipairs(di.sections) do
+				if (X.page or pages[1]) == di.activePage then list[#list + 1] = X end
+			end
+			di._psKey, di._ps = key, list
+		end
+		secs = di._ps
+	end
+]====], 1 },
+            { [====[		if az.activeTab then
+			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
+		end
+]====],
+              [====[		if az.activeTab then
+			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
+		end
+		-- RQ patch #14: the active tab's pages, in this header row after its title
+		az._rqHdrPages = false
+		local rqT = az.activeTab
+		if rqT and rqT.pages and #rqT.pages > 1 then
+			az._rqHdrPages = true
+			local rqF = bA(aq)
+			local rqHf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+			local rqAcc = az._accentMid
+			local rqH = 26
+			local rqY = b8 + gw + (kh - rqH) / 2
+			local rqX = bW + 16 + bC(rqT.name, 14, rqF) + 16
+			local rqEnd = b7 + b9 - 16
+			bj(rqX - 8, rqY + 6, rqX - 8, rqY + rqH - 6, ak, 13, 1, an.hairline * g)
+			rqT._pageAf = rqT._pageAf or {}
+			for _, p in ipairs(rqT.pages) do
+				local w = bC(p, 13, rqF) + 24
+				if rqX + w > rqEnd then break end
+				local dW = rqT.activePage == p
+				local jU = not rqHf and cA(rqX, rqY, w, rqH)
+				local fM = jU and az.hoverEffects ~= false
+				local jV = bX(rqT._pageAf[p] or 0, dW and 1 or 0, 13)
+				rqT._pageAf[p] = jV
+				b6(rqX, rqY, w, rqH, ak, 13, 7, an.tabFill * jV * g)
+				bi(rqX, rqY, w, rqH, ak, 14, 7, an.cardStrk * jV * g)
+				b6(rqX + w / 2 - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
+				b6(rqX, rqY, w, rqH, ak, 13, 7, (fM and not dW and 0.07 or 0) * g)
+				local hu = (dW and an.hover or (fM and an.label or an.dim)) * g
+				bN(p, rqX + w / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, true, false, nil, hu)
+				if eM and jU then
+					if rqT.activePage ~= p then
+						rqT.activePage = p
+						rqT.scrollY, rqT.targetScrollY = 0, 0
+						az.contentFade = 0
+					end
+					eM = false
+				end
+				rqX = rqX + w + 6
+			end
+		end
+]====], 1 },
+            { [====[	else
+		bW = b7
+		eo = b9
+		iB = b8 + gw + jq + 8
+]====],
+              [====[	else
+		az._rqHdrPages = false
+		bW = b7
+		eo = b9
+		iB = b8 + gw + jq + 8
+]====], 1 },
+            { [====[		eM = rqPageBar(di, eM, hf, h3, iB, hy)
+		iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
+		iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
+]====],
+              [====[		if not (az._rqHdrPages and di == az.activeTab) then
+			eM = rqPageBar(di, eM, hf, h3, iB, hy)
+			iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
+			iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
+		end
+]====], 1 },
+            { [====[for aw, X in ipairs(di.sections) do]====],
+              [====[for aw, X in ipairs(secs) do]====], 2 },
+        }
         local PAGES_MARK = "RQ patch #14: pages"
+        -- the library text with pages added, and how: "native" (already has them) / "patched";
+        -- nil when any step doesn't match exactly its count (the library changed: run it as it is)
+        local function withPages(body)
+            if string.find(body, PAGES_MARK, 1, true) then return body, "native" end
+            local s = (string.gsub(body, "\r\n", "\n"))
+            for _, st in ipairs(PAGES_STEPS) do
+                local old, new, cnt = st[1], st[2], st[3]
+                local parts, i, n = {}, 1, 0
+                while true do
+                    local a, b = string.find(s, old, i, true)
+                    if not a then break end
+                    parts[#parts + 1] = string.sub(s, i, a - 1)
+                    parts[#parts + 1] = new
+                    i, n = b + 1, n + 1
+                end
+                if n ~= cnt then return nil end
+                parts[#parts + 1] = string.sub(s, i)
+                s = table.concat(parts)
+            end
+            return s, "patched"
+        end
         local lastBody
         local function grabGlobal()
             if type(Lib) == "table" then return end
@@ -11254,12 +11424,9 @@ end)()
             return type(Lib) == "table"
         end
         local firstBody = fetchBody(UI_URLS[1])
-        if firstBody and firstBody:find(PAGES_MARK, 1, true) then
-            if runBody(firstBody) then GUI._uiPages = "realquick" end
-        elseif firstBody then
-            -- cache-buster, like the loader's: a just-pushed copy must not come back stale
-            local paged = fetchBody(PAGES_URL .. "?t=" .. tostring(os.time()))
-            if paged and paged:find(PAGES_MARK, 1, true) and runBody(paged) then GUI._uiPages = "dev" end
+        if firstBody then
+            local ok, paged, how = pcall(withPages, firstBody)
+            if ok and paged and runBody(paged) then GUI._uiPages = how end
         end
         if type(Lib) ~= "table" and firstBody then runBody(firstBody) end
         for i = 2, #UI_URLS do
@@ -14034,7 +14201,7 @@ end)()
         _G.RQPages = { lib = GUI._uiPages or "none",
             esp = GUI._espTab and GUI._espTab._tab and GUI._espTab._tab.pages and #GUI._espTab._tab.pages or 0 }
         if not GUI._uiPages then
-            uiNotify("Requiem", "Page tabs unavailable: the UI library without them loaded. Reload in a minute", 8)
+            uiNotify("Requiem", "Page tabs unavailable: the UI library changed. Every tab shows all its sections", 8)
         end
     end)
 
