@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.34"
+GUI.Version = "v9.35"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6943,7 +6943,7 @@ end)()
 -- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
 -- ============================================================
 ;(function()
-    local DIRECT_BLOB = "ae944289:S8/Ltg6BfxmS+SDBs2QhgJTBC/pNMljrVSy3iBqe5AUvU9QKX6FcmhMSBDNqwcdPQUN4lZwWXpMOA0CyzZ2PNs9BOfeX9f2kySCOwjo4w4nAupqLHJufXaMW8ZEwOapSiHMZNLOUvwwmFlxpOGwI3d8o0zftW2vFy3LTuzbdqv8d6SZOQe750dO4ZHDCIeARSqsGwGtWGru1FAt7+FpAIXPJdLhdLUlt3Vtr49ruS6gwC5SD5RE/1SIQG6PWthanDeYlqoEwnbBLIzHuU14cREopv/2cpzqGb8UVIOAAWkK109pFW3nT0mbdCT43spszJ3tFOYvdZQrrGdd6NBuL8Jc5VYD4B/gsUrUvc2iYrrUDLlVeaXwXKYuJZF36pW4kyTjKcf4iAnU6lfFUkgrgruT+9l+3SDNPV5ne3gmwUGMep+vCple3XWeRErGEB6K0B+3cO1Xr1FJuHn0qUIQhyHHUciZ4EQpPUoqllQpoHtyDNfbyH091Kxj6H/cjt2vOl8T1MpbErWQq1FSOqmCw9sCaQA+PhmzgjCcdBqIzdEOx0HZ2zK24/V9n5bzK22tliMZf7Cl5uPTrix5WGBy5mYLhDeKbuO9wJ2q/1Uda13TYuIjV2nlJDPApMBjfjxi7q8C0diPlCJlfxt/8zPsNAcHpgf/gnxPcYQmaBX/Pnewl"
+    local DIRECT_BLOB = "dd933f91:g+xgw/yQUnwUdAdWb4iKfq2NV5t9rHkp+2P/qM0NjPPm7rRwt/CrYNTQr0RCbibET6S84PzIScYlEeB9E6q3hcz0+BCg+tsDx8AL5/bh6t5+k2EbyuFUJCgB0vVjORzI5O1P33A3Bpu7vKa2HC06sCrb3bYFQDkl9h39VqmBSzy1xXuAYlWcN+s8qRQFn61vXmwwiOtDAp6x/WCFO8zCZRQJSrgi6tGUIwIbqw+Ru1ffNNQPjjjKQUgEDsd3IpNc67aVrxAOBDefMelcRSzneiYQ03eU/2ER6CdYYT/m4s1gAJVjKN/h3KrKihDeNPCsbSCkX31+PADAPaVxP98Myjgfjy5+U3Gs8m7pcDYnZ6zUHo5IgbAluZTeAN+hCxjIrKj9+m6eU7156rAcGb109jAqf90D05GV1PGCCT/VsUsWnCidr7TFMD43QslBvJUsOcEMvw56/LOq8W7yLH3IFV8lWY1wkSTDQkpBiL9RDio0ylC9dXTjNjZAeYvdseedF0NO/bdpp6Ygug1JvOl/7aB+P9JIHgu7zbSaquJQbeXlFaZbbyz37yvD2SxI6u+iJmuu0zZmDFQAtOjI12ZxjAWMKw5FFWTpT3/++7eNpYi0e/NCBo1mfsAnVBdPEbirJoKirEv/xTQxNw9TGmsuEG/I6x8py12J0UXfV6ugEv0Tbrw81CfbFIbG3694e7adfC6mhA0G+M4="
     -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
     local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
 
