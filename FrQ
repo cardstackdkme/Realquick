@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.56"
+GUI.Version = "v9.57"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11314,10 +11314,10 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
 		end
 ]====],
-              [====[		if az.activeTab then
+              [====[		if az.activeTab and not (az.activeTab.pages and #az.activeTab.pages > 1) then
 			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
 		end
-		-- RQ patch #14: the active tab's pages, in this header row after its title
+		-- RQ patch #14: a tab with pages shows its page pills in this header row instead of its title
 		az._rqHdrPages = false
 		local rqT = az.activeTab
 		if rqT and rqT.pages and #rqT.pages > 1 then
@@ -11327,9 +11327,8 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 			local rqAcc = az._accentMid
 			local rqH = 26
 			local rqY = b8 + gw + (kh - rqH) / 2
-			local rqX = bW + 16 + bC(rqT.name, 14, rqF) + 16
+			local rqX = bW + 12
 			local rqEnd = b7 + b9 - 16
-			bj(rqX - 8, rqY + 6, rqX - 8, rqY + rqH - 6, ak, 13, 1, an.hairline * g)
 			rqT._pageAf = rqT._pageAf or {}
 			for _, p in ipairs(rqT.pages) do
 				local w = bC(p, 13, rqF) + 24
@@ -14214,6 +14213,17 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             di.pages, di._psKey = names, nil
             di.activePage = di.activePage or names[1]
         end
+        -- move section `name` to sit right after section `after` (layout follows the section order)
+        local function moveAfter(tabObj, name, after)
+            local secs = tabObj and tabObj._tab and tabObj._tab.sections
+            if type(secs) ~= "table" then return end
+            local from, to
+            for i, sec in ipairs(secs) do if sec.name == name then from = i end end
+            if not from then return end
+            local moving = table.remove(secs, from)
+            for i, sec in ipairs(secs) do if sec.name == after then to = i end end
+            table.insert(secs, (to or #secs) + 1, moving)
+        end
         paginate(GUI._espTab, {
             { "World & Entities", { "Ore ESP", "Tools ESP", "Entity ESP" } },
             { "Direct ESP" },   -- key, player groups, Custom, options
@@ -14226,6 +14236,8 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Gas Bar" } },
             { "Weapons" },      -- Firearm Auto, Thunderspears
         })
+        -- Gas Bar (a one-button section that continues its column) fills the gap under Grapple
+        moveAfter(GUI._charTab, "Gas Bar", "Grapple")
         paginate(GUI._setTab, {
             { "Look & Layout", { "Appearance", "Panels", "Layout" } },
             { "Interface & Configs" },   -- Interface, Configs, System, About
