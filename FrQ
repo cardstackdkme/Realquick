@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.33"
+GUI.Version = "v9.34"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6943,7 +6943,7 @@ end)()
 -- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
 -- ============================================================
 ;(function()
-    local DIRECT_BLOB = "c6911511:UX0gOM5pZju8kcnpmQe3BhCcSK2QTQ1f+Dm79WZSMsgbFD33XAyTMLJbtMc6m5WX8lfZvEuvmOew0VUJ1s16gN+OmIEbdPZNWhc1Wnb9+esQAH4xgXH+/5mDwmxRLUu9gqaFzPk7Wn1U5bdu40AWTvhr8hhmqr7lVeiFNLBejvOgAtUDplmBRmqdTTyw1ZDg1iPOi3JLW9HXgCOQPa6TcFAe167UPB4oBrp3sdN8fsCgevpop4gLi/58Jn3mknLWPVE+dxETji+bazaUvEsS5guiRh/iThRtQlaq+H5PH5yp/e7IR+7AQhDyJaV+oId/Nkz3XAZJ7h4aMW7Qy5Gc/Q06q1NnYNXYlvUKIXA6x2zpxLTvpXH4uDsy6VS0z5Jbzc2xnPL6uud8IYPAZIMGgWPj38YjOcz+wFwfBFa1eQuUJaWmspb5PRf5yr1hAj6DCKGQnwe+Xu8jc73spfuFTsgkiGZllSqJ7dPeKTiyWgQmQL1ji8v68funZJaChFBYFavUO4SMW5pOCl/KxuL2/S1VJ+Kdva5iBn3FRUSGPtvVNaKI/LfCztOpC6zS6WsPdkjySlqKvUuQm3kWDLsJlQOlKz7NcdK0GI/pHf177fWx5S72Sz9M6Mds7TVezan8hGsqf6REuchpOjlk0q/hU52TNMxbkTWxm3I="
+    local DIRECT_BLOB = "ae944289:S8/Ltg6BfxmS+SDBs2QhgJTBC/pNMljrVSy3iBqe5AUvU9QKX6FcmhMSBDNqwcdPQUN4lZwWXpMOA0CyzZ2PNs9BOfeX9f2kySCOwjo4w4nAupqLHJufXaMW8ZEwOapSiHMZNLOUvwwmFlxpOGwI3d8o0zftW2vFy3LTuzbdqv8d6SZOQe750dO4ZHDCIeARSqsGwGtWGru1FAt7+FpAIXPJdLhdLUlt3Vtr49ruS6gwC5SD5RE/1SIQG6PWthanDeYlqoEwnbBLIzHuU14cREopv/2cpzqGb8UVIOAAWkK109pFW3nT0mbdCT43spszJ3tFOYvdZQrrGdd6NBuL8Jc5VYD4B/gsUrUvc2iYrrUDLlVeaXwXKYuJZF36pW4kyTjKcf4iAnU6lfFUkgrgruT+9l+3SDNPV5ne3gmwUGMep+vCple3XWeRErGEB6K0B+3cO1Xr1FJuHn0qUIQhyHHUciZ4EQpPUoqllQpoHtyDNfbyH091Kxj6H/cjt2vOl8T1MpbErWQq1FSOqmCw9sCaQA+PhmzgjCcdBqIzdEOx0HZ2zK24/V9n5bzK22tliMZf7Cl5uPTrix5WGBy5mYLhDeKbuO9wJ2q/1Uda13TYuIjV2nlJDPApMBjfjxi7q8C0diPlCJlfxt/8zPsNAcHpgf/gnxPcYQmaBX/Pnewl"
     -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
     local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
 
