@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.41"
+GUI.Version = "v9.50"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11225,6 +11225,11 @@ end)()
             "https://raw.githubusercontent.com/cardstackdkme/Vrrrrr/main/uilib.lua",          -- Verfall's fork (fallback)
             "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua",  -- upstream fallback
         }
+        -- Page bars (uilib "RQ patch #14") ship in the dev repo's copy until Realquick's has them. While
+        -- Realquick's lacks the patch, the dev copy is used instead, and only if it has it; once
+        -- Realquick's has it this costs nothing extra (one download, as before).
+        local PAGES_URL  = "https://raw.githubusercontent.com/ZimbabeStrongestSoldier/Claude...-/main/uilib.lua"
+        local PAGES_MARK = "RQ patch #14: pages"
         local lastBody
         local function grabGlobal()
             if type(Lib) == "table" then return end
@@ -11232,20 +11237,32 @@ end)()
             if type(Lib) ~= "table" then pcall(function() if type(_G.INSui) == "table" then Lib = _G.INSui end end) end
             if type(Lib) ~= "table" then pcall(function() local g = getgenv(); if g and type(g.INSui) == "table" then Lib = g.INSui end end) end
         end
-        for _, url in ipairs(UI_URLS) do
+        local function fetchBody(url)
             for _ = 1, 5 do
                 local body = nil
                 pcall(function() body = game:HttpGet(url) end)
-                if type(body) == "string" and #body > 1000 and body:find("INSUI_FILE_END", 1, true) then
-                    lastBody = body
-                    local ok, res = pcall(function() return loadstring(body)() end)
-                    if ok and type(res) == "table" then Lib = res; break end
-                    grabGlobal()
-                    if type(Lib) == "table" then break end
-                end
+                if type(body) == "string" and #body > 1000 and body:find("INSUI_FILE_END", 1, true) then return body end
                 task.wait(0.3)
             end
+            return nil
+        end
+        local function runBody(body)
+            lastBody = body
+            local ok, res = pcall(function() return loadstring(body)() end)
+            if ok and type(res) == "table" then Lib = res; return true end
+            grabGlobal()
+            return type(Lib) == "table"
+        end
+        local firstBody = fetchBody(UI_URLS[1])
+        if firstBody and not firstBody:find(PAGES_MARK, 1, true) then
+            local paged = fetchBody(PAGES_URL)
+            if paged and paged:find(PAGES_MARK, 1, true) then runBody(paged) end
+        end
+        if type(Lib) ~= "table" and firstBody then runBody(firstBody) end
+        for i = 2, #UI_URLS do
             if type(Lib) == "table" then break end
+            local body = fetchBody(UI_URLS[i])
+            if body then runBody(body) end
         end
         if type(Lib) ~= "table" and type(lastBody) == "string" then
             pcall(function() loadstring(lastBody)() end)
@@ -11646,6 +11663,7 @@ end)()
     -- ===== Tab: Style =====
     tabBuild(function()
         local tab = window:Tab("Style", "user")
+        GUI._styleTab = tab
 
         local fontNames, colorNames = {}, {}
         for _, f in ipairs(TITAN_FONTS) do fontNames[#fontNames + 1] = f.name end
@@ -12240,6 +12258,7 @@ end)()
     -- and helpers live inside this tab's scope.
     tabBuild(function()
         local tab = window:Tab("Character", "sword")
+        GUI._charTab = tab
         -- Row-locked columns: each Left section opens a ROW at max(both cursors) and the next
         -- Right section starts level with it, so Grapple/Velocity, Dash/Parry and
         -- Firearm Auto/Thunderspears line up exactly. Costs whitespace under the shorter card
@@ -13882,6 +13901,7 @@ end)()
     -- ===== Settings tab (built-in) =====
     tabBuild(function()
         local setTab = window:AddSettingsTab("cog")
+        GUI._setTab = setTab
 
         -- One Appearance: the library's own (Background, Text color, Border, Corner radius, ...).
         -- Its Theme section is dropped; Requiem adds "Apply to Panels" (the Player List / Enchants /
@@ -13972,6 +13992,42 @@ end)()
 
         local secAbout = setTab:Section("About", "Right", "Requiem")
         pcall(function() secAbout:Label(function() return "Menu key:   F3" end) end)
+    end)
+
+    -- ===== Pages (the Inspector design) =====
+    -- Each tab below gets a page bar at the top of its content. Sections are sorted into pages by
+    -- name; a section not named goes to the LAST page, so Direct ESP's player groups (named after
+    -- the groups) and any section added later land somewhere sensible. Needs uilib RQ patch #14; an
+    -- older library ignores these fields and shows every section on one page, as before.
+    pcall(function()
+        local function paginate(tabObj, pages)
+            local di = tabObj and tabObj._tab
+            if type(di) ~= "table" or type(di.sections) ~= "table" then return end
+            local names, pageOf = {}, {}
+            for _, pg in ipairs(pages) do
+                names[#names + 1] = pg[1]
+                for _, sn in ipairs(pg[2] or {}) do pageOf[sn] = pg[1] end
+            end
+            for _, sec in ipairs(di.sections) do sec.page = pageOf[sec.name] or names[#names] end
+            di.pages, di._psKey = names, nil
+            di.activePage = di.activePage or names[1]
+        end
+        paginate(GUI._espTab, {
+            { "World & Entities", { "Ore ESP", "Tools ESP", "Entity ESP" } },
+            { "Direct ESP" },   -- key, player groups, Custom, options
+        })
+        paginate(GUI._styleTab, {
+            { "ESP Style", { "Titan", "Animals", "Distance" } },
+            { "HUD Bars" },     -- Health / Gas Bar and their gradients
+        })
+        paginate(GUI._charTab, {
+            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Gas Bar" } },
+            { "Weapons" },      -- Firearm Auto, Thunderspears
+        })
+        paginate(GUI._setTab, {
+            { "Look & Layout", { "Appearance", "Panels", "Layout" } },
+            { "Interface & Configs" },   -- Interface, Configs, System, About
+        })
     end)
 
     print("[Requiem] loaded with INS-ui front-end")
