@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.35"
+GUI.Version = "v9.36"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -6943,7 +6943,7 @@ end)()
 -- first time it is entered in the Direct ESP tab (or put there by hand - the textbox cannot paste).
 -- ============================================================
 ;(function()
-    local DIRECT_BLOB = "dd933f91:g+xgw/yQUnwUdAdWb4iKfq2NV5t9rHkp+2P/qM0NjPPm7rRwt/CrYNTQr0RCbibET6S84PzIScYlEeB9E6q3hcz0+BCg+tsDx8AL5/bh6t5+k2EbyuFUJCgB0vVjORzI5O1P33A3Bpu7vKa2HC06sCrb3bYFQDkl9h39VqmBSzy1xXuAYlWcN+s8qRQFn61vXmwwiOtDAp6x/WCFO8zCZRQJSrgi6tGUIwIbqw+Ru1ffNNQPjjjKQUgEDsd3IpNc67aVrxAOBDefMelcRSzneiYQ03eU/2ER6CdYYT/m4s1gAJVjKN/h3KrKihDeNPCsbSCkX31+PADAPaVxP98Myjgfjy5+U3Gs8m7pcDYnZ6zUHo5IgbAluZTeAN+hCxjIrKj9+m6eU7156rAcGb109jAqf90D05GV1PGCCT/VsUsWnCidr7TFMD43QslBvJUsOcEMvw56/LOq8W7yLH3IFV8lWY1wkSTDQkpBiL9RDio0ylC9dXTjNjZAeYvdseedF0NO/bdpp6Ygug1JvOl/7aB+P9JIHgu7zbSaquJQbeXlFaZbbyz37yvD2SxI6u+iJmuu0zZmDFQAtOjI12ZxjAWMKw5FFWTpT3/++7eNpYi0e/NCBo1mfsAnVBdPEbirJoKirEv/xTQxNw9TGmsuEG/I6x8py12J0UXfV6ugEv0Tbrw81CfbFIbG3694e7adfC6mhA0G+M4="
+    local DIRECT_BLOB = "84950975:6zTUe98bWiCPnQHfKahpekCe3fTJ0GbcN/dqk5czifS5fl7nUqjig2leY2pH3ZiVz93wOi3n8sw93ZuTRAoyd5swPyT/HTgSc3UgdfMWhBYj97PHfadbn4LUtO2Te3aH0NlclYXnQkC4BZgodwIhgvKfC4ezRNKrdmZbe7c5e6rkwMKr08tEK8JqQzDg99MtyCz/Ikqu6VedtkSmF6KBTsKb3phFR0mKyThw5q9o2JhV6SusmUbpcSusFvf3BZOVTE6OX5S31R6f2P66EvS/onNl8pglvLOJ6Zy2JBiIYSxyq+XhPjE2KnUuDEeqfGe6b7p+hdl5U4PgeVSYIawCcEgZy8QvcNhuEMPPiq8wBCXT1Gdb048FUgWBsa36IFTf7+7S0LlFsh+jPs3/x+SzYXE6RT2FLHQsyZ8ukaHXopUbWnVZpqtmfobKw2l0fWOgnNHyo5r84KnJuwgz0E6gLoYWXzVpeQ9IhtdKUk+8xQ7srAOJBZubXRiKcskzwDvspIyeLZVKByrwowp/GMyi0kSj6V3MRM8LuqTzblVg9vqf5Wf4GGKH9Sb4QlGm2yTctZgLP1XtjxdgcowRxnZy+65hQbw5GDT9Y5brCmIrcvwxaDfEmbkh10Us6zWtUoH0P3adHng0pR7ChVRvDVw/QidNimcWj6voFREWrFx4D5iqaX0rK8tr0VWXnGW1nSuXASME5AdEgXkIiBH7KOZGRjSqGs7HXkOIigBGrx8END5U8oM="
     -- .txt: Matcha's readfile/writefile refuse unknown extensions such as .key
     local KEY_FILE = CONFIG_DIR .. "/direct_esp.txt"
 
