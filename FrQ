@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.52"
+GUI.Version = "v9.53"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11381,20 +11381,30 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
         local PAGES_MARK = "RQ patch #14: pages"
         -- the library text with pages added, and how: "native" (already has them) / "patched";
         -- nil when any step doesn't match exactly its count (the library changed: run it as it is)
+        -- Every magic character escaped, so this finds the text literally whether or not the executor's
+        -- string.find honours its plain flag.
+        local function litPattern(t)
+            return (string.gsub(t, "[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
+        end
+        local pagesDiag = {}
         local function withPages(body)
-            if string.find(body, PAGES_MARK, 1, true) then return body, "native" end
+            pagesDiag.len = #body
+            pagesDiag.cr = select(2, string.gsub(body, "\r", ""))
+            if string.find(body, litPattern(PAGES_MARK)) then return body, "native" end
             local s = (string.gsub(body, "\r\n", "\n"))
-            for _, st in ipairs(PAGES_STEPS) do
+            for k, st in ipairs(PAGES_STEPS) do
                 local old, new, cnt = st[1], st[2], st[3]
+                local pat = litPattern(old)
                 local parts, i, n = {}, 1, 0
                 while true do
-                    local a, b = string.find(s, old, i, true)
+                    local a, b = string.find(s, pat, i)
                     if not a then break end
                     parts[#parts + 1] = string.sub(s, i, a - 1)
                     parts[#parts + 1] = new
                     i, n = b + 1, n + 1
                 end
-                if n ~= cnt then return nil end
+                pagesDiag[k] = n
+                if n ~= cnt then pagesDiag.failed = k; return nil end
                 parts[#parts + 1] = string.sub(s, i)
                 s = table.concat(parts)
             end
@@ -11426,8 +11436,16 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
         local firstBody = fetchBody(UI_URLS[1])
         if firstBody then
             local ok, paged, how = pcall(withPages, firstBody)
-            if ok and paged and runBody(paged) then GUI._uiPages = how end
+            if not ok then pagesDiag.err = tostring(paged) end
+            if ok and paged then
+                if runBody(paged) then GUI._uiPages = how else pagesDiag.run = "patched library failed to run" end
+            end
+            if not GUI._uiPages then
+                -- keep what the executor actually received, to compare with the repo copy
+                pcall(function() writefile(CONFIG_DIR .. "/uilib_seen.txt", firstBody) end)
+            end
         end
+        GUI._pagesDiag = pagesDiag
         if type(Lib) ~= "table" and firstBody then runBody(firstBody) end
         for i = 2, #UI_URLS do
             if type(Lib) == "table" then break end
@@ -14198,7 +14216,7 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             { "Look & Layout", { "Appearance", "Panels", "Layout" } },
             { "Interface & Configs" },   -- Interface, Configs, System, About
         })
-        _G.RQPages = { lib = GUI._uiPages or "none",
+        _G.RQPages = { lib = GUI._uiPages or "none", diag = GUI._pagesDiag,
             esp = GUI._espTab and GUI._espTab._tab and GUI._espTab._tab.pages and #GUI._espTab._tab.pages or 0 }
         if not GUI._uiPages then
             uiNotify("Requiem", "Page tabs unavailable: the UI library changed. Every tab shows all its sections", 8)
