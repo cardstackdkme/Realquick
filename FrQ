@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.57"
+GUI.Version = "v9.58"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11331,7 +11331,9 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 			local rqEnd = b7 + b9 - 16
 			rqT._pageAf = rqT._pageAf or {}
 			for _, p in ipairs(rqT.pages) do
-				local w = bC(p, 13, rqF) + 24
+				-- real SF Bold width from Requiem (_G.RQTextW) when present; the library's estimate otherwise
+				local tw = (type(_G.RQTextW) == "function" and _G.RQTextW(p, 13)) or bC(p, 13, rqF)
+				local w = tw + 24
 				if rqX + w > rqEnd then break end
 				local dW = rqT.activePage == p
 				local jU = not rqHf and cA(rqX, rqY, w, rqH)
@@ -11343,7 +11345,7 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 				b6(rqX + w / 2 - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
 				b6(rqX, rqY, w, rqH, ak, 13, 7, (fM and not dW and 0.07 or 0) * g)
 				local hu = (dW and an.hover or (fM and an.label or an.dim)) * g
-				bN(p, rqX + w / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, true, false, nil, hu)
+				bN(p, rqX + (w - tw) / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, false, false, nil, hu)
 				if eM and jU then
 					if rqT.activePage ~= p then
 						rqT.activePage = p
@@ -14200,6 +14202,8 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
     -- name; a section not named goes to the LAST page, so Direct ESP's player groups (named after
     -- the groups) and any section added later land somewhere sensible. Needs uilib RQ patch #14; an
     -- older library ignores these fields and shows every section on one page, as before.
+    -- the page pills size and centre themselves with the real SF Bold text width
+    pcall(function() _G.RQTextW = function(t, size) return GUI.TextW(t, size) end end)
     pcall(function()
         local function paginate(tabObj, pages)
             local di = tabObj and tabObj._tab
