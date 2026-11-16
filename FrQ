@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.54"
+GUI.Version = "v9.55"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11438,6 +11438,17 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             local ok, paged, how = pcall(withPages, firstBody)
             if not ok then pagesDiag.err = tostring(paged) end
             if ok and paged then
+                -- Indentation stripped (this library has no multi-line strings, so that's safe): the patched
+                -- copy is then ~11 KB SMALLER than the unpatched one, which runs. v9.54 showed the patched
+                -- text compiles and "runs" without an error yet never reaches its last lines in Matcha.
+                -- Progress markers: _G.__RQPG = 1 at the top, 2 just before it registers itself.
+                paged = (string.gsub(paged, "\n[ \t]+", "\n"))
+                paged = (string.gsub(paged, "^[ \t]+", ""))
+                local nEnd
+                paged, nEnd = string.gsub(paged, litPattern("\nc(a, dC)\n"), "\n_G.__RQPG = 2\nc(a, dC)\n", 1)
+                paged = "_G.__RQPG = 1\n" .. paged
+                pagesDiag.size, pagesDiag.endMark = #paged, nEnd
+                pcall(function() _G.__RQPG = 0 end)
                 -- compiled and run as two steps (no error() inside pcall: Matcha's pcall doesn't catch it),
                 -- so a failure says which half broke and why
                 local fn, cerr = loadstring(paged)
@@ -11445,6 +11456,7 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
                     pagesDiag.compileErr = tostring(cerr)
                 else
                     local okRun, res = pcall(fn)
+                    pcall(function() pagesDiag.reached = _G.__RQPG end)
                     if not okRun then pagesDiag.runErr = tostring(res) end
                     if okRun and type(res) == "table" then Lib = res else grabGlobal() end
                     if type(Lib) == "table" then GUI._uiPages = how else pagesDiag.run = "ran but no library found" end
