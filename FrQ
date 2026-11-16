@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.36"
+GUI.Version = "v9.40"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7032,6 +7032,15 @@ end)()
     local function locate(name)
         local p = nil
         pcall(function() p = Players:FindFirstChild(name) end)
+        if not p then
+            -- same name in other capitals (a name typed as "enderlord" for "EnderLord"); ~30 players, cheap
+            local low = string.lower(name)
+            pcall(function()
+                for _, pl in ipairs(Players:GetPlayers()) do
+                    if string.lower(pl.Name) == low then p = pl; break end
+                end
+            end)
+        end
         if p then
             local ch, cn = nil, nil
             pcall(function() ch = p.Character; cn = ch and ch.Name end)
@@ -11445,6 +11454,129 @@ end)()
                     end
                 end)
             end
+        end
+
+        -- ---------- Custom: your own names, saved on this PC ----------
+        -- Not part of the encrypted list: RQ/direct_custom.txt, one username per line, read at load.
+        -- Works with or without the key. Pills are drawn for every name in D.On, so a custom name is just
+        -- a toggle that puts itself there. The UI library lays a section out from its items list every
+        -- frame, so toggles can be added at runtime and removed by dropping them from that list.
+        do
+            local CUSTOM_FILE = CONFIG_DIR .. "/direct_custom.txt"
+            local listed = {}   -- [lower name] = group, for names already in the encrypted list
+            for _, g in ipairs(D.Groups) do
+                for _, e in ipairs(g.list) do listed[string.lower(e[1])] = g.name end
+            end
+            local custom = {}
+            pcall(function()
+                if isfile(CUSTOM_FILE) then
+                    local seen = {}
+                    for line in readfile(CUSTOM_FILE):gmatch("[^\r\n]+") do
+                        local nm = line:match("^%s*([%w_]+)%s*$")
+                        if nm and not seen[string.lower(nm)] and not listed[string.lower(nm)] then
+                            seen[string.lower(nm)] = true
+                            custom[#custom + 1] = nm
+                        end
+                    end
+                end
+            end)
+            local function save()
+                pcall(function()
+                    if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then
+                        makefolder(CONFIG_DIR)
+                    end
+                    writefile(CUSTOM_FILE, table.concat(custom, "\n") .. "\n")
+                end)
+            end
+            local secC = tab:Section("Custom", side, "your own names, saved on this PC")
+            side = side == "Left" and "Right" or "Left"
+            local typed, box = "", nil
+            pcall(function()
+                box = secC:Textbox("Username", "", function(v) typed = tostring(v or "") end,
+                    "type a Roblox username, then Add (pasting is not supported). Saved in RQ/direct_custom.txt on this PC only")
+            end)
+            local toggles = {}   -- [lower name] = toggle handle
+            local function addToggle(nm)
+                local t = secC:Toggle(nm, D.On[nm] == true, function(v)
+                    if v then
+                        D.On[nm] = true
+                        D.search(nm)
+                    else
+                        D.On[nm] = nil
+                    end
+                end)
+                pcall(function() t.item.noSave = true end)   -- D.On is what the config keeps
+                toggles[string.lower(nm)] = t
+                return t
+            end
+            -- the game's own spelling when they are in this server
+            local function exactName(nm)
+                local low, found = string.lower(nm), nil
+                pcall(function()
+                    for _, pl in ipairs(Players:GetPlayers()) do
+                        if string.lower(pl.Name) == low then found = pl.Name; break end
+                    end
+                end)
+                return found
+            end
+            local function typedName()
+                local nm = typed:match("^%s*([%w_]+)%s*$")
+                if nm and #nm >= 3 and #nm <= 20 then return nm end
+                return nil
+            end
+            local function clearBox()
+                typed = ""
+                pcall(function() box.item.value = "" end)
+            end
+            secC:Button("Add", function()
+                local nm = typedName()
+                if not nm then
+                    uiNotify("Direct ESP", "Not a Roblox username (3-20 letters, numbers or _)", 4)
+                    return
+                end
+                local low = string.lower(nm)
+                if toggles[low] then uiNotify("Direct ESP", nm .. " is already in Custom", 3); return end
+                if listed[low] then uiNotify("Direct ESP", nm .. " is already in " .. listed[low], 3); return end
+                local exact = exactName(nm)
+                nm = exact or nm
+                custom[#custom + 1] = nm
+                save()
+                local t = addToggle(nm)
+                pcall(function() t.item.value = true end)
+                D.On[nm] = true
+                D.search(nm)   -- says found / not found
+                if not exact then
+                    uiNotify("Direct ESP", "Added " .. nm .. " (not in this server right now)", 4)
+                end
+                clearBox()
+            end)
+            secC:Button("Remove", function()
+                local nm = typedName()
+                local t = nm and toggles[string.lower(nm)]
+                if not t then
+                    uiNotify("Direct ESP", "Type a name from the Custom list, then Remove", 4)
+                    return
+                end
+                local low = string.lower(nm)
+                for i, n in ipairs(custom) do
+                    if string.lower(n) == low then
+                        D.On[n] = nil
+                        table.remove(custom, i)
+                        break
+                    end
+                end
+                save()
+                pcall(function()
+                    local items = secC._section.items
+                    for i, it in ipairs(items) do
+                        if it == t.item then table.remove(items, i); break end
+                    end
+                end)
+                toggles[low] = nil
+                uiNotify("Direct ESP", "Removed " .. nm .. " from Custom", 3)
+                clearBox()
+            end)
+            for _, nm in ipairs(custom) do addToggle(nm) end
         end
         local secOpt = tab:Section("Direct ESP", side, "Search and look")
         secOpt:Toggle("Bypass Leaderboard", D.Bypass, function(v) D.Bypass = v == true end)
