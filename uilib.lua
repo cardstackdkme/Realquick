@@ -1,6 +1,7 @@
 -- INS-ui fork, Requiem's own copy (cardstackdkme/Realquick/uilib.lua). Formatted with stylua so it
 -- can be read and edited; Verfall keeps the minified copy in cardstackdkme/Vrrrrr.
--- Patches: #1-#12 as the Vrrrrr fork, plus #13 (RQX: ColorList, Swatches, header Action icons).
+-- Patches: #1-#12 as the Vrrrrr fork, plus #13 (RQX: ColorList, Swatches, header Action icons)
+-- and #14 (page tabs, by PowerDouble; built in here instead of patched into the text at load).
 local a = "INSui"
 local b = nil
 pcall(function()
@@ -4492,13 +4493,106 @@ local function ix(d2)
 	end
 	return iz + (iy + 6 - iz) * d2._cA
 end
+-- RQ patch #14: pages. A tab whose sections carry .page, and whose .pages lists the page names in
+-- order, shows a page bar at the top of its content and lays out only the active page's sections
+-- (a section with no .page belongs to the first page). Requiem sets these after building a tab; a
+-- tab with no pages, or just one, draws exactly as before. The bar is fixed: it does not scroll.
+-- Kept on `az`, NOT as new top-level locals: this file's main chunk already has 199 of Lua's 200, and
+-- Matcha compiles a chunk over the limit into a function that silently does nothing.
+az.rqPage = { H = 30, GAP = 12 }
+-- A page label's width, measured once per tab and font: Requiem's real SF Bold width (_G.RQTextW)
+-- when it is there, the library's estimate otherwise. The pills are drawn every frame, the names
+-- never change, so there is nothing to re-measure.
+function az.rqPage.textW(di, p, fnt)
+	local c = di._pageW
+	if not c or c[1] ~= fnt then
+		c = { fnt }
+		di._pageW = c
+	end
+	local w = c[p]
+	if not w then
+		local f = _G.RQTextW
+		w = (type(f) == "function" and f(p, 13)) or bC(p, 13, fnt)
+		c[p] = w
+	end
+	return w
+end
+function az.rqPage.bar(di, eM, hf, h3, iB, hy)
+	local RQ_PAGE_H, RQ_PAGE_GAP = az.rqPage.H, az.rqPage.GAP
+	local ig = az.contentFade * az.drawVisible
+	local eq = az.hoverEffects ~= false
+	local acc = az._accentMid
+	local fnt = bA(aq)
+	di._pageAf = di._pageAf or {}
+	local x0 = h3
+	for _, p in ipairs(di.pages) do
+		local w = az.rqPage.textW(di, p, fnt) + 30
+		local dW = di.activePage == p
+		local hov = eq and not hf and cA(x0, iB, w, RQ_PAGE_H)
+		local af = bX(di._pageAf[p] or 0, dW and 1 or 0, 13)
+		di._pageAf[p] = af
+		b6(x0, iB, w, RQ_PAGE_H, acc, 31, 4, 0.13 * af * ig)
+		bi(x0, iB, w, RQ_PAGE_H, ak, 31, 4, an.cardStrk * af * ig)
+		b6(x0, iB, w, RQ_PAGE_H, ak, 31, 4, (hov and not dW and 0.07 or 0) * ig)
+		b6(x0 + w / 2 - 9 * af, iB + RQ_PAGE_H - 3, D(1, 18 * af), 2.5, acc, 32, 1.25, 0.95 * af * ig)
+		local a = (dW and 0.96 or (hov and 0.82 or 0.58)) * ig
+		bN(p, x0 + w / 2, bM(iB, RQ_PAGE_H, 13), dW and acc or ak, 13, aq, 32, true, false, nil, a)
+		if eM and not hf and cA(x0, iB, w, RQ_PAGE_H) then
+			if di.activePage ~= p then
+				di.activePage = p
+				di.scrollY, di.targetScrollY = 0, 0
+				az.contentFade = 0
+			end
+			eM = false
+		end
+		x0 = x0 + w + 8
+	end
+	local ly = iB + RQ_PAGE_H + RQ_PAGE_GAP / 2
+	bj(h3, ly, h3 + hy, ly, ak, 31, 1, an.hairline * ig)
+	return eM
+end
 local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+	local secs = di.sections
+	local pages = di.pages
+	if pages and #pages > 1 then
+		local valid = false
+		for _, p in ipairs(pages) do if p == di.activePage then valid = true break end end
+		if not valid then di.activePage = pages[1] end
+		-- a search result on another page: open that page first, then the normal scroll-to runs
+		local tgt = az._spotScrollTo
+		if tgt then
+			for _, X in ipairs(di.sections) do
+				for _, dM in ipairs(X.items) do
+					if dM == tgt and (X.page or pages[1]) ~= di.activePage then
+						di.activePage = X.page or pages[1]
+						di.scrollY, di.targetScrollY = 0, 0
+					end
+				end
+			end
+		end
+		if not (az._rqHdrPages and di == az.activeTab) then
+			eM = az.rqPage.bar(di, eM, hf, h3, iB, hy)
+			iB = iB + az.rqPage.H + az.rqPage.GAP
+			iC = iC - az.rqPage.H - az.rqPage.GAP
+		end
+		-- the active page's sections, rebuilt only when the page or the section count changes
+		-- (Requiem's paginate clears _ps after re-sorting); no string built per frame
+		local nSec = #di.sections
+		if di._ps == nil or di._psPage ~= di.activePage or di._psN ~= nSec then
+			local list = {}
+			for _, X in ipairs(di.sections) do
+				if (X.page or pages[1]) == di.activePage then list[#list + 1] = X end
+			end
+			di._ps, di._psPage, di._psN = list, di.activePage, nSec
+		end
+		secs = di._ps
+	end
 	local ib = A((hy - 10) / 2)
 	local iD = az._spotScrollTo
 	az._spotScrollTo = nil
 	local iE, iF = 0, 0
-	for aw, X in ipairs(di.sections) do
+	for aw, X in ipairs(secs) do
 		X._h = ix(X)
 		if X.side == "Right" then
 			iF = iF + X._h + 24
@@ -4534,7 +4628,7 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 	local iH = iB - di.scrollY
 	local id, ie = iB, iB + iC
 	local iI, iJ = iH, iH
-	for aw, X in ipairs(di.sections) do
+	for aw, X in ipairs(secs) do
 		local i5, iK, iL
 		if X.side == "Full" then
 			iK = D(iI, iJ)
@@ -5250,8 +5344,47 @@ local function jg(eM, fl, eN)
 		bW = b7 + c9
 		eo = b9 - c9
 		local kh = 40
-		if az.activeTab then
+		if az.activeTab and not (az.activeTab.pages and #az.activeTab.pages > 1) then
 			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
+		end
+		-- RQ patch #14: a tab with pages shows its page pills in this header row instead of its title
+		az._rqHdrPages = false
+		local rqT = az.activeTab
+		if rqT and rqT.pages and #rqT.pages > 1 then
+			az._rqHdrPages = true
+			local rqF = bA(aq)
+			local rqHf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+			local rqAcc = az._accentMid
+			local rqH = 26
+			local rqY = b8 + gw + (kh - rqH) / 2
+			local rqX = bW + 12
+			local rqEnd = b7 + b9 - 16
+			rqT._pageAf = rqT._pageAf or {}
+			for _, p in ipairs(rqT.pages) do
+				local tw = az.rqPage.textW(rqT, p, rqF)
+				local w = tw + 24
+				if rqX + w > rqEnd then break end
+				local dW = rqT.activePage == p
+				local jU = not rqHf and cA(rqX, rqY, w, rqH)
+				local fM = jU and az.hoverEffects ~= false
+				local jV = bX(rqT._pageAf[p] or 0, dW and 1 or 0, 13)
+				rqT._pageAf[p] = jV
+				b6(rqX, rqY, w, rqH, ak, 13, 7, an.tabFill * jV * g)
+				bi(rqX, rqY, w, rqH, ak, 14, 7, an.cardStrk * jV * g)
+				b6(rqX + w / 2 - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
+				b6(rqX, rqY, w, rqH, ak, 13, 7, (fM and not dW and 0.07 or 0) * g)
+				local hu = (dW and an.hover or (fM and an.label or an.dim)) * g
+				bN(p, rqX + (w - tw) / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, false, false, nil, hu)
+				if eM and jU then
+					if rqT.activePage ~= p then
+						rqT.activePage = p
+						rqT.scrollY, rqT.targetScrollY = 0, 0
+						az.contentFade = 0
+					end
+					eM = false
+				end
+				rqX = rqX + w + 6
+			end
 		end
 		local ki = cb(al.accentA, al.accentB)
 		bj(bW, b8 + gw + kh, b7 + b9, b8 + gw + kh, ki, 11, 3, 0.12 * g)
@@ -5260,6 +5393,7 @@ local function jg(eM, fl, eN)
 		h3 = bW + 12
 		hy = eo - 24 - 6
 	else
+		az._rqHdrPages = false
 		bW = b7
 		eo = b9
 		iB = b8 + gw + jq + 8

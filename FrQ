@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.58"
+GUI.Version = "v9.59"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -7029,18 +7029,33 @@ end)()
     -- [name] = { model, part, via, checkedAt, nameAt, dead }
     local track = {}
 
+    -- lower-case name -> Player, for a name typed in other capitals ("enderlord" for "EnderLord").
+    -- Rebuilt at most every 2 s: the scan below asks for a missing name 4 times a second, and every
+    -- pl.Name is a memory read, so walking all ~30 players each time added up with a list of absent staff.
+    local lowMap, lowAt = {}, -math.huge
+    local function byLowerName(name)
+        local now = os.clock()
+        if now - lowAt > 2 then
+            lowAt = now
+            local m = {}
+            pcall(function()
+                for _, pl in ipairs(Players:GetPlayers()) do m[string.lower(pl.Name)] = pl end
+            end)
+            lowMap = m
+        end
+        local p = lowMap[string.lower(name)]
+        if p then   -- left since the map was built: not here
+            local par = nil
+            pcall(function() par = p.Parent end)
+            if par == nil then return nil end
+        end
+        return p
+    end
+
     local function locate(name)
         local p = nil
         pcall(function() p = Players:FindFirstChild(name) end)
-        if not p then
-            -- same name in other capitals (a name typed as "enderlord" for "EnderLord"); ~30 players, cheap
-            local low = string.lower(name)
-            pcall(function()
-                for _, pl in ipairs(Players:GetPlayers()) do
-                    if string.lower(pl.Name) == low then p = pl; break end
-                end
-            end)
-        end
+        if not p then p = byLowerName(name) end
         if p then
             local ch, cn = nil, nil
             pcall(function() ch = p.Character; cn = ch and ch.Name end)
@@ -11225,193 +11240,11 @@ end)()
             "https://raw.githubusercontent.com/cardstackdkme/Vrrrrr/main/uilib.lua",          -- Verfall's fork (fallback)
             "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua",  -- upstream fallback
         }
-        -- Page bars (uilib "RQ patch #14"): added to Realquick's library text in memory, right before it
-        -- runs (v9.52). No second download, and it always sits on the friend's latest library. If a step
-        -- no longer matches (the library changed there), the library runs as it is: one page per tab.
-        -- uilib RQ patch #14 (pages), applied to the downloaded library text before it runs.
-        -- Generated from uilib_pages_patch.py; every step must match exactly its count, or the
-        -- library runs unpatched (one long page per tab, as before).
-        local PAGES_STEPS = {
-            { [====[local function iA(di, eM, fl, eN, h3, iB, hy, iC)
-	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
-]====],
-              [====[-- RQ patch #14: pages. A tab whose sections carry .page, and whose .pages lists the page names in
--- order, shows a page bar at the top of its content and lays out only the active page's sections
--- (a section with no .page belongs to the first page). Requiem sets these after building a tab; a
--- tab with no pages, or just one, draws exactly as before. The bar is fixed: it does not scroll.
--- Kept on `az`, NOT as new top-level locals: this file's main chunk already has 199 of Lua's 200, and
--- Matcha compiles a chunk over the limit into a function that silently does nothing.
-az.rqPage = { H = 30, GAP = 12 }
-function az.rqPage.bar(di, eM, hf, h3, iB, hy)
-	local RQ_PAGE_H, RQ_PAGE_GAP = az.rqPage.H, az.rqPage.GAP
-	local ig = az.contentFade * az.drawVisible
-	local eq = az.hoverEffects ~= false
-	local acc = az._accentMid
-	local fnt = bA(aq)
-	di._pageAf = di._pageAf or {}
-	local x0 = h3
-	for _, p in ipairs(di.pages) do
-		local w = bC(p, 13, fnt) + 30
-		local dW = di.activePage == p
-		local hov = eq and not hf and cA(x0, iB, w, RQ_PAGE_H)
-		local af = bX(di._pageAf[p] or 0, dW and 1 or 0, 13)
-		di._pageAf[p] = af
-		b6(x0, iB, w, RQ_PAGE_H, acc, 31, 4, 0.13 * af * ig)
-		bi(x0, iB, w, RQ_PAGE_H, ak, 31, 4, an.cardStrk * af * ig)
-		b6(x0, iB, w, RQ_PAGE_H, ak, 31, 4, (hov and not dW and 0.07 or 0) * ig)
-		b6(x0 + w / 2 - 9 * af, iB + RQ_PAGE_H - 3, D(1, 18 * af), 2.5, acc, 32, 1.25, 0.95 * af * ig)
-		local a = (dW and 0.96 or (hov and 0.82 or 0.58)) * ig
-		bN(p, x0 + w / 2, bM(iB, RQ_PAGE_H, 13), dW and acc or ak, 13, aq, 32, true, false, nil, a)
-		if eM and not hf and cA(x0, iB, w, RQ_PAGE_H) then
-			if di.activePage ~= p then
-				di.activePage = p
-				di.scrollY, di.targetScrollY = 0, 0
-				az.contentFade = 0
-			end
-			eM = false
-		end
-		x0 = x0 + w + 8
-	end
-	local ly = iB + RQ_PAGE_H + RQ_PAGE_GAP / 2
-	bj(h3, ly, h3 + hy, ly, ak, 31, 1, an.hairline * ig)
-	return eM
-end
-local function iA(di, eM, fl, eN, h3, iB, hy, iC)
-	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
-	local secs = di.sections
-	local pages = di.pages
-	if pages and #pages > 1 then
-		local valid = false
-		for _, p in ipairs(pages) do if p == di.activePage then valid = true break end end
-		if not valid then di.activePage = pages[1] end
-		-- a search result on another page: open that page first, then the normal scroll-to runs
-		local tgt = az._spotScrollTo
-		if tgt then
-			for _, X in ipairs(di.sections) do
-				for _, dM in ipairs(X.items) do
-					if dM == tgt and (X.page or pages[1]) ~= di.activePage then
-						di.activePage = X.page or pages[1]
-						di.scrollY, di.targetScrollY = 0, 0
-					end
-				end
-			end
-		end
-		eM = rqPageBar(di, eM, hf, h3, iB, hy)
-		iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
-		iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
-		local key = tostring(di.activePage) .. "#" .. #di.sections
-		if di._psKey ~= key then
-			local list = {}
-			for _, X in ipairs(di.sections) do
-				if (X.page or pages[1]) == di.activePage then list[#list + 1] = X end
-			end
-			di._psKey, di._ps = key, list
-		end
-		secs = di._ps
-	end
-]====], 1 },
-            { [====[		if az.activeTab then
-			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
-		end
-]====],
-              [====[		if az.activeTab and not (az.activeTab.pages and #az.activeTab.pages > 1) then
-			bN(az.activeTab.name, bW + 16, bM(b8 + gw, kh, 14), ak, 14, aq, 13, false, false, eo - 32, an.label * g)
-		end
-		-- RQ patch #14: a tab with pages shows its page pills in this header row instead of its title
-		az._rqHdrPages = false
-		local rqT = az.activeTab
-		if rqT and rqT.pages and #rqT.pages > 1 then
-			az._rqHdrPages = true
-			local rqF = bA(aq)
-			local rqHf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
-			local rqAcc = az._accentMid
-			local rqH = 26
-			local rqY = b8 + gw + (kh - rqH) / 2
-			local rqX = bW + 12
-			local rqEnd = b7 + b9 - 16
-			rqT._pageAf = rqT._pageAf or {}
-			for _, p in ipairs(rqT.pages) do
-				-- real SF Bold width from Requiem (_G.RQTextW) when present; the library's estimate otherwise
-				local tw = (type(_G.RQTextW) == "function" and _G.RQTextW(p, 13)) or bC(p, 13, rqF)
-				local w = tw + 24
-				if rqX + w > rqEnd then break end
-				local dW = rqT.activePage == p
-				local jU = not rqHf and cA(rqX, rqY, w, rqH)
-				local fM = jU and az.hoverEffects ~= false
-				local jV = bX(rqT._pageAf[p] or 0, dW and 1 or 0, 13)
-				rqT._pageAf[p] = jV
-				b6(rqX, rqY, w, rqH, ak, 13, 7, an.tabFill * jV * g)
-				bi(rqX, rqY, w, rqH, ak, 14, 7, an.cardStrk * jV * g)
-				b6(rqX + w / 2 - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
-				b6(rqX, rqY, w, rqH, ak, 13, 7, (fM and not dW and 0.07 or 0) * g)
-				local hu = (dW and an.hover or (fM and an.label or an.dim)) * g
-				bN(p, rqX + (w - tw) / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, false, false, nil, hu)
-				if eM and jU then
-					if rqT.activePage ~= p then
-						rqT.activePage = p
-						rqT.scrollY, rqT.targetScrollY = 0, 0
-						az.contentFade = 0
-					end
-					eM = false
-				end
-				rqX = rqX + w + 6
-			end
-		end
-]====], 1 },
-            { [====[	else
-		bW = b7
-		eo = b9
-		iB = b8 + gw + jq + 8
-]====],
-              [====[	else
-		az._rqHdrPages = false
-		bW = b7
-		eo = b9
-		iB = b8 + gw + jq + 8
-]====], 1 },
-            { [====[		eM = rqPageBar(di, eM, hf, h3, iB, hy)
-		iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
-		iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
-]====],
-              [====[		if not (az._rqHdrPages and di == az.activeTab) then
-			eM = az.rqPage.bar(di, eM, hf, h3, iB, hy)
-			iB = iB + az.rqPage.H + az.rqPage.GAP
-			iC = iC - az.rqPage.H - az.rqPage.GAP
-		end
-]====], 1 },
-            { [====[for aw, X in ipairs(di.sections) do]====],
-              [====[for aw, X in ipairs(secs) do]====], 2 },
-        }
-        local PAGES_MARK = "RQ patch #14: pages"
-        -- Every magic character escaped, so this finds the text literally whether or not the executor's
-        -- string.find honours its plain flag.
-        local function litPattern(t)
-            return (string.gsub(t, "[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
-        end
-        local pagesDiag = {}
-        local function withPages(body)
-            pagesDiag.len = #body
-            pagesDiag.cr = select(2, string.gsub(body, "\r", ""))
-            if string.find(body, litPattern(PAGES_MARK)) then return body, "native" end
-            local s = (string.gsub(body, "\r\n", "\n"))
-            for k, st in ipairs(PAGES_STEPS) do
-                local old, new, cnt = st[1], st[2], st[3]
-                local pat = litPattern(old)
-                local parts, i, n = {}, 1, 0
-                while true do
-                    local a, b = string.find(s, pat, i)
-                    if not a then break end
-                    parts[#parts + 1] = string.sub(s, i, a - 1)
-                    parts[#parts + 1] = new
-                    i, n = b + 1, n + 1
-                end
-                pagesDiag[k] = n
-                if n ~= cnt then pagesDiag.failed = k; return nil end
-                parts[#parts + 1] = string.sub(s, i)
-                s = table.concat(parts)
-            end
-            return s, "patched"
-        end
+        -- Page tabs (uilib RQ patch #14, PowerDouble's design) are built into Realquick's library since
+        -- v9.59, so it runs exactly as downloaded: no copy of its text edited at every load. GUI._uiPages
+        -- says whether the library that loaded has them; Vrrrrr's and upstream's don't, and then every
+        -- tab shows all its sections on one page, as before.
+        local PAGES_MARK = "RQ patch #14: pages"   -- no pattern characters: found the same with or without plain
         local lastBody
         local function grabGlobal()
             if type(Lib) == "table" then return end
@@ -11428,44 +11261,22 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             end
             return nil
         end
+        -- compiled, then run: a library that fails to compile is a nil check here, not an error thrown
+        -- inside pcall (PowerDouble found Matcha's pcall does not always catch those)
         local function runBody(body)
             lastBody = body
-            local ok, res = pcall(function() return loadstring(body)() end)
-            if ok and type(res) == "table" then Lib = res; return true end
-            grabGlobal()
+            local okC, fn = pcall(loadstring, body)
+            if not okC or type(fn) ~= "function" then return false end
+            local ok, res = pcall(fn)
+            if ok and type(res) == "table" then Lib = res else grabGlobal() end
             return type(Lib) == "table"
         end
-        local firstBody = fetchBody(UI_URLS[1])
-        if firstBody then
-            local ok, paged, how = pcall(withPages, firstBody)
-            if not ok then pagesDiag.err = tostring(paged) end
-            if ok and paged then
-                -- compiled and run as two steps (no error() inside pcall: Matcha's pcall doesn't catch it),
-                -- so a failure says which half broke and why
-                local fn, cerr = loadstring(paged)
-                if not fn then
-                    pagesDiag.compileErr = tostring(cerr)
-                else
-                    local okRun, res = pcall(fn)
-                    if not okRun then pagesDiag.runErr = tostring(res) end
-                    if okRun and type(res) == "table" then Lib = res else grabGlobal() end
-                    if type(Lib) == "table" then GUI._uiPages = how else pagesDiag.run = "ran but no library found" end
-                end
-                if not GUI._uiPages then
-                    pcall(function() writefile(CONFIG_DIR .. "/uilib_paged_seen.txt", paged) end)
-                end
+        for i, url in ipairs(UI_URLS) do
+            local body = fetchBody(url)
+            if body and runBody(body) then
+                if i == 1 and string.find(body, PAGES_MARK) then GUI._uiPages = "native" end
+                break
             end
-            if not GUI._uiPages then
-                -- keep what the executor actually received, to compare with the repo copy
-                pcall(function() writefile(CONFIG_DIR .. "/uilib_seen.txt", firstBody) end)
-            end
-        end
-        GUI._pagesDiag = pagesDiag
-        if type(Lib) ~= "table" and firstBody then runBody(firstBody) end
-        for i = 2, #UI_URLS do
-            if type(Lib) == "table" then break end
-            local body = fetchBody(UI_URLS[i])
-            if body then runBody(body) end
         end
         if type(Lib) ~= "table" and type(lastBody) == "string" then
             pcall(function() loadstring(lastBody)() end)
@@ -14202,7 +14013,8 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
     -- name; a section not named goes to the LAST page, so Direct ESP's player groups (named after
     -- the groups) and any section added later land somewhere sensible. Needs uilib RQ patch #14; an
     -- older library ignores these fields and shows every section on one page, as before.
-    -- the page pills size and centre themselves with the real SF Bold text width
+    -- the page pills size and centre themselves with the real SF Bold text width (the library
+    -- measures each page name once, then keeps it)
     pcall(function() _G.RQTextW = function(t, size) return GUI.TextW(t, size) end end)
     pcall(function()
         local function paginate(tabObj, pages)
@@ -14214,7 +14026,7 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
                 for _, sn in ipairs(pg[2] or {}) do pageOf[sn] = pg[1] end
             end
             for _, sec in ipairs(di.sections) do sec.page = pageOf[sec.name] or names[#names] end
-            di.pages, di._psKey = names, nil
+            di.pages, di._ps = names, nil   -- _ps: the library's cached list of the page's sections
             di.activePage = di.activePage or names[1]
         end
         -- move section `name` to sit right after section `after` (layout follows the section order)
@@ -14236,20 +14048,19 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             { "ESP Style", { "Titan", "Animals", "Distance" } },
             { "HUD Bars" },     -- Health / Gas Bar and their gradients
         })
+        -- Gas Bar (a one-button section that continues its column) fills the gap under Grapple.
+        -- Moved before paginate, so the page lists are built from the final order.
+        moveAfter(GUI._charTab, "Gas Bar", "Grapple")
         paginate(GUI._charTab, {
             { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Gas Bar" } },
             { "Weapons" },      -- Firearm Auto, Thunderspears
         })
-        -- Gas Bar (a one-button section that continues its column) fills the gap under Grapple
-        moveAfter(GUI._charTab, "Gas Bar", "Grapple")
         paginate(GUI._setTab, {
             { "Look & Layout", { "Appearance", "Panels", "Layout" } },
             { "Interface & Configs" },   -- Interface, Configs, System, About
         })
-        _G.RQPages = { lib = GUI._uiPages or "none", diag = GUI._pagesDiag,
-            esp = GUI._espTab and GUI._espTab._tab and GUI._espTab._tab.pages and #GUI._espTab._tab.pages or 0 }
         if not GUI._uiPages then
-            uiNotify("Requiem", "Page tabs unavailable: the UI library changed. Every tab shows all its sections", 8)
+            uiNotify("Requiem", "Page tabs unavailable in the UI library that loaded. Every tab shows all its sections", 8)
         end
     end)
 
