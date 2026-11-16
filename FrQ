@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.40"
+GUI.Version = "v9.41"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11467,25 +11467,32 @@ end)()
             for _, g in ipairs(D.Groups) do
                 for _, e in ipairs(g.list) do listed[string.lower(e[1])] = g.name end
             end
-            local custom = {}
-            pcall(function()
-                if isfile(CUSTOM_FILE) then
-                    local seen = {}
-                    for line in readfile(CUSTOM_FILE):gmatch("[^\r\n]+") do
-                        local nm = line:match("^%s*([%w_]+)%s*$")
-                        if nm and not seen[string.lower(nm)] and not listed[string.lower(nm)] then
-                            seen[string.lower(nm)] = true
-                            custom[#custom + 1] = nm
+            -- Lines that aren't a bare username (the header, notes, blanks) are skipped.
+            local HEADER = "# Direct ESP custom names: one Roblox username per line.\n"
+                .. "# Edit and save, then press Reload From File in the menu (ESP > Custom).\n"
+            local function readNames()
+                local out, seen = {}, {}
+                pcall(function()
+                    if isfile(CUSTOM_FILE) then
+                        for line in readfile(CUSTOM_FILE):gmatch("[^\r\n]+") do
+                            local nm = line:match("^%s*([%w_]+)%s*$")
+                            local low = nm and string.lower(nm)
+                            if nm and #nm >= 3 and #nm <= 20 and not seen[low] and not listed[low] then
+                                seen[low] = true
+                                out[#out + 1] = nm
+                            end
                         end
                     end
-                end
-            end)
+                end)
+                return out
+            end
+            local custom = readNames()
             local function save()
                 pcall(function()
                     if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then
                         makefolder(CONFIG_DIR)
                     end
-                    writefile(CUSTOM_FILE, table.concat(custom, "\n") .. "\n")
+                    writefile(CUSTOM_FILE, HEADER .. table.concat(custom, "\n") .. (#custom > 0 and "\n" or ""))
                 end)
             end
             local secC = tab:Section("Custom", side, "your own names, saved on this PC")
@@ -11524,11 +11531,24 @@ end)()
                 if nm and #nm >= 3 and #nm <= 20 then return nm end
                 return nil
             end
+            local function dropRow(low)
+                local t = toggles[low]
+                if not t then return end
+                pcall(function()
+                    local items = secC._section.items
+                    for i, it in ipairs(items) do
+                        if it == t.item then table.remove(items, i); break end
+                    end
+                end)
+                toggles[low] = nil
+            end
             local function clearBox()
                 typed = ""
                 pcall(function() box.item.value = "" end)
             end
+            local syncFromFile   -- set below; Add/Remove re-read the file first so hand edits survive
             secC:Button("Add", function()
+                if syncFromFile then syncFromFile(true) end
                 local nm = typedName()
                 if not nm then
                     uiNotify("Direct ESP", "Not a Roblox username (3-20 letters, numbers or _)", 4)
@@ -11551,6 +11571,7 @@ end)()
                 clearBox()
             end)
             secC:Button("Remove", function()
+                if syncFromFile then syncFromFile(true) end
                 local nm = typedName()
                 local t = nm and toggles[string.lower(nm)]
                 if not t then
@@ -11566,16 +11587,49 @@ end)()
                     end
                 end
                 save()
-                pcall(function()
-                    local items = secC._section.items
-                    for i, it in ipairs(items) do
-                        if it == t.item then table.remove(items, i); break end
-                    end
-                end)
-                toggles[low] = nil
+                dropRow(low)
                 uiNotify("Direct ESP", "Removed " .. nm .. " from Custom", 3)
                 clearBox()
             end)
+            -- Matcha can't start programs, so "open" = make sure the file exists and copy its full path:
+            -- Win+R, paste, Enter opens it in Notepad. C:\matcha\workspace is Matcha's default folder;
+            -- "Open Direct ESP Custom List.bat" (shared with the setup .bat) finds other installs.
+            secC:Button("Open List File", function()
+                pcall(function() if not isfile(CUSTOM_FILE) then save() end end)
+                local path = "C:\\matcha\\workspace\\" .. CUSTOM_FILE:gsub("/", "\\")
+                local ok = pcall(function() setclipboard(path) end)
+                if ok then
+                    uiNotify("Direct ESP", "Path copied - press Win+R, paste, Enter to open it in Notepad. Then Reload From File", 8)
+                else
+                    uiNotify("Direct ESP", "Open " .. path .. " in Notepad, then Reload From File", 8)
+                end
+            end)
+            -- Pick up a hand-edited file without reloading the script: new names get rows, deleted ones go.
+            syncFromFile = function(quiet)
+                local names = readNames()
+                local want, added, removed = {}, 0, 0
+                for _, nm in ipairs(names) do want[string.lower(nm)] = nm end
+                for low in pairs(toggles) do
+                    if not want[low] then
+                        for i, n in ipairs(custom) do
+                            if string.lower(n) == low then D.On[n] = nil; table.remove(custom, i); break end
+                        end
+                        dropRow(low)
+                        removed = removed + 1
+                    end
+                end
+                for _, nm in ipairs(names) do
+                    if not toggles[string.lower(nm)] then
+                        custom[#custom + 1] = nm
+                        addToggle(nm)
+                        added = added + 1
+                    end
+                end
+                if not quiet then
+                    uiNotify("Direct ESP", string.format("Custom list: %d added, %d removed (%d names)", added, removed, #names), 4)
+                end
+            end
+            secC:Button("Reload From File", function() syncFromFile(false) end)
             for _, nm in ipairs(custom) do addToggle(nm) end
         end
         local secOpt = tab:Section("Direct ESP", side, "Search and look")
