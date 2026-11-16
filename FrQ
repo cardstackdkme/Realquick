@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.55"
+GUI.Version = "v9.56"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -11239,8 +11239,11 @@ end)()
 -- order, shows a page bar at the top of its content and lays out only the active page's sections
 -- (a section with no .page belongs to the first page). Requiem sets these after building a tab; a
 -- tab with no pages, or just one, draws exactly as before. The bar is fixed: it does not scroll.
-local RQ_PAGE_H, RQ_PAGE_GAP = 30, 12
-local function rqPageBar(di, eM, hf, h3, iB, hy)
+-- Kept on `az`, NOT as new top-level locals: this file's main chunk already has 199 of Lua's 200, and
+-- Matcha compiles a chunk over the limit into a function that silently does nothing.
+az.rqPage = { H = 30, GAP = 12 }
+function az.rqPage.bar(di, eM, hf, h3, iB, hy)
+	local RQ_PAGE_H, RQ_PAGE_GAP = az.rqPage.H, az.rqPage.GAP
 	local ig = az.contentFade * az.drawVisible
 	local eq = az.hoverEffects ~= false
 	local acc = az._accentMid
@@ -11370,17 +11373,15 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
 		iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
 ]====],
               [====[		if not (az._rqHdrPages and di == az.activeTab) then
-			eM = rqPageBar(di, eM, hf, h3, iB, hy)
-			iB = iB + RQ_PAGE_H + RQ_PAGE_GAP
-			iC = iC - RQ_PAGE_H - RQ_PAGE_GAP
+			eM = az.rqPage.bar(di, eM, hf, h3, iB, hy)
+			iB = iB + az.rqPage.H + az.rqPage.GAP
+			iC = iC - az.rqPage.H - az.rqPage.GAP
 		end
 ]====], 1 },
             { [====[for aw, X in ipairs(di.sections) do]====],
               [====[for aw, X in ipairs(secs) do]====], 2 },
         }
         local PAGES_MARK = "RQ patch #14: pages"
-        -- the library text with pages added, and how: "native" (already has them) / "patched";
-        -- nil when any step doesn't match exactly its count (the library changed: run it as it is)
         -- Every magic character escaped, so this finds the text literally whether or not the executor's
         -- string.find honours its plain flag.
         local function litPattern(t)
@@ -11438,17 +11439,6 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
             local ok, paged, how = pcall(withPages, firstBody)
             if not ok then pagesDiag.err = tostring(paged) end
             if ok and paged then
-                -- Indentation stripped (this library has no multi-line strings, so that's safe): the patched
-                -- copy is then ~11 KB SMALLER than the unpatched one, which runs. v9.54 showed the patched
-                -- text compiles and "runs" without an error yet never reaches its last lines in Matcha.
-                -- Progress markers: _G.__RQPG = 1 at the top, 2 just before it registers itself.
-                paged = (string.gsub(paged, "\n[ \t]+", "\n"))
-                paged = (string.gsub(paged, "^[ \t]+", ""))
-                local nEnd
-                paged, nEnd = string.gsub(paged, litPattern("\nc(a, dC)\n"), "\n_G.__RQPG = 2\nc(a, dC)\n", 1)
-                paged = "_G.__RQPG = 1\n" .. paged
-                pagesDiag.size, pagesDiag.endMark = #paged, nEnd
-                pcall(function() _G.__RQPG = 0 end)
                 -- compiled and run as two steps (no error() inside pcall: Matcha's pcall doesn't catch it),
                 -- so a failure says which half broke and why
                 local fn, cerr = loadstring(paged)
@@ -11456,7 +11446,6 @@ local function iA(di, eM, fl, eN, h3, iB, hy, iC)
                     pagesDiag.compileErr = tostring(cerr)
                 else
                     local okRun, res = pcall(fn)
-                    pcall(function() pagesDiag.reached = _G.__RQPG end)
                     if not okRun then pagesDiag.runErr = tostring(res) end
                     if okRun and type(res) == "table" then Lib = res else grabGlobal() end
                     if type(Lib) == "table" then GUI._uiPages = how else pagesDiag.run = "ran but no library found" end
