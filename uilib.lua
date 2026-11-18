@@ -4517,6 +4517,139 @@ function az.rqPage.textW(di, p, fnt)
 	end
 	return w
 end
+-- Page icons (patch #14b). A tab names one per page in di.pageIcons[page]; a name that is not in
+-- this set falls back to the library's own vector icons (cl). Same drawing language as cl: lines of
+-- width ck and outline circles on a unit square scaled to X.
+az.rqPage.ICON, az.rqPage.ICON_GAP = 14, 6
+az.rqPage.NONE = {} -- shared empty list: an icon with no lines/circles/rects allocates nothing per frame
+az.rqPage.icons = {
+	-- l = lines {x1, y1, x2, y2}; c = circles {x, y, r, filled}; r = rects {x, y, w, h, filled}
+	dash = { -- a runner leaning into a dash, speed lines behind
+		c = { { 0.72, 0.17, 0.12 } },
+		l = {
+			{ 0.66, 0.31, 0.52, 0.58 }, -- body
+			{ 0.63, 0.38, 0.84, 0.47 }, -- front arm
+			{ 0.62, 0.38, 0.45, 0.47 }, -- back arm
+			{ 0.52, 0.58, 0.70, 0.72 },
+			{ 0.70, 0.72, 0.64, 0.94 }, -- front leg
+			{ 0.52, 0.58, 0.38, 0.76 },
+			{ 0.38, 0.76, 0.21, 0.74 }, -- back leg, kicked out
+			{ 0.04, 0.30, 0.34, 0.30 }, -- speed lines
+			{ 0.00, 0.46, 0.28, 0.46 },
+			{ 0.06, 0.61, 0.24, 0.61 },
+		},
+	},
+	terrain = { -- hills and a sun: the world
+		c = { { 0.76, 0.22, 0.11 } },
+		l = {
+			{ 0.04, 0.86, 0.36, 0.38 },
+			{ 0.36, 0.38, 0.55, 0.65 },
+			{ 0.55, 0.65, 0.68, 0.50 },
+			{ 0.68, 0.50, 0.96, 0.86 },
+			{ 0.96, 0.86, 0.04, 0.86 },
+		},
+	},
+	espbox = { -- a player inside ESP corner brackets
+		c = { { 0.5, 0.38, 0.12 } },
+		l = {
+			{ 0.06, 0.06, 0.30, 0.06 },
+			{ 0.06, 0.06, 0.06, 0.30 },
+			{ 0.94, 0.06, 0.70, 0.06 },
+			{ 0.94, 0.06, 0.94, 0.30 },
+			{ 0.06, 0.94, 0.30, 0.94 },
+			{ 0.06, 0.94, 0.06, 0.70 },
+			{ 0.94, 0.94, 0.70, 0.94 },
+			{ 0.94, 0.94, 0.94, 0.70 },
+			{ 0.30, 0.76, 0.37, 0.61 },
+			{ 0.37, 0.61, 0.63, 0.61 },
+			{ 0.63, 0.61, 0.70, 0.76 },
+		},
+	},
+	palette = { -- a paint palette: styles and colours
+		c = {
+			{ 0.5, 0.5, 0.42 },
+			{ 0.33, 0.40, 0.075, true },
+			{ 0.52, 0.29, 0.075, true },
+			{ 0.70, 0.42, 0.075, true },
+			{ 0.60, 0.67, 0.09 },
+		},
+	},
+	bars = { -- two HUD bars, part filled
+		r = {
+			{ 0.06, 0.20, 0.88, 0.22 },
+			{ 0.06, 0.20, 0.60, 0.22, true },
+			{ 0.06, 0.58, 0.88, 0.22 },
+			{ 0.06, 0.58, 0.34, 0.22, true },
+		},
+	},
+	swords = { -- two crossed blades: blade, short guard, grip each
+		l = {
+			{ 0.10, 0.08, 0.66, 0.64 },
+			{ 0.58, 0.72, 0.74, 0.56 },
+			{ 0.66, 0.64, 0.88, 0.86 },
+			{ 0.90, 0.08, 0.34, 0.64 },
+			{ 0.42, 0.72, 0.26, 0.56 },
+			{ 0.34, 0.64, 0.12, 0.86 },
+		},
+	},
+	layout = { -- a window split into panels
+		r = { { 0.08, 0.12, 0.84, 0.76 } },
+		l = { { 0.40, 0.12, 0.40, 0.88 }, { 0.40, 0.50, 0.92, 0.50 } },
+	},
+}
+-- Width of a page pill: pads + (icon + gap, when the page has one) + the label.
+function az.rqPage.width(di, p, fnt, pad)
+	local w = az.rqPage.textW(di, p, fnt) + pad * 2
+	if di.pageIcons and di.pageIcons[p] then
+		w = w + az.rqPage.ICON + az.rqPage.ICON_GAP
+	end
+	return w
+end
+-- A pill's contents: the icon on the left, then the label centred in the room left of it. The label
+-- is centred by Matcha itself (bV: Text.Center), not from a width estimate, so it sits exactly in the
+-- middle whatever the font really measures; a long or short estimate only changes the padding.
+function az.rqPage.label(di, p, x0, y0, w, h, pad, col, z, a)
+	local ico = di.pageIcons and di.pageIcons[p]
+	local tx = x0 + pad
+	if ico then
+		local S = az.rqPage.ICON
+		az.rqPage.drawIcon(ico, x0 + pad - 1, y0 + (h - S) / 2, S, col, z, a)
+		tx = tx + S + az.rqPage.ICON_GAP
+	end
+	local cx = (tx + x0 + w - pad) / 2
+	bV(p, cx, y0 + h / 2, col, 13, aq, z, a)
+	return cx
+end
+-- x of a pill's label centre (what label() draws at), so the accent underline sits under the word
+function az.rqPage.labelX(di, p, x0, w, pad)
+	local tx = x0 + pad
+	if di.pageIcons and di.pageIcons[p] then
+		tx = tx + az.rqPage.ICON + az.rqPage.ICON_GAP
+	end
+	return (tx + x0 + w - pad) / 2
+end
+function az.rqPage.drawIcon(name, x0, y0, S, col, z, a)
+	local ic = az.rqPage.icons[name]
+	if not ic then
+		if cl[name] then
+			cl[name](x0, y0, S, col, z, a)
+		end
+		return
+	end
+	for _, q in ipairs(ic.l or az.rqPage.NONE) do
+		bj(x0 + S * q[1], y0 + S * q[2], x0 + S * q[3], y0 + S * q[4], col, z, ck, a)
+	end
+	for _, q in ipairs(ic.c or az.rqPage.NONE) do
+		bq(x0 + S * q[1], y0 + S * q[2], S * q[3], col, z, q[4] == true, q[4] and 1 or ck, q[3] > 0.2 and 28 or 14, a)
+	end
+	for _, q in ipairs(ic.r or az.rqPage.NONE) do
+		if q[5] then
+			b6(x0 + S * q[1], y0 + S * q[2], S * q[3], S * q[4], col, z, 1, a)
+		else
+			bi(x0 + S * q[1], y0 + S * q[2], S * q[3], S * q[4], col, z, 1, a)
+		end
+	end
+end
 function az.rqPage.bar(di, eM, hf, h3, iB, hy)
 	local RQ_PAGE_H, RQ_PAGE_GAP = az.rqPage.H, az.rqPage.GAP
 	local ig = az.contentFade * az.drawVisible
@@ -4526,7 +4659,7 @@ function az.rqPage.bar(di, eM, hf, h3, iB, hy)
 	di._pageAf = di._pageAf or {}
 	local x0 = h3
 	for _, p in ipairs(di.pages) do
-		local w = az.rqPage.textW(di, p, fnt) + 30
+		local w = az.rqPage.width(di, p, fnt, 15)
 		local dW = di.activePage == p
 		local hov = eq and not hf and cA(x0, iB, w, RQ_PAGE_H)
 		local af = bX(di._pageAf[p] or 0, dW and 1 or 0, 13)
@@ -4534,9 +4667,9 @@ function az.rqPage.bar(di, eM, hf, h3, iB, hy)
 		b6(x0, iB, w, RQ_PAGE_H, acc, 31, 4, 0.13 * af * ig)
 		bi(x0, iB, w, RQ_PAGE_H, ak, 31, 4, an.cardStrk * af * ig)
 		b6(x0, iB, w, RQ_PAGE_H, ak, 31, 4, (hov and not dW and 0.07 or 0) * ig)
-		b6(x0 + w / 2 - 9 * af, iB + RQ_PAGE_H - 3, D(1, 18 * af), 2.5, acc, 32, 1.25, 0.95 * af * ig)
+		b6(az.rqPage.labelX(di, p, x0, w, 15) - 9 * af, iB + RQ_PAGE_H - 3, D(1, 18 * af), 2.5, acc, 32, 1.25, 0.95 * af * ig)
 		local a = (dW and 0.96 or (hov and 0.82 or 0.58)) * ig
-		bN(p, x0 + w / 2, bM(iB, RQ_PAGE_H, 13), dW and acc or ak, 13, aq, 32, true, false, nil, a)
+		az.rqPage.label(di, p, x0, iB, w, RQ_PAGE_H, 15, dW and acc or ak, 32, a)
 		if eM and not hf and cA(x0, iB, w, RQ_PAGE_H) then
 			if di.activePage ~= p then
 				di.activePage = p
@@ -5361,8 +5494,7 @@ local function jg(eM, fl, eN)
 			local rqEnd = b7 + b9 - 16
 			rqT._pageAf = rqT._pageAf or {}
 			for _, p in ipairs(rqT.pages) do
-				local tw = az.rqPage.textW(rqT, p, rqF)
-				local w = tw + 24
+				local w = az.rqPage.width(rqT, p, rqF, 12)
 				if rqX + w > rqEnd then break end
 				local dW = rqT.activePage == p
 				local jU = not rqHf and cA(rqX, rqY, w, rqH)
@@ -5371,10 +5503,10 @@ local function jg(eM, fl, eN)
 				rqT._pageAf[p] = jV
 				b6(rqX, rqY, w, rqH, ak, 13, 7, an.tabFill * jV * g)
 				bi(rqX, rqY, w, rqH, ak, 14, 7, an.cardStrk * jV * g)
-				b6(rqX + w / 2 - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
+				b6(az.rqPage.labelX(rqT, p, rqX, w, 12) - 8 * jV, rqY + rqH - 3, D(1, 16 * jV), 2, rqAcc, 15, 1, 0.95 * jV * g)
 				b6(rqX, rqY, w, rqH, ak, 13, 7, (fM and not dW and 0.07 or 0) * g)
 				local hu = (dW and an.hover or (fM and an.label or an.dim)) * g
-				bN(p, rqX + (w - tw) / 2, bM(rqY, rqH, 13), dW and rqAcc or ak, 13, aq, 15, false, false, nil, hu)
+				az.rqPage.label(rqT, p, rqX, rqY, w, rqH, 12, dW and rqAcc or ak, 15, hu)
 				if eM and jU then
 					if rqT.activePage ~= p then
 						rqT.activePage = p

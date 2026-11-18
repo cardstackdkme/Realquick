@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.59"
+GUI.Version = "v9.60"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12343,6 +12343,13 @@ end)()
             -- a value already written low still passes keep() and the cache revalidator.
             ZOOMED_CAMERA_MAX_DISTANCE          = { lo = 0, hi = 100000, fb = 200 },
             ZOOMED_CAMERA_MIN_DISTANCE          = { lo = 0, hi = 100000, fb = 200 },
+            -- Sprint (v9.60): your run multiplier, a stat in the same ClientAttributesHandler table
+            -- as the Velocity/Firearm stats. Read by CharacterMovementRunner each time sprint STARTS
+            -- (walkspeed "sprint" layer = clamp(mult, 0, 3.75), multiply). The game writes it only
+            -- when the server's value changes (a Celerity point). Live 2026-11-18: 1.6. The window
+            -- keeps out the name->hash cache's int16 hashes; the Sprint pin also writes only the
+            -- ONE slot that sits inside the stat table (see sprintSlot).
+            BasePlayerRunMultiplier             = { lo = 1, hi = 4,      fb = 1.6 },
         }
         -- Cross-run cache: getgc addresses stay valid for as long as you STAY in one server (same
         -- game.JobId = same Lua VM), and _G survives a script re-run -- so the scan is stashed in _G
@@ -12847,6 +12854,72 @@ end)()
         end)
         secParry:Button("Restore Default", function()
             resetMany("Parry", { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" })
+        end)
+
+        -- ---------- Sprint (BasePlayerRunMultiplier) — slider, 1.6x to 3x only ----------
+        -- Right column, under Parry. Sprint speed = walk speed (16) x this, from the NEXT sprint
+        -- press. Nothing about sprinting is sent to the server (decompiled 2026-11-18). A Celerity
+        -- point changes the server's value, and the game then overwrites this one.
+        local SPRINT = "BasePlayerRunMultiplier"
+        local SPRINT_MIN, SPRINT_MAX = 1.6, 3
+        local secSprint = tab:Section("Sprint", "Right", "Run speed, from the next sprint press")
+        local sprintVal = SPRINT_MIN
+        secSprint:Slider("Sprint Speed", sprintVal, 0.05, SPRINT_MIN, SPRINT_MAX, "x", function(v)
+            sprintVal = math.max(SPRINT_MIN, math.min(SPRINT_MAX, tonumber(v) or sprintVal))
+        end)
+        secSprint:Label(function()
+            return string.format("~%.1f studs/s sprinting  (16 x %.2f)", 16 * sprintVal, sprintVal)
+        end)
+        -- The ONE run-multiplier slot inside the stat table: within 32 KB of the Velocity stat's slot
+        -- (same table, as the Firearm pin checks). No anchor, or not exactly one slot: refuse, so a
+        -- look-alike number elsewhere can never be written.
+        local function sprintSlot()
+            local anchor = entriesFor("GearMaxVelocityMultiplier")[1]
+            local aa = anchor and gcAddr(anchor)
+            if not aa then return nil end
+            local hit, n = nil, 0
+            for _, e in ipairs(entriesFor(SPRINT)) do
+                local a = gcAddr(e)
+                if a and math.abs(a - aa) <= 32768 then hit, n = e, n + 1 end
+            end
+            return n == 1 and hit or nil
+        end
+        -- value nil = Restore. Your own value is re-read from the slot until the first write, and
+        -- again whenever the game changed it since (it no longer holds our last write).
+        local function sprintWrite(value, okMsg)
+            if not gateOK() then return end
+            task.spawn(function()
+                local e = sprintSlot()
+                if not e then
+                    notif("Sprint", "Run speed not found - rejoin and Load Values again", 5)
+                    return
+                end
+                local cur = nil
+                if type(memory_read) == "function" then
+                    local ok, v = pcall(memory_read, "double", gcAddr(e))
+                    cur = ok and gcNum(v) or nil
+                end
+                local last = velState.last[SPRINT]
+                if cur and not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
+                if value == nil then value = savedDefault[SPRINT] end
+                if value == nil then
+                    notif("Sprint", "Nothing to restore yet", 3)
+                    return
+                end
+                if landWrite(SPRINT, e, value) then
+                    velState.last[SPRINT] = value
+                    saveState()
+                    notif("Sprint", okMsg, 4)
+                else
+                    notif("Sprint", "Failed - rejoin and Load Values again", 4)
+                end
+            end)
+        end
+        secSprint:Button("Apply Sprint", function()
+            sprintWrite(sprintVal, "Applied - let go of sprint and press it again")
+        end)
+        secSprint:Button("Restore Default", function()
+            sprintWrite(nil, "Restored your own run speed")
         end)
 
         -- ---------- Firearms (EVERY gun): spread + recoil ----------
@@ -14021,12 +14094,14 @@ end)()
             local di = tabObj and tabObj._tab
             if type(di) ~= "table" or type(di.sections) ~= "table" then return end
             local names, pageOf = {}, {}
+            local icons = {}
             for _, pg in ipairs(pages) do
                 names[#names + 1] = pg[1]
+                icons[pg[1]] = pg.icon   -- drawn left of the name (uilib patch #14b icon set)
                 for _, sn in ipairs(pg[2] or {}) do pageOf[sn] = pg[1] end
             end
             for _, sec in ipairs(di.sections) do sec.page = pageOf[sec.name] or names[#names] end
-            di.pages, di._ps = names, nil   -- _ps: the library's cached list of the page's sections
+            di.pages, di.pageIcons, di._ps = names, icons, nil   -- _ps: the library's cached section list
             di.activePage = di.activePage or names[1]
         end
         -- move section `name` to sit right after section `after` (layout follows the section order)
@@ -14041,23 +14116,23 @@ end)()
             table.insert(secs, (to or #secs) + 1, moving)
         end
         paginate(GUI._espTab, {
-            { "World & Entities", { "Ore ESP", "Tools ESP", "Entity ESP" } },
-            { "Direct ESP" },   -- key, player groups, Custom, options
+            { "World & Entities", { "Ore ESP", "Tools ESP", "Entity ESP" }, icon = "terrain" },
+            { "Direct ESP", icon = "espbox" },   -- key, player groups, Custom, options
         })
         paginate(GUI._styleTab, {
-            { "ESP Style", { "Titan", "Animals", "Distance" } },
-            { "HUD Bars" },     -- Health / Gas Bar and their gradients
+            { "ESP Style", { "Titan", "Animals", "Distance" }, icon = "palette" },
+            { "HUD Bars", icon = "bars" },       -- Health / Gas Bar and their gradients
         })
         -- Gas Bar (a one-button section that continues its column) fills the gap under Grapple.
         -- Moved before paginate, so the page lists are built from the final order.
         moveAfter(GUI._charTab, "Gas Bar", "Grapple")
         paginate(GUI._charTab, {
-            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Gas Bar" } },
-            { "Weapons" },      -- Firearm Auto, Thunderspears
+            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Bar" }, icon = "dash" },
+            { "Weapons", icon = "swords" },      -- Firearm Auto, Thunderspears
         })
         paginate(GUI._setTab, {
-            { "Look & Layout", { "Appearance", "Panels", "Layout" } },
-            { "Interface & Configs" },   -- Interface, Configs, System, About
+            { "Look & Layout", { "Appearance", "Panels", "Layout" }, icon = "layout" },
+            { "Interface & Configs", icon = "sliders" },   -- Interface, Configs, System, About
         })
         if not GUI._uiPages then
             uiNotify("Requiem", "Page tabs unavailable in the UI library that loaded. Every tab shows all its sections", 8)
