@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.62"
+GUI.Version = "v9.63"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12753,7 +12753,6 @@ end)()
         --   Grapple      | Velocity
         --   Dash         | Parry
         --   Firearm Auto | Thunderspears
-        --   Gas Bar      |
         -- Move a section by changing its "Left"/"Right" AND its position in this file.
         local secVe = tab:Section("Velocity", "Right", "ODM speed build-up")
         local veMax, veInc = CFG.GearMaxVelocityMultiplier.fb, CFG.GearVelocityIncreaseRate.fb
@@ -12766,7 +12765,7 @@ end)()
             resetMany("Velocity", { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" })
         end)
 
-        -- SMART ADDITIVE auto-apply (experimental). The plain overwrite flattened server buffs;
+        -- SMART ADDITIVE auto-apply (no longer experimental, v9.63). The plain overwrite flattened server buffs;
         -- this reads your LIVE value each cycle via memory_read at the GC entry's address — an
         -- INSTANT read, NO getgc scan/freeze (verified 2026-07-03: the getgc entry's .addr IS the
         -- value's address; memory_read("double", addr) returns it exactly) — then re-applies your
@@ -12785,7 +12784,7 @@ end)()
         end
         -- Declared first so the callback can close over the handle and push the pill back.
         local uiVeAuto
-        uiVeAuto = secVe:Toggle("Auto-Apply (Exp)", false, function(v)
+        uiVeAuto = secVe:Toggle("Auto-Apply", false, function(v)
             if not v then veAutoGen = veAutoGen + 1; return end   -- off -> invalidate the running loop
             if not gateOK() then
                 -- Every other gate guards a Button, which has no persistent state, so bailing is
@@ -12838,7 +12837,7 @@ end)()
                     task.wait(3)
                 end
             end)
-        end):Tooltip("experimental - reads your LIVE velocity each cycle (instant memory read, no freeze) and STACKS your boost on top of server buffs; never lowers you")
+        end):Tooltip("Reads your LIVE velocity each cycle (instant memory read, no freeze) and STACKS your boost on top of server buffs; never lowers you")
 
         -- ---------- Dash (Canisters + Client Burst Dash) — ONE button sets all four ----------
         -- Fixed targets (not sliders): Fallback Min Speed 150->220, Base Gas 50->0,
@@ -12892,12 +12891,15 @@ end)()
         -- The ONE run-multiplier slot inside the stat table: within 32 KB of the Velocity stat's slot
         -- (same table, as the Firearm pin checks). No anchor, or not exactly one slot: refuse, so a
         -- look-alike number elsewhere can never be written.
-        local function sprintSlot()
-            local anchor = entriesFor("GearMaxVelocityMultiplier")[1]
+        -- `look` = entriesFor (a button click; sweeps if nothing is cached) or cachedFor (Auto-Apply,
+        -- which can start from a saved config at load and so must NEVER sweep).
+        local function sprintSlot(look)
+            look = look or entriesFor
+            local anchor = look("GearMaxVelocityMultiplier")[1]
             local aa = anchor and gcAddr(anchor)
             if not aa then return nil end
             local hit, n = nil, 0
-            for _, e in ipairs(entriesFor(SPRINT)) do
+            for _, e in ipairs(look(SPRINT)) do
                 local a = gcAddr(e)
                 if a and math.abs(a - aa) <= 32768 then hit, n = e, n + 1 end
             end
@@ -12937,9 +12939,62 @@ end)()
         secSprint:Button("Apply Sprint", function()
             sprintWrite(sprintVal, "Applied - let go of sprint and press it again")
         end)
+        local uiSprintAuto
         secSprint:Button("Restore Default", function()
+            -- Auto-Apply would put the boost straight back, so Restore switches it off first.
+            if uiSprintAuto then pcall(function() uiSprintAuto:Set(false) end) end
             sprintWrite(nil, "Restored your own run speed")
         end)
+
+        -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. Every 2 s it checks the slot (a
+        -- few instant memory reads, no freeze) and writes only when it no longer holds your value:
+        -- you moved the slider, or the game rewrote it (a Celerity point). That game value becomes
+        -- "your own" for Restore, the same rule as sprintWrite. CACHED slots only, never a sweep: a
+        -- saved "on" restores at load before anyone clicks, and a sweep there froze Matcha (v8.2).
+        -- A plain overwrite, not Velocity's additive boost: the slider IS the speed (1.6 .. 3.5),
+        -- and stacking it on a Celerity bonus would pass the range the user set.
+        local sprintAutoGen = 0
+        uiSprintAuto = secSprint:Toggle("Auto-Apply", false, function(v)
+            sprintAutoGen = sprintAutoGen + 1                -- any flip ends the running loop
+            if not v then return end
+            local e = gateOK() and type(memory_read) == "function" and sprintSlot(cachedFor) or nil
+            if not e then
+                -- Not loaded yet (a config restore at load stays quiet), or the slot isn't cached.
+                if gateOK() then
+                    notif("Sprint", type(memory_read) == "function"
+                        and "Run speed not found - press Apply Sprint once, then turn this on again"
+                        or "Auto-Apply needs Unsafe LuaU (memory reads) on in Matcha", 5)
+                end
+                pcall(function() uiSprintAuto:Set(false) end)  -- the pill already flipped on: put it back
+                return
+            end
+            local myGen, token = sprintAutoGen, {}
+            _G.__RQ_SPRINTAUTO = token                       -- one loop, even across re-runs
+            task.spawn(function()
+                while sprintAutoGen == myGen and GUI.Running and _G.__RQ_SPRINTAUTO == token do
+                    local cur = slotHolds(SPRINT, e, CFG[SPRINT])   -- nil = slot gone (rejoin, table rebuilt)
+                    local why
+                    if not cur then
+                        why = "run speed lost - Load Values again"
+                    elseif math.abs(cur - sprintVal) > 0.001 then
+                        local last = velState.last[SPRINT]
+                        if not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
+                        if landWrite(SPRINT, e, sprintVal) then
+                            velState.last[SPRINT] = sprintVal
+                            saveState()
+                        else
+                            why = "the write did not land - Load Values again"
+                        end
+                    end
+                    if why then
+                        notif("Sprint", "Auto-Apply stopped: " .. why, 6)
+                        pcall(function() uiSprintAuto:Set(false) end)
+                        break
+                    end
+                    task.wait(2)
+                end
+            end)
+        end):Tooltip("Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan")
 
         -- ---------- Firearms (EVERY gun): spread + recoil ----------
         -- v8.0: written through your two firearm STATS, not the gun configs (see the CFG note on
