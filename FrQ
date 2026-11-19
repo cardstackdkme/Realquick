@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.60"
+GUI.Version = "v9.61"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -3542,16 +3542,23 @@ local function InputLoop()
                     GUI.GasBarDragging = false
                     GUI.SnapGuides(nil, nil)
                     if GUI._gbMoved then GUI._gbMoved = false; pcall(saveConfig) end   -- same as health
+                    -- Let go within 4 px of where it was pressed = a click, not a drag: load the
+                    -- bar (GUI.GasBarClick only scans when the bar has nothing to show).
+                    local px, py = GUI._gbPressX or gmx, GUI._gbPressY or gmy
+                    if math.abs(gmx - px) <= 4 and math.abs(gmy - py) <= 4 and GUI.GasBarClick then
+                        pcall(GUI.GasBarClick)
+                    end
                 end
             elseif gDown and onGas and not GUI.Dragging and not GUI.CounterDragging
                    and not GUI.HealthBarDragging and GUI._menuUp then
                 GUI.GasBarDragging = true
                 GUI.GasBarDragOX = gmx - GUI.GasBarX
                 GUI.GasBarDragOY = gmy - GUI.GasBarY
+                GUI._gbPressX, GUI._gbPressY = gmx, gmy
             end
 
-            -- ~30x a second: the ODM gas is a few memory reads (the gas bar never sweeps; the
-            -- Character tab's Load Values / Reload Gas feed it), and gas drains while you move.
+            -- ~30x a second: the ODM gas is a few memory reads (the gas bar never sweeps on a timer;
+            -- Load Values or a click on the bar feeds it), and gas drains while you move.
             local gnow = os.clock()
             if gnow - (GUI._gbRefreshAt or 0) >= 1 / 30 then
                 GUI._gbRefreshAt = gnow
@@ -4566,11 +4573,12 @@ do
     -- load and Windows closed Matcha as not responding). It is fed by sweeps you start:
     --   * Character -> Load Values: warm() adds the three gas keys to its ONE sweep and hands the raw
     --     entries to GUI.GasFromSweep (no second freeze);
-    --   * Character -> Reload Gas: a gas-only sweep, for after a respawn rebuilt the table.
+    --   * a click on the bar (menu open): a gas-only sweep, for after a respawn rebuilt the table,
+    --     and only while the bar has nothing to show (GUI.GasBarClick).
     -- Found slots ride on _G keyed by JobId, so re-running the script in the same server keeps them.
     local NODE_SPAN = 2048   -- a 64-slot hash part (32-byte slots): every field of the table is inside
     GUI.GasSweepKeys = { "gasBoostingConsumption", "maxGas", "gas" }
-    -- status nil = derive it (Load Values first / Reload Gas); a string = say exactly that
+    -- status nil = derive it (see idleText); a string = say exactly that
     local ODM = { cands = {}, char = nil, prev = nil, status = nil }
     GUI.ODMGas = ODM
 
@@ -4606,7 +4614,7 @@ do
     -- A re-run in the same server reuses the slots found last time (_G); after a MATCHA restart
     -- (which wipes _G) they come from RQ/RQGasCache.json, kept per server (v9.32). Either way
     -- slotOK checks every slot on every read (number tag + the same key pointer), so a stale one
-    -- just reads as "Reload Gas" and is never trusted.
+    -- just reads as "Click to reload" and is never trusted.
     local GAS_CACHE = CONFIG_DIR .. "/RQGasCache.json"
     do
         local saved = _G.RQGasSlots
@@ -4658,7 +4666,7 @@ do
         end
         if ODM.active then ODM.prev = ODM.active.gas.a end
         ODM.cands, ODM.active = found, nil
-        ODM.status = (#found == 0) and "No gear - Reload Gas" or nil
+        ODM.status = (#found == 0) and "No gear - click to retry" or nil
         _G.RQGasSlots = { job = jobId(), cands = found }
         pcall(function()
             if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(CONFIG_DIR) then makefolder(CONFIG_DIR) end
@@ -4691,9 +4699,23 @@ do
     end
 
     local function idleText()
+        if GUI.CharIsLoading and GUI.CharIsLoading() then return "Loading..." end
         if ODM.status then return ODM.status end
-        if GUI.CharIsLoaded and GUI.CharIsLoaded() then return "Reload Gas in Character" end
-        return "Load Values first"
+        if GUI.CharIsLoaded and GUI.CharIsLoaded() then return "Click to reload" end
+        return "Click to load"
+    end
+
+    -- A click on the bar (InputLoop, menu open, like dragging). Scans ONLY when the bar has
+    -- nothing to show: readODM drops every slot that stopped checking out 30x a second (and all of
+    -- them on a respawn), so live candidates = loaded, and a loaded bar is never re-scanned (a scan
+    -- freezes Matcha ~10 s). Not loaded yet: CharReloadGas runs the full Load Values instead.
+    GUI.GasBarClick = function()
+        if #ODM.cands > 0 then
+            uiNotify("Gas", "Gas bar is already loaded", 2)
+            return
+        end
+        if GUI.CharIsLoading and GUI.CharIsLoading() then return end   -- a scan is already running
+        if GUI.CharReloadGas then GUI.CharReloadGas() end
     end
 
     -- (gas, maxGas), or (nil, text). Memory reads only: this never sweeps.
@@ -4708,7 +4730,7 @@ do
             if not first and #ODM.cands > 0 then   -- respawned: the gear table is rebuilt
                 if ODM.active then ODM.prev = ODM.active.gas.a end
                 ODM.cands, ODM.active = {}, nil
-                ODM.status = "Reload Gas in Character"
+                ODM.status = "Click to reload"
             end
         end
         local had = #ODM.cands > 0
@@ -4722,7 +4744,7 @@ do
             end
         end
         ODM.cands = keep
-        if had and #keep == 0 then ODM.status = "Reload Gas in Character" end   -- table freed
+        if had and #keep == 0 then ODM.status = "Click to reload" end   -- table freed
         if #keep == 0 then return nil, idleText() end
         ODM.active = pick()
         local c = ODM.active
@@ -12073,7 +12095,7 @@ end)()
         end):Tooltip("your health as a slim bar. With the menu open, drag it to move it; the spot is saved")
         secInd:Toggle("Gas Bar", GUI.GasBarVisible, function(v)
             GUI.GasBarVisible = v; BuildGasBar()
-        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn use Character -> Reload Gas. With the menu open, drag it to move it; the spot is saved")
+        end):Tooltip("your ODM gear gas, the number the gas check reads, without the monologue. Loads with Character -> Load Values; after a respawn, open the menu and click the bar (it only scans when it has nothing to show). With the menu open, drag it to move it; the spot is saved")
         secInd:Toggle("Gaspack Bar", GUI.GaspackBarVisible, function(v)
             GUI.GaspackBarVisible = v; GUI.BuildGaspackBar()
         end):Tooltip("the gas pack you wear (the tank you refill your gear from), in the original bar look. Says (no pack) when none is worn. With the menu open, drag it to move it; the spot is saved")
@@ -12671,7 +12693,7 @@ end)()
                 notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
             end)
         end
-        -- Reload Gas: a respawn rebuilds the gear table, so the gas bar needs one more sweep. Gas keys
+        -- Gas reload (a click on the gas bar, GUI.GasBarClick): a respawn rebuilds the gear table, so the bar needs one more sweep. Gas keys
         -- ONLY -- the Character values themselves are untouched (their cached slots outlive respawns,
         -- and re-resolving the BlunderBuss after an edit would fail its stock-value test).
         GUI.CharReloadGas = function()
@@ -12856,12 +12878,12 @@ end)()
             resetMany("Parry", { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" })
         end)
 
-        -- ---------- Sprint (BasePlayerRunMultiplier) — slider, 1.6x to 3x only ----------
+        -- ---------- Sprint (BasePlayerRunMultiplier) — slider, 1.6x to 3.5x only ----------
         -- Right column, under Parry. Sprint speed = walk speed (16) x this, from the NEXT sprint
         -- press. Nothing about sprinting is sent to the server (decompiled 2026-11-18). A Celerity
         -- point changes the server's value, and the game then overwrites this one.
         local SPRINT = "BasePlayerRunMultiplier"
-        local SPRINT_MIN, SPRINT_MAX = 1.6, 3
+        local SPRINT_MIN, SPRINT_MAX = 1.6, 3.5   -- the game itself caps the multiplier at 3.75
         local secSprint = tab:Section("Sprint", "Right", "Run speed, from the next sprint press")
         local sprintVal = SPRINT_MIN
         secSprint:Slider("Sprint Speed", sprintVal, 0.05, SPRINT_MIN, SPRINT_MAX, "x", function(v)
@@ -13279,16 +13301,8 @@ end)()
             end)
         end)
 
-        -- Directly UNDER Firearm Auto (the user's spot). RowAlign would start this left section a
-        -- new row below the taller Thunderspears; `stack` (uilib patch #12) makes
-        -- it continue the left column instead. On the upstream fallback lib it just sits lower.
-        -- Load Values (the lock popup) also loads the gas bar; a respawn rebuilds the gear table, and
-        -- this re-finds it (gas keys only).
-        local secGas = tab:Section("Gas Bar", "Left", "after a respawn")
-        pcall(function() secGas._section.stack = true end)
-        secGas:Button("Reload Gas  (~10s)", function()
-            if GUI.CharReloadGas then GUI.CharReloadGas() end
-        end)
+        -- (v9.61) No Reload Gas button here any more: click the gas bar on your HUD instead
+        -- (GUI.GasBarClick). It re-finds the gear table only when the bar has nothing to show.
     end)
 
     -- ===== Tab: Combat (Auto Parry, Fast Swing, Trigger Bot) =====
@@ -14104,17 +14118,6 @@ end)()
             di.pages, di.pageIcons, di._ps = names, icons, nil   -- _ps: the library's cached section list
             di.activePage = di.activePage or names[1]
         end
-        -- move section `name` to sit right after section `after` (layout follows the section order)
-        local function moveAfter(tabObj, name, after)
-            local secs = tabObj and tabObj._tab and tabObj._tab.sections
-            if type(secs) ~= "table" then return end
-            local from, to
-            for i, sec in ipairs(secs) do if sec.name == name then from = i end end
-            if not from then return end
-            local moving = table.remove(secs, from)
-            for i, sec in ipairs(secs) do if sec.name == after then to = i end end
-            table.insert(secs, (to or #secs) + 1, moving)
-        end
         paginate(GUI._espTab, {
             { "World & Entities", { "Ore ESP", "Tools ESP", "Entity ESP" }, icon = "terrain" },
             { "Direct ESP", icon = "espbox" },   -- key, player groups, Custom, options
@@ -14123,11 +14126,8 @@ end)()
             { "ESP Style", { "Titan", "Animals", "Distance" }, icon = "palette" },
             { "HUD Bars", icon = "bars" },       -- Health / Gas Bar and their gradients
         })
-        -- Gas Bar (a one-button section that continues its column) fills the gap under Grapple.
-        -- Moved before paginate, so the page lists are built from the final order.
-        moveAfter(GUI._charTab, "Gas Bar", "Grapple")
         paginate(GUI._charTab, {
-            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Bar" }, icon = "dash" },
+            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint" }, icon = "dash" },
             { "Weapons", icon = "swords" },      -- Firearm Auto, Thunderspears
         })
         paginate(GUI._setTab, {
