@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.61"
+GUI.Version = "v9.62"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -4710,10 +4710,7 @@ do
     -- them on a respawn), so live candidates = loaded, and a loaded bar is never re-scanned (a scan
     -- freezes Matcha ~10 s). Not loaded yet: CharReloadGas runs the full Load Values instead.
     GUI.GasBarClick = function()
-        if #ODM.cands > 0 then
-            uiNotify("Gas", "Gas bar is already loaded", 2)
-            return
-        end
+        if #ODM.cands > 0 then return end   -- loaded: do nothing, silently (user's choice, v9.62)
         if GUI.CharIsLoading and GUI.CharIsLoading() then return end   -- a scan is already running
         if GUI.CharReloadGas then GUI.CharReloadGas() end
     end
