@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.64"
+GUI.Version = "v9.65"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12367,8 +12367,15 @@ end)()
             -- (walkspeed "sprint" layer = clamp(mult, 0, 3.75), multiply). The game writes it only
             -- when the server's value changes (a Celerity point). Live 2026-11-18: 1.6. The window
             -- keeps out the name->hash cache's int16 hashes; the Sprint pin also writes only the
-            -- ONE slot that sits inside the stat table (see sprintSlot).
+            -- ONE slot that sits inside the stat table (see statSlot).
             BasePlayerRunMultiplier             = { lo = 1, hi = 4,      fb = 1.6 },
+            -- Gas Saver (v9.65): ClientGearHandler.useGas cuts every drain by (1 - Multiplier) while
+            -- gas < maxGas x Threshold. Plain getAttribute (no diminishing cap), read on EVERY gas
+            -- use. Always present: useGas multiplies by both with no fallback, so a missing one would
+            -- break all gas use. Live defaults not checked yet (probably 0). Written only at the ONE
+            -- slot inside the stat table (see statSlot).
+            LowGasDrainThreshold                = { lo = 0, hi = 1,      fb = 0 },
+            LowGasDrainMultiplier               = { lo = 0, hi = 1,      fb = 0 },
         }
         -- Cross-run cache: getgc addresses stay valid for as long as you STAY in one server (same
         -- game.JobId = same Lua VM), and _G survives a script re-run -- so the scan is stashed in _G
@@ -12888,69 +12895,74 @@ end)()
         secSprint:Label(function()
             return string.format("~%.1f studs/s sprinting  (16 x %.2f)", 16 * sprintVal, sprintVal)
         end)
-        -- The ONE run-multiplier slot inside the stat table: within 32 KB of the Velocity stat's slot
-        -- (same table, as the Firearm pin checks). No anchor, or not exactly one slot: refuse, so a
-        -- look-alike number elsewhere can never be written.
+        -- The ONE slot of a stat (Sprint, Gas Saver) inside the stat table: within 32 KB of the
+        -- Velocity stat's slot (same table, as the Firearm pin checks). No anchor, or not exactly one
+        -- slot: refuse, so a look-alike number elsewhere can never be written.
         -- `look` = entriesFor (a button click; sweeps if nothing is cached) or cachedFor (Auto-Apply,
         -- which can start from a saved config at load and so must NEVER sweep).
-        local function sprintSlot(look)
+        local function statSlot(key, look)
             look = look or entriesFor
             local anchor = look("GearMaxVelocityMultiplier")[1]
             local aa = anchor and gcAddr(anchor)
             if not aa then return nil end
             local hit, n = nil, 0
-            for _, e in ipairs(look(SPRINT)) do
+            for _, e in ipairs(look(key)) do
                 local a = gcAddr(e)
                 if a and math.abs(a - aa) <= 32768 then hit, n = e, n + 1 end
             end
             return n == 1 and hit or nil
         end
-        -- value nil = Restore. Your own value is re-read from the slot until the first write, and
-        -- again whenever the game changed it since (it no longer holds our last write).
-        local function sprintWrite(value, okMsg)
+        -- values nil = Restore. Your own value is re-read from each slot until our first write, and
+        -- again whenever the game changed it since (it no longer holds our last write). Every slot
+        -- is found and every target known BEFORE anything is written: a half-found set writes nothing.
+        local function statWrite(title, what, keys, values, okMsg)
             if not gateOK() then return end
             task.spawn(function()
-                local e = sprintSlot()
-                if not e then
-                    notif("Sprint", "Run speed not found - rejoin and Load Values again", 5)
-                    return
+                local slots, targets = {}, {}
+                for i, key in ipairs(keys) do
+                    slots[i] = statSlot(key)
+                    if not slots[i] then
+                        notif(title, what .. " not found - rejoin and Load Values again", 5)
+                        return
+                    end
                 end
-                local cur = nil
-                if type(memory_read) == "function" then
-                    local ok, v = pcall(memory_read, "double", gcAddr(e))
-                    cur = ok and gcNum(v) or nil
+                for i, key in ipairs(keys) do
+                    local cur = nil
+                    if type(memory_read) == "function" then
+                        local ok, v = pcall(memory_read, "double", gcAddr(slots[i]))
+                        cur = ok and gcNum(v) or nil
+                    end
+                    local last = velState.last[key]
+                    if cur and not (last and math.abs(cur - last) <= 0.001) then savedDefault[key] = cur end
+                    targets[i] = values and values[i] or savedDefault[key]
+                    if targets[i] == nil then
+                        notif(title, "Nothing to restore yet", 3)
+                        return
+                    end
                 end
-                local last = velState.last[SPRINT]
-                if cur and not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
-                if value == nil then value = savedDefault[SPRINT] end
-                if value == nil then
-                    notif("Sprint", "Nothing to restore yet", 3)
-                    return
+                local all = true
+                for i, key in ipairs(keys) do
+                    if landWrite(key, slots[i], targets[i]) then velState.last[key] = targets[i] else all = false end
                 end
-                if landWrite(SPRINT, e, value) then
-                    velState.last[SPRINT] = value
-                    saveState()
-                    notif("Sprint", okMsg, 4)
-                else
-                    notif("Sprint", "Failed - rejoin and Load Values again", 4)
-                end
+                saveState()
+                if all then notif(title, okMsg, 4) else notif(title, "Failed - rejoin and Load Values again", 4) end
             end)
         end
         secSprint:Button("Apply Sprint", function()
-            sprintWrite(sprintVal, "Applied - let go of sprint and press it again")
+            statWrite("Sprint", "Run speed", { SPRINT }, { sprintVal }, "Applied - let go of sprint and press it again")
         end)
         local uiSprintAuto
         secSprint:Button("Restore Default", function()
             -- Auto-Apply would put the boost straight back, so Restore switches it off first.
             if uiSprintAuto then pcall(function() uiSprintAuto:Set(false) end) end
-            sprintWrite(nil, "Restored your own run speed")
+            statWrite("Sprint", "Run speed", { SPRINT }, nil, "Restored your own run speed")
         end)
 
         -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. It checks the slot (a few instant
         -- memory reads, no freeze) every 10 s (v9.64: a buff rarely touches run speed, unlike
         -- Velocity), or within 0.5 s of a slider move, and writes only when the slot no longer holds
         -- your value: you moved the slider, or the game rewrote it (a Celerity point). That game value becomes
-        -- "your own" for Restore, the same rule as sprintWrite. CACHED slots only, never a sweep: a
+        -- "your own" for Restore, the same rule as statWrite. CACHED slots only, never a sweep: a
         -- saved "on" restores at load before anyone clicks, and a sweep there froze Matcha (v8.2).
         -- A plain overwrite, not Velocity's additive boost: the slider IS the speed (1.6 .. 3.5),
         -- and stacking it on a Celerity bonus would pass the range the user set.
@@ -12958,7 +12970,7 @@ end)()
         uiSprintAuto = secSprint:Toggle("Auto-Apply", false, function(v)
             sprintAutoGen = sprintAutoGen + 1                -- any flip ends the running loop
             if not v then return end
-            local e = gateOK() and type(memory_read) == "function" and sprintSlot(cachedFor) or nil
+            local e = gateOK() and type(memory_read) == "function" and statSlot(SPRINT, cachedFor) or nil
             if not e then
                 -- Not loaded yet (a config restore at load stays quiet), or the slot isn't cached.
                 if gateOK() then
@@ -13001,6 +13013,36 @@ end)()
                 end
             end)
         end):Tooltip("Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan")
+
+        -- ---------- Gas Saver (LowGasDrainThreshold / LowGasDrainMultiplier) — v9.65 ----------
+        -- ClientGearHandler.useGas: while gas < maxGas x Threshold, EVERY drain (grapple, boost,
+        -- dash, turbine) is multiplied by (1 - Multiplier). Read on every gas use, so Apply works at
+        -- once. Client-only: the server hears just your gas amount (Sync, 5 s after you stop using
+        -- gas). Multiplier capped at 0.7 (the user's limit): 1 would stop all drain (gas stuck near
+        -- full), and above 1 makes gas RISE while you fly, the most visible tell there is.
+        local GAS_T, GAS_M, GAS_M_MAX = "LowGasDrainThreshold", "LowGasDrainMultiplier", 0.7
+        local secGasSave = tab:Section("Gas Saver", "Left", "Less drain when your gas is low")
+        -- RowAlign would start it a new row below Sprint, leaving a gap under Dash; `stack` (uilib
+        -- patch #12) continues the left column instead. On the upstream fallback lib it sits lower.
+        pcall(function() secGasSave._section.stack = true end)
+        local gsT, gsM = CFG[GAS_T].fb, CFG[GAS_M].fb
+        secGasSave:Slider("Threshold", gsT, 0.05, 0, 1, "", function(v)
+            gsT = math.max(0, math.min(1, tonumber(v) or gsT))
+        end)
+        secGasSave:Slider("Multiplier", gsM, 0.05, 0, GAS_M_MAX, "", function(v)
+            gsM = math.max(0, math.min(GAS_M_MAX, tonumber(v) or gsM))
+        end)
+        secGasSave:Label(function()
+            if gsT <= 0 or gsM <= 0 then return "No saving at these values" end
+            return string.format("Below %d%% gas: %d%% less drain", math.floor(gsT * 100 + 0.5), math.floor(gsM * 100 + 0.5))
+        end)
+        secGasSave:Button("Apply Gas Saver", function()
+            statWrite("Gas Saver", "Gas saver values", { GAS_T, GAS_M }, { gsT, math.min(gsM, GAS_M_MAX) },
+                "Applied - works from your next gas use")
+        end)
+        secGasSave:Button("Restore Default", function()
+            statWrite("Gas Saver", "Gas saver values", { GAS_T, GAS_M }, nil, "Restored your own gas drain")
+        end)
 
         -- ---------- Firearms (EVERY gun): spread + recoil ----------
         -- v8.0: written through your two firearm STATS, not the gun configs (see the CFG note on
@@ -14185,7 +14227,7 @@ end)()
             { "HUD Bars", icon = "bars" },       -- Health / Gas Bar and their gradients
         })
         paginate(GUI._charTab, {
-            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint" }, icon = "dash" },
+            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Saver" }, icon = "dash" },
             { "Weapons", icon = "swords" },      -- Firearm Auto, Thunderspears
         })
         paginate(GUI._setTab, {
