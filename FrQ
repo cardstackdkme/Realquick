@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.65"
+GUI.Version = "v9.66"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -13018,9 +13018,9 @@ end)()
         -- ClientGearHandler.useGas: while gas < maxGas x Threshold, EVERY drain (grapple, boost,
         -- dash, turbine) is multiplied by (1 - Multiplier). Read on every gas use, so Apply works at
         -- once. Client-only: the server hears just your gas amount (Sync, 5 s after you stop using
-        -- gas). Multiplier capped at 0.7 (the user's limit): 1 would stop all drain (gas stuck near
+        -- gas). Multiplier capped at 0.8 (the user's limit, raised from 0.7 in v9.66): 1 would stop all drain (gas stuck near
         -- full), and above 1 makes gas RISE while you fly, the most visible tell there is.
-        local GAS_T, GAS_M, GAS_M_MAX = "LowGasDrainThreshold", "LowGasDrainMultiplier", 0.7
+        local GAS_T, GAS_M, GAS_M_MAX = "LowGasDrainThreshold", "LowGasDrainMultiplier", 0.8
         local secGasSave = tab:Section("Gas Saver", "Left", "Less drain when your gas is low")
         -- RowAlign would start it a new row below Sprint, leaving a gap under Dash; `stack` (uilib
         -- patch #12) continues the left column instead. On the upstream fallback lib it sits lower.
