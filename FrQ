@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.63"
+GUI.Version = "v9.64"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12946,9 +12946,10 @@ end)()
             sprintWrite(nil, "Restored your own run speed")
         end)
 
-        -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. Every 2 s it checks the slot (a
-        -- few instant memory reads, no freeze) and writes only when it no longer holds your value:
-        -- you moved the slider, or the game rewrote it (a Celerity point). That game value becomes
+        -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. It checks the slot (a few instant
+        -- memory reads, no freeze) every 10 s (v9.64: a buff rarely touches run speed, unlike
+        -- Velocity), or within 0.5 s of a slider move, and writes only when the slot no longer holds
+        -- your value: you moved the slider, or the game rewrote it (a Celerity point). That game value becomes
         -- "your own" for Restore, the same rule as sprintWrite. CACHED slots only, never a sweep: a
         -- saved "on" restores at load before anyone clicks, and a sweep there froze Matcha (v8.2).
         -- A plain overwrite, not Velocity's additive boost: the slider IS the speed (1.6 .. 3.5),
@@ -12971,27 +12972,32 @@ end)()
             local myGen, token = sprintAutoGen, {}
             _G.__RQ_SPRINTAUTO = token                       -- one loop, even across re-runs
             task.spawn(function()
+                local checkedVal, nextCheck = nil, 0   -- slider value at the last check / when the next one is due
                 while sprintAutoGen == myGen and GUI.Running and _G.__RQ_SPRINTAUTO == token do
-                    local cur = slotHolds(SPRINT, e, CFG[SPRINT])   -- nil = slot gone (rejoin, table rebuilt)
-                    local why
-                    if not cur then
-                        why = "run speed lost - Load Values again"
-                    elseif math.abs(cur - sprintVal) > 0.001 then
-                        local last = velState.last[SPRINT]
-                        if not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
-                        if landWrite(SPRINT, e, sprintVal) then
-                            velState.last[SPRINT] = sprintVal
-                            saveState()
-                        else
-                            why = "the write did not land - Load Values again"
+                    -- The 0.5 s ticks in between touch no memory: a slider comparison and the clock.
+                    if sprintVal ~= checkedVal or os.clock() >= nextCheck then
+                        checkedVal, nextCheck = sprintVal, os.clock() + 10
+                        local cur = slotHolds(SPRINT, e, CFG[SPRINT])   -- nil = slot gone (rejoin, table rebuilt)
+                        local why
+                        if not cur then
+                            why = "run speed lost - Load Values again"
+                        elseif math.abs(cur - sprintVal) > 0.001 then
+                            local last = velState.last[SPRINT]
+                            if not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
+                            if landWrite(SPRINT, e, sprintVal) then
+                                velState.last[SPRINT] = sprintVal
+                                saveState()
+                            else
+                                why = "the write did not land - Load Values again"
+                            end
+                        end
+                        if why then
+                            notif("Sprint", "Auto-Apply stopped: " .. why, 6)
+                            pcall(function() uiSprintAuto:Set(false) end)
+                            break
                         end
                     end
-                    if why then
-                        notif("Sprint", "Auto-Apply stopped: " .. why, 6)
-                        pcall(function() uiSprintAuto:Set(false) end)
-                        break
-                    end
-                    task.wait(2)
+                    task.wait(0.5)
                 end
             end)
         end):Tooltip("Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan")
