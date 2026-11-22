@@ -1736,9 +1736,11 @@ local function dh(di, i, dj, dk)
 		return h
 	end
 	-- RQ patch #15: the presets board (drawn by RQX.draw.presetboard, next to h9). The owner hands it
-	-- a model with :SetModel{cards={{name}}, sel=i, title, meta, hint, busy, rows={{id,title,value,on,badge,tip}}}
+	-- a model with :SetModel{cards={{name}}, sel=i, title, meta, hint, busy, rows={{id,title,value,on,auto,autoTip,tip}}}
 	-- (meta/hint/busy may be functions, read every frame) and gets onSelect(i, name), onDelete(i, name)
-	-- (the board asks twice first), onAdd(), onRow(i, id), onApply(), onUpdate().
+	-- (the board asks twice first), onAdd(), onRow(i, id), onAuto(i, id), onApply(), onUpdate().
+	-- A row's `auto` (true/false) draws an AUTO switch on its tile, always visible: grey = off, lit = on;
+	-- nil = no switch. (A plain `badge` string still draws a static badge.)
 	function dl:PresetBoard(opt)
 		opt = type(opt) == "table" and opt or {}
 		local cQ = {
@@ -1751,6 +1753,7 @@ local function dh(di, i, dj, dk)
 			onDelete = opt.onDelete,
 			onAdd = opt.onAdd,
 			onRow = opt.onRow,
+			onAuto = opt.onAuto,
 			onApply = opt.onApply,
 			onUpdate = opt.onUpdate,
 			addText = tostring(opt.addText or "New preset"),
@@ -4189,23 +4192,45 @@ do
 					bj(bx0 + 6, by1 + 10, bx0 + 10.5, by1 + 4.5, ak, 34, 1.6, on * ta)
 				end
 				local lx = bx0 + 26
-				local badge = r.badge and tostring(r.badge) or nil
+				-- AUTO: a switch of its own, always shown on a section that has one (grey = off)
+				local hasAuto = r.auto ~= nil
+				local badge = hasAuto and "AUTO" or (r.badge and tostring(r.badge) or nil)
 				local bw = badge and (bC(badge, 11, aq) + 14) or 0
 				local right = tx + tw0 - 12
 				bN(tostring(r.title or ""), lx, ty + 8, ak, 13, aq, 33, false, false, right - lx - (badge and (bw + 8) or 0), (0.45 + 0.4 * on + 0.1 * hv) * ta)
 				bN(tostring(r.value or ""), lx, ty + 26, ak, 12, ap, 33, false, false, right - lx, (0.3 + 0.32 * on + 0.08 * hv) * ta)
+				local onAuto = false
 				if badge then
 					local gx = right - bw
-					b6(gx, ty + 8, bw, 16, az._accentMid, 33, 4, 0.18 * on * ta)
-					bi(gx, ty + 8, bw, 16, az._accentMid, 34, 4, 0.7 * on * ta)
-					bV(badge, gx + bw / 2, ty + 16, az._accentMid, 11, aq, 35, 0.95 * on * ta)
+					if hasAuto then
+						onAuto = hov and cA(gx - 4, ty + 3, bw + 8, 26)   -- a little bigger than it looks
+						st.au = bX(st.au, r.auto and 1 or 0, 16)
+						st.ah = bX(st.ah, onAuto and 1 or 0, 18)
+						local au, ah = st.au or 0, st.ah or 0
+						local da = (0.6 + 0.4 * on) * ta   -- on a section left out it stays readable
+						local col = ca(ak, az._accentMid, au)
+						b6(gx, ty + 8, bw, 16, col, 33, 4, C(1, 0.05 + 0.13 * au + 0.06 * ah) * da)
+						bi(gx, ty + 8, bw, 16, col, 34, 4, C(1, 0.22 + 0.48 * au + 0.25 * ah) * da)
+						bV(badge, gx + bw / 2, ty + 16, col, 11, aq, 35, C(1, 0.42 + 0.53 * au + 0.2 * ah) * da)
+					else
+						b6(gx, ty + 8, bw, 16, az._accentMid, 33, 4, 0.18 * on * ta)
+						bi(gx, ty + 8, bw, 16, az._accentMid, 34, 4, 0.7 * on * ta)
+						bV(badge, gx + bw / 2, ty + 16, az._accentMid, 11, aq, 35, 0.95 * on * ta)
+					end
 				end
-				if hov and r.tip then
-					ha(tostring(r.tip), az.mouseX, az.mouseY)
+				if hov then
+					local tip = onAuto and r.autoTip or r.tip
+					if tip then
+						ha(tostring(tip), az.mouseX, az.mouseY)
+					end
 				end
 				if eM and hov and not _G.RQBlockInput then
 					eM = false
-					cN(cQ.onRow, i, r.id)
+					if onAuto then
+						cN(cQ.onAuto, i, r.id) -- never also toggles the tile
+					else
+						cN(cQ.onRow, i, r.id)
+					end
 				end
 			end
 		end

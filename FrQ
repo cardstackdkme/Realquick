@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.68"
+GUI.Version = "v9.69"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -13602,9 +13602,17 @@ end)()
                     if on then nOn = nOn + 1 end
                     local okf, val = pcall(PRE.fmt[id] or function() return "" end, vals)
                     local t = PRE.title[id]
+                    -- (v9.69) AUTO is always shown where a section has an Auto-Apply toggle (Velocity,
+                    -- Sprint): lit = applying the preset also turns that toggle on, so it keeps it applied;
+                    -- grey = applied once. nil = no switch on this tile.
+                    local av, atip = nil, nil
+                    if PRE.ui[id] then
+                        av = auto[id] == true
+                        atip = av and ("AUTO on: keeps " .. t .. " applied (its Auto-Apply) - click to apply it just once")
+                            or ("applies " .. t .. " once - click AUTO to keep it applied (Auto-Apply)")
+                    end
                     m.rows[#m.rows + 1] = {
-                        id = id, title = t, value = okf and val or "", on = on,
-                        badge = (on and auto[id]) and "AUTO" or nil,
+                        id = id, title = t, value = okf and val or "", on = on, auto = av, autoTip = atip,
                         tip = on and ("click to leave " .. t .. " out of this preset")
                             or ("click to add " .. t .. " to this preset, with the value shown"),
                     }
@@ -13699,6 +13707,27 @@ end)()
                     local list = {}
                     for _, x in ipairs(PRE.order) do if want[x] then list[#list + 1] = x end end
                     p.applied = list
+                    PRE.save()
+                    PRE.render()
+                end,
+                -- AUTO on a tile: lit keeps the section applied (its Auto-Apply), grey applies it once.
+                -- Lighting it on a section left out adds the section too (Auto-Apply needs it).
+                onAuto = function(_, id)
+                    local name = PRE.data.selected
+                    local p = name and PRE.data.presets[name]
+                    if type(p) ~= "table" or not PRE.ui[id] then return end
+                    local autoSet, want = PRE.toSet(p.auto), PRE.toSet(p.applied)
+                    if autoSet[id] then
+                        autoSet[id] = nil
+                    else
+                        autoSet[id], want[id] = true, true
+                    end
+                    local a, l = {}, {}
+                    for _, x in ipairs(PRE.order) do
+                        if autoSet[x] then a[#a + 1] = x end
+                        if want[x] then l[#l + 1] = x end
+                    end
+                    p.auto, p.applied = a, l
                     PRE.save()
                     PRE.render()
                 end,
