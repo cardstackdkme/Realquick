@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.67"
+GUI.Version = "v9.68"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12985,9 +12985,10 @@ end)()
             statWrite("Sprint", "Run speed", { SPRINT }, nil, "Restored your own run speed")
         end)
 
-        -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. It checks the slot (a few instant
-        -- memory reads, no freeze) every 10 s (v9.64: a buff rarely touches run speed, unlike
-        -- Velocity), or within 0.5 s of a slider move, and writes only when the slot no longer holds
+        -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. It checks 20 times a second (v9.68;
+        -- v9.64 had misread "like 10" as every 10 s, so a reset sat there for up to 10 s and it looked
+        -- broken). Each check is ONE memory read of the value; the slot itself (tag + key) is re-checked
+        -- once a second and before every write. It writes only when the slot no longer holds
         -- your value: you moved the slider, or the game rewrote it (a Celerity point). That game value becomes
         -- "your own" for Restore, the same rule as statWrite. CACHED slots only, never a sweep: a
         -- saved "on" restores at load before anyone clicks, and a sweep there froze Matcha (v8.2).
@@ -13012,11 +13013,13 @@ end)()
             local myGen, token = sprintAutoGen, {}
             _G.__RQ_SPRINTAUTO = token                       -- one loop, even across re-runs
             task.spawn(function()
-                local checkedVal, nextCheck = nil, 0   -- slider value at the last check / when the next one is due
+                local addr, nextFull = gcAddr(e), 0
                 while sprintAutoGen == myGen and GUI.Running and _G.__RQ_SPRINTAUTO == token do
-                    -- The 0.5 s ticks in between touch no memory: a slider comparison and the clock.
-                    if sprintVal ~= checkedVal or os.clock() >= nextCheck then
-                        checkedVal, nextCheck = sprintVal, os.clock() + 10
+                    local okr, raw = pcall(memory_read, "double", addr)
+                    local quick = okr and gcNum(raw) or nil
+                    -- the full check: once a second, and whenever the quick read says it needs a write
+                    if os.clock() >= nextFull or not quick or math.abs(quick - sprintVal) > 0.001 then
+                        nextFull = os.clock() + 1
                         local cur = slotHolds(SPRINT, e, CFG[SPRINT])   -- nil = slot gone (rejoin, table rebuilt)
                         local why
                         if not cur then
@@ -13037,7 +13040,7 @@ end)()
                             break
                         end
                     end
-                    task.wait(0.5)
+                    task.wait(0.05)
                 end
             end)
         end):Tooltip("Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan")
@@ -13503,6 +13506,8 @@ end)()
                 end
             end
             PRE.busy = false
+            PRE.last = { name = name, done = done, total = total, at = os.time() }
+            if PRE.render then PRE.render() end
             notif("Preset", string.format("'%s': %d/%d applied", name, done, total)
                 .. (#autoOn > 0 and ("  |  Auto-Apply on: " .. table.concat(autoOn, ", ")) or ""), #failed > 0 and 4 or 5)
             for i = 1, math.min(#failed, 3) do notif("Preset", failed[i], 6) end
@@ -13511,93 +13516,296 @@ end)()
             if PRE.data.afterLoad and PRE.data.selected then PRE.applyNow(PRE.data.selected) end
         end
 
-        local secPre = tab:Section("Presets", "Left", "Everything you saved, in one click")
-        PRE.dd = secPre:Dropdown("Preset", PRE.data.selected, PRE.names(), false, function(v)
-            local name = type(v) == "table" and v[1] or v
-            if type(name) == "string" and type(PRE.data.presets[name]) == "table" and name ~= PRE.data.selected then
-                PRE.data.selected = name
+        -- (v9.68) The whole Presets page is ONE board (uilib patch #15): a card per preset, the picked
+        -- preset's summary with Update / Apply, and a tile per section saying exactly what applying it
+        -- sets. Clicking a tile adds or drops that section. On the upstream fallback lib (no board) the
+        -- v9.67 plain controls below take over, in this same section.
+        local secPre = tab:Section("Presets", "Full", "Save what you applied, then apply it all in one click")
+        if secPre.PresetBoard then
+            PRE.DOT = "  \194\183  "
+            -- a saved value, else the slider's value now, else the stock default
+            function PRE.num(v, key, dflt)
+                local n = tonumber(v[key])
+                if n == nil and PRE.sl[key] then pcall(function() n = tonumber(PRE.sl[key]:Get()) end) end
+                return n or dflt
+            end
+            -- what each section will set, from a preset's saved slider values
+            PRE.fmt = {
+                Grapple = function(v)
+                    local r = math.floor(PRE.num(v, "grapple_range", 0))
+                    return string.format("Range +%d  (~%d studs)", r, r + 400)
+                end,
+                Velocity = function(v)
+                    return string.format("Max %.2fx", PRE.num(v, "velocity_max", 1.11)) .. PRE.DOT
+                        .. string.format("Rate %.2fx", PRE.num(v, "velocity_rate", 1.75))
+                end,
+                Dash = function() return "Speed 220" .. PRE.DOT .. "No gas" .. PRE.DOT .. "Force 350" end,
+                Spyglass = function() return "Zoom distance 200" end,
+                Parry = function(v) return string.format("Window %.1f s", PRE.num(v, "parry_window", 5)) end,
+                Sprint = function(v)
+                    local s = PRE.num(v, "sprint_speed", 1.6)
+                    return string.format("%.2fx", s) .. PRE.DOT .. string.format("~%.1f studs/s", 16 * s)
+                end,
+                GasSaver = function(v)
+                    local t, m = PRE.num(v, "gas_threshold", 0), PRE.num(v, "gas_multiplier", 0)
+                    if t <= 0 or m <= 0 then return "No saving at these values" end
+                    return string.format("Below %d%% gas: %d%% less drain", math.floor(t * 100 + 0.5), math.floor(m * 100 + 0.5))
+                end,
+                Firearms = function() return "No spread" .. PRE.DOT .. "No recoil" end,
+                SpearShake = function() return "No camera shake on throw" end,
+                Thunderspears = function(v)
+                    local i, d = PRE.num(v, "spear_inaccuracy", 15), PRE.num(v, "spear_distance", 100)
+                    return string.format("Spread %.1f", i) .. PRE.DOT .. string.format("Aim distance %d", d)
+                end,
+            }
+            function PRE.ago(t)
+                local s = os.time() - (tonumber(t) or os.time())
+                if s < 60 then return "just now" end
+                if s < 3600 then return math.floor(s / 60) .. " min ago" end
+                if s < 86400 then return math.floor(s / 3600) .. " h ago" end
+                return math.floor(s / 86400) .. " d ago"
+            end
+            -- what you have applied right now. Auto-Apply implies its section, so a preset never turns
+            -- on a keeper for a section it doesn't list.
+            function PRE.capture()
+                local applied, auto, values = {}, {}, {}
+                for _, id in ipairs({ "Velocity", "Sprint" }) do if PRE.auto[id] then auto[#auto + 1] = id end end
+                local autoSet = PRE.toSet(auto)
+                for _, id in ipairs(PRE.order) do
+                    if PRE.applied[id] or autoSet[id] then applied[#applied + 1] = id end
+                end
+                if #applied == 0 then return nil end
+                for k, h in pairs(PRE.sl) do
+                    local ok, v = pcall(function() return h:Get() end)
+                    if ok and tonumber(v) then values[k] = tonumber(v) end
+                end
+                return { applied = applied, auto = auto, values = values, savedAt = os.time() }
+            end
+            function PRE.model()
+                local m = { cards = {}, rows = {}, busy = function() return PRE.busy == true end }
+                local sel = PRE.data.selected
+                for i, n in ipairs(PRE.names()) do
+                    m.cards[i] = { name = n }
+                    if n == sel then m.sel = i end
+                end
+                local p = sel and PRE.data.presets[sel]
+                if type(p) ~= "table" then
+                    m.hint = next(PRE.data.presets) and "Pick a preset above to see what it applies."
+                        or "Apply what you want on Movement and Weapons, then press New preset: it keeps those sections, your slider values and Auto-Apply."
+                    return m
+                end
+                local want, auto = PRE.toSet(p.applied), PRE.toSet(p.auto)
+                local vals = type(p.values) == "table" and p.values or {}
+                local nOn = 0
+                for _, id in ipairs(PRE.order) do
+                    local on = want[id] == true
+                    if on then nOn = nOn + 1 end
+                    local okf, val = pcall(PRE.fmt[id] or function() return "" end, vals)
+                    local t = PRE.title[id]
+                    m.rows[#m.rows + 1] = {
+                        id = id, title = t, value = okf and val or "", on = on,
+                        badge = (on and auto[id]) and "AUTO" or nil,
+                        tip = on and ("click to leave " .. t .. " out of this preset")
+                            or ("click to add " .. t .. " to this preset, with the value shown"),
+                    }
+                end
+                m.title = sel
+                m.meta = function()
+                    local s = nOn .. " of " .. #PRE.order .. " sections" .. PRE.DOT .. "saved " .. PRE.ago(p.savedAt)
+                    local L = PRE.last
+                    if L and L.name == sel then
+                        s = s .. PRE.DOT .. "applied " .. L.done .. "/" .. L.total .. " " .. PRE.ago(L.at)
+                    end
+                    return s
+                end
+                return m
+            end
+            function PRE.render()
+                if PRE.board then pcall(function() PRE.board:SetModel(PRE.model()) end) end
+            end
+            PRE.board = secPre:PresetBoard({
+                addText = "New preset",
+                empty = "No presets yet",
+                addTip = "save what you have applied now as a new preset (named below, or Preset 1, 2...)",
+                updateTip = "replace this preset with what you have applied now: sections, sliders, Auto-Apply",
+                applyTip = "apply every ticked section now (Load Values first if needed)",
+                onSelect = function(_, name)
+                    if type(PRE.data.presets[name]) == "table" and name ~= PRE.data.selected then
+                        PRE.data.selected = name
+                        PRE.save()
+                        PRE.render()
+                    end
+                end,
+                onDelete = function(_, name)   -- the board already asked twice
+                    if type(PRE.data.presets[name]) ~= "table" then return end
+                    local idx = 1
+                    for i, n in ipairs(PRE.names()) do if n == name then idx = i end end
+                    PRE.data.presets[name] = nil
+                    if PRE.data.selected == name then
+                        local left = PRE.names()
+                        PRE.data.selected = left[math.min(idx, #left)]
+                    end
+                    PRE.save()
+                    PRE.render()
+                    notif("Presets", "Deleted '" .. name .. "'", 3)
+                end,
+                onAdd = function()
+                    local snap = PRE.capture()
+                    if not snap then
+                        notif("Presets", "Apply what you want first: a new preset saves what you applied", 4)
+                        return
+                    end
+                    local typed = ""
+                    pcall(function() typed = tostring(PRE.nameBox:Get() or "") end)
+                    local name = (typed:gsub("^%s+", ""):gsub("%s+$", "")):sub(1, 24)
+                    if name == "" then
+                        local n = 1
+                        repeat name = "Preset " .. n; n = n + 1 until type(PRE.data.presets[name]) ~= "table"
+                    end
+                    local existed = type(PRE.data.presets[name]) == "table"
+                    PRE.data.presets[name] = snap
+                    PRE.data.selected = name
+                    pcall(function() PRE.nameBox:Set("") end)
+                    PRE.save()
+                    PRE.render()
+                    notif("Presets", (existed and "Replaced '" or "Saved '") .. name .. "': " .. #snap.applied .. " section(s)", 4)
+                end,
+                onUpdate = function()
+                    local name = PRE.data.selected
+                    if not name then return end
+                    local snap = PRE.capture()
+                    if not snap then
+                        notif("Presets", "Nothing applied yet - apply what you want first, then Update", 4)
+                        return
+                    end
+                    PRE.data.presets[name] = snap
+                    PRE.save()
+                    PRE.render()
+                    notif("Presets", "Updated '" .. name .. "': " .. #snap.applied .. " section(s)", 4)
+                end,
+                onRow = function(_, id)
+                    local name = PRE.data.selected
+                    local p = name and PRE.data.presets[name]
+                    if type(p) ~= "table" or not PRE.run[id] then return end
+                    local want = PRE.toSet(p.applied)
+                    if want[id] then
+                        want[id] = nil
+                        local keep = {}   -- dropping a section drops its Auto-Apply too
+                        for _, x in ipairs(type(p.auto) == "table" and p.auto or {}) do if x ~= id then keep[#keep + 1] = x end end
+                        p.auto = keep
+                    else
+                        want[id] = true
+                    end
+                    local list = {}
+                    for _, x in ipairs(PRE.order) do if want[x] then list[#list + 1] = x end end
+                    p.applied = list
+                    PRE.save()
+                    PRE.render()
+                end,
+                onApply = function()
+                    local name = PRE.data.selected
+                    if not name or PRE.busy then return end
+                    task.spawn(function() PRE.applyNow(name) end)
+                end,
+            })
+            PRE.afterToggle = secPre:Toggle("Apply after Load Values", PRE.data.afterLoad, function(v)
+                if PRE.data.afterLoad ~= (v == true) then
+                    PRE.data.afterLoad = v == true
+                    PRE.save()
+                end
+            end):Tooltip("When Load Values finishes, the picked preset applies by itself: one click per server")
+            pcall(function() PRE.afterToggle.item.noSave = true end)
+            PRE.nameBox = secPre:Textbox("New preset name", "", function() end)
+            pcall(function() PRE.nameBox.item.noSave = true end)
+            PRE.render()
+        else
+            PRE.dd = secPre:Dropdown("Preset", PRE.data.selected, PRE.names(), false, function(v)
+                local name = type(v) == "table" and v[1] or v
+                if type(name) == "string" and type(PRE.data.presets[name]) == "table" and name ~= PRE.data.selected then
+                    PRE.data.selected = name
+                    PRE.save()
+                end
+            end)
+            -- RQPresets.json is the record; the lib's config must not restore a stale pick over it
+            pcall(function() PRE.dd.item.noSave = true end)
+            -- Puts the dropdown's choices back in step with the file, and picks `sel` (nil = nothing)
+            function PRE.refresh(sel)
+                local it = PRE.dd and PRE.dd.item
+                if type(it) == "table" and type(it.choices) == "table" then
+                    for i = #it.choices, 1, -1 do it.choices[i] = nil end
+                    for i, n in ipairs(PRE.names()) do it.choices[i] = n end
+                end
+                pcall(function() PRE.dd:Set(sel and { sel } or {}) end)
+            end
+            secPre:Label(function()
+                local p = PRE.data.selected and PRE.data.presets[PRE.data.selected]
+                if type(p) ~= "table" then
+                    return next(PRE.data.presets) and "Pick a preset" or "No presets yet - set things up, then Save"
+                end
+                return PRE.describe(PRE.toSet(p.applied), PRE.toSet(p.auto)) or "Slider values only"
+            end)
+            secPre:Button("Apply Preset", function()
+                if not PRE.data.selected then notif("Presets", "Pick a preset first", 3); return end
+                local name = PRE.data.selected
+                task.spawn(function() PRE.applyNow(name) end)
+            end):Tooltip("Loads values first if they aren't loaded yet (the usual ~15 s scan), then applies everything in the preset")
+            PRE.afterToggle = secPre:Toggle("Apply after Load Values", PRE.data.afterLoad, function(v)
+                if PRE.data.afterLoad ~= (v == true) then
+                    PRE.data.afterLoad = v == true
+                    PRE.save()
+                end
+            end):Tooltip("When Load Values finishes, the picked preset applies by itself: one click per server")
+            pcall(function() PRE.afterToggle.item.noSave = true end)
+            -- Delete asks twice (a second click within 3 s): a preset is a lot of clicks to set up again.
+            secPre:Button("Delete Preset", function()
+                local name = PRE.data.selected
+                if not name then notif("Presets", "Pick a preset first", 3); return end
+                if PRE.delArm ~= name or os.clock() - (PRE.delAt or 0) > 3 then
+                    PRE.delArm, PRE.delAt = name, os.clock()
+                    notif("Presets", "Click Delete again to delete '" .. name .. "'", 3)
+                    return
+                end
+                PRE.delArm = nil
+                PRE.data.presets[name] = nil
+                PRE.data.selected = nil
+                PRE.refresh(nil)
                 PRE.save()
-            end
-        end)
-        -- RQPresets.json is the record; the lib's config must not restore a stale pick over it
-        pcall(function() PRE.dd.item.noSave = true end)
-        -- Puts the dropdown's choices back in step with the file, and picks `sel` (nil = nothing)
-        function PRE.refresh(sel)
-            local it = PRE.dd and PRE.dd.item
-            if type(it) == "table" and type(it.choices) == "table" then
-                for i = #it.choices, 1, -1 do it.choices[i] = nil end
-                for i, n in ipairs(PRE.names()) do it.choices[i] = n end
-            end
-            pcall(function() PRE.dd:Set(sel and { sel } or {}) end)
-        end
-        secPre:Label(function()
-            local p = PRE.data.selected and PRE.data.presets[PRE.data.selected]
-            if type(p) ~= "table" then
-                return next(PRE.data.presets) and "Pick a preset" or "No presets yet - set things up, then Save"
-            end
-            return PRE.describe(PRE.toSet(p.applied), PRE.toSet(p.auto)) or "Slider values only"
-        end)
-        secPre:Button("Apply Preset", function()
-            if not PRE.data.selected then notif("Presets", "Pick a preset first", 3); return end
-            local name = PRE.data.selected
-            task.spawn(function() PRE.applyNow(name) end)
-        end):Tooltip("Loads values first if they aren't loaded yet (the usual ~15 s scan), then applies everything in the preset")
-        PRE.afterToggle = secPre:Toggle("Apply after Load Values", PRE.data.afterLoad, function(v)
-            if PRE.data.afterLoad ~= (v == true) then
-                PRE.data.afterLoad = v == true
-                PRE.save()
-            end
-        end):Tooltip("When Load Values finishes, the picked preset applies by itself: one click per server")
-        pcall(function() PRE.afterToggle.item.noSave = true end)
-        -- Delete asks twice (a second click within 3 s): a preset is a lot of clicks to set up again.
-        secPre:Button("Delete Preset", function()
-            local name = PRE.data.selected
-            if not name then notif("Presets", "Pick a preset first", 3); return end
-            if PRE.delArm ~= name or os.clock() - (PRE.delAt or 0) > 3 then
-                PRE.delArm, PRE.delAt = name, os.clock()
-                notif("Presets", "Click Delete again to delete '" .. name .. "'", 3)
-                return
-            end
-            PRE.delArm = nil
-            PRE.data.presets[name] = nil
-            PRE.data.selected = nil
-            PRE.refresh(nil)
-            PRE.save()
-            notif("Presets", "Deleted '" .. name .. "'", 3)
-        end)
+                notif("Presets", "Deleted '" .. name .. "'", 3)
+            end)
 
-        local secSave = tab:Section("Save Preset", "Right", "Records what you applied")
-        PRE.nameBox = secSave:Textbox("Name", "", function() end)
-        pcall(function() PRE.nameBox.item.noSave = true end)
-        secSave:Label(function()
-            return PRE.describe(PRE.applied, PRE.auto) or "Apply what you want first: a preset saves what you applied"
-        end)
-        secSave:Button("Save Preset", function()
-            local typed = ""
-            pcall(function() typed = tostring(PRE.nameBox:Get() or "") end)
-            local name = (typed:gsub("^%s+", ""):gsub("%s+$", ""))
-            if name == "" then name = PRE.data.selected or "" end     -- no name typed: update the picked one
-            if name == "" then notif("Presets", "Type a name first", 3); return end
-            name = name:sub(1, 24)
-            local applied, auto, values = {}, {}, {}
-            for _, id in ipairs(PRE.order) do if PRE.applied[id] then applied[#applied + 1] = id end end
-            for _, id in ipairs({ "Velocity", "Sprint" }) do if PRE.auto[id] then auto[#auto + 1] = id end end
-            if #applied == 0 and #auto == 0 then
-                notif("Presets", "Nothing applied yet - apply what you want first, then Save", 4)
-                return
-            end
-            for k, h in pairs(PRE.sl) do
-                local ok, v = pcall(function() return h:Get() end)
-                if ok and tonumber(v) then values[k] = tonumber(v) end
-            end
-            local existed = type(PRE.data.presets[name]) == "table"
-            PRE.data.presets[name] = { applied = applied, auto = auto, values = values, savedAt = os.time() }
-            PRE.data.selected = name
-            PRE.refresh(name)
-            PRE.save()
-            notif("Presets", (existed and "Updated '" or "Saved '") .. name .. "': " .. #applied .. " section(s)"
-                .. (#auto > 0 and " + Auto-Apply" or ""), 4)
-        end):Tooltip("Type a new name to add a preset; leave it empty to update the preset picked on the left")
+            local secSave = secPre
+            PRE.nameBox = secSave:Textbox("Name", "", function() end)
+            pcall(function() PRE.nameBox.item.noSave = true end)
+            secSave:Label(function()
+                return PRE.describe(PRE.applied, PRE.auto) or "Apply what you want first: a preset saves what you applied"
+            end)
+            secSave:Button("Save Preset", function()
+                local typed = ""
+                pcall(function() typed = tostring(PRE.nameBox:Get() or "") end)
+                local name = (typed:gsub("^%s+", ""):gsub("%s+$", ""))
+                if name == "" then name = PRE.data.selected or "" end     -- no name typed: update the picked one
+                if name == "" then notif("Presets", "Type a name first", 3); return end
+                name = name:sub(1, 24)
+                local applied, auto, values = {}, {}, {}
+                for _, id in ipairs(PRE.order) do if PRE.applied[id] then applied[#applied + 1] = id end end
+                for _, id in ipairs({ "Velocity", "Sprint" }) do if PRE.auto[id] then auto[#auto + 1] = id end end
+                if #applied == 0 and #auto == 0 then
+                    notif("Presets", "Nothing applied yet - apply what you want first, then Save", 4)
+                    return
+                end
+                for k, h in pairs(PRE.sl) do
+                    local ok, v = pcall(function() return h:Get() end)
+                    if ok and tonumber(v) then values[k] = tonumber(v) end
+                end
+                local existed = type(PRE.data.presets[name]) == "table"
+                PRE.data.presets[name] = { applied = applied, auto = auto, values = values, savedAt = os.time() }
+                PRE.data.selected = name
+                PRE.refresh(name)
+                PRE.save()
+                notif("Presets", (existed and "Updated '" or "Saved '") .. name .. "': " .. #applied .. " section(s)"
+                    .. (#auto > 0 and " + Auto-Apply" or ""), 4)
+            end):Tooltip("Type a new name to add a preset; leave it empty to update the preset picked on the left")
+        end
 
         -- (v9.61) No Reload Gas button here any more: click the gas bar on your HUD instead
         -- (GUI.GasBarClick). It re-finds the gear table only when the bar has nothing to show.

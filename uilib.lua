@@ -1,7 +1,8 @@
 -- INS-ui fork, Requiem's own copy (cardstackdkme/Realquick/uilib.lua). Formatted with stylua so it
 -- can be read and edited; Verfall keeps the minified copy in cardstackdkme/Vrrrrr.
 -- Patches: #1-#12 as the Vrrrrr fork, plus #13 (RQX: ColorList, Swatches, header Action icons)
--- and #14 (page tabs, by PowerDouble; built in here instead of patched into the text at load).
+-- and #14 (page tabs, by PowerDouble; built in here instead of patched into the text at load),
+-- and #15 (PresetBoard: Requiem's Character presets page).
 local a = "INSui"
 local b = nil
 pcall(function()
@@ -1734,6 +1735,38 @@ local function dh(di, i, dj, dk)
 		end
 		return h
 	end
+	-- RQ patch #15: the presets board (drawn by RQX.draw.presetboard, next to h9). The owner hands it
+	-- a model with :SetModel{cards={{name}}, sel=i, title, meta, hint, busy, rows={{id,title,value,on,badge,tip}}}
+	-- (meta/hint/busy may be functions, read every frame) and gets onSelect(i, name), onDelete(i, name)
+	-- (the board asks twice first), onAdd(), onRow(i, id), onApply(), onUpdate().
+	function dl:PresetBoard(opt)
+		opt = type(opt) == "table" and opt or {}
+		local cQ = {
+			type = "presetboard",
+			label = tostring(opt.label or "Presets"),
+			noSave = true,
+			_ver = 0,
+			model = { cards = {}, rows = {} },
+			onSelect = opt.onSelect,
+			onDelete = opt.onDelete,
+			onAdd = opt.onAdd,
+			onRow = opt.onRow,
+			onApply = opt.onApply,
+			onUpdate = opt.onUpdate,
+			addText = tostring(opt.addText or "New preset"),
+			addTip = opt.addTip and tostring(opt.addTip) or nil,
+			applyTip = opt.applyTip and tostring(opt.applyTip) or nil,
+			updateTip = opt.updateTip and tostring(opt.updateTip) or nil,
+			empty = tostring(opt.empty or "No presets yet"),
+		}
+		local h = d1(d2, cQ)
+		function h:SetModel(mdl)
+			cQ.model = type(mdl) == "table" and mdl or { cards = {}, rows = {} }
+			cQ._ver = cQ._ver + 1
+			return self
+		end
+		return h
+	end
 	function dl:Action(dN, db, dm)
 		d2.actions = d2.actions or {}
 		local act = { icon = tostring(dN or "plus"), callback = db, tooltip = dm and tostring(dm) or nil, enabled = true }
@@ -3399,6 +3432,7 @@ end
 --   sec:ColorList(label, {Color3,...}, cb(colors, why, index), opts)  sortable colour rows
 --   sec:Swatches(label, {{name, colors, removable},...}, opts)         preset chips
 --   sec:Action(icon, cb, tooltip)                                     icon in the section header
+--   sec:PresetBoard(opts)                                             the presets page (patch #15)
 -- hb() and h9() hand these item types to RQX.draw[type] / RQX.h[type]; i9() draws the header
 -- icons and publishes the scroll clip (az._rqCT/_rqCB) so sub-rows fade at the edges one by one.
 -- =====================================================================================
@@ -3906,6 +3940,272 @@ do
 						eM = false
 						cN(cQ.onAdd)
 					end
+				end
+			end
+		end
+		return eM, eN
+	end
+
+	-- ---------------------------------------------------------------- PresetBoard (RQ patch #15)
+	-- The Character presets page: a card per preset (+ a "new" card), then the picked preset with
+	-- its summary, Update / Apply on the right, and one tile per section saying exactly what
+	-- applying it will set. Clicking a tile adds or drops that section. All state lives on RQX.pb
+	-- and cQ: this block sits in the lib's main chunk, which is at 199/200 locals.
+	RQX.pb = { CH = 28, CG = 8, HD = 46, TH = 46, TG = 8, NOTE = 56 }
+	function RQX.pb.val(v) -- model fields may be live functions
+		if type(v) == "function" then
+			local ok, r = pcall(v)
+			return ok and r or nil
+		end
+		return v
+	end
+	function RQX.pb.cols(go)
+		return go >= 520 and 2 or 1
+	end
+	-- card boxes {x, y, w} for width go (the "new" card last), cached until the model or width changes
+	function RQX.pb.layout(cQ, go)
+		local P = RQX.pb
+		local L = cQ._lay
+		if L and L.go == go and L.v == cQ._ver then
+			return L.boxes, L.h
+		end
+		local cards = cQ.model.cards or {}
+		local boxes, cx0, cy0 = {}, 0, 0
+		for i = 1, #cards + 1 do
+			local w0
+			if i <= #cards then
+				w0 = D(84, bC(tostring(cards[i].name), 13, aq) + 46)
+			else
+				w0 = bC(cQ.addText, 13, ap) + 46
+			end
+			w0 = C(go, w0)
+			if cx0 > 0 and cx0 + w0 > go then
+				cx0, cy0 = 0, cy0 + P.CH + P.CG
+			end
+			boxes[i] = { cx0, cy0, w0 }
+			cx0 = cx0 + w0 + P.CG
+		end
+		cQ._lay = { go = go, v = cQ._ver, boxes = boxes, h = cy0 + P.CH }
+		return boxes, cy0 + P.CH
+	end
+	function RQX.pb.height(cQ, go)
+		local P = RQX.pb
+		local _, ch = P.layout(cQ, go)
+		local m = cQ.model
+		if not m.title then
+			return ch + 14 + P.NOTE
+		end
+		local lines = math.ceil(#(m.rows or {}) / P.cols(go))
+		return ch + 14 + P.HD + 14 + lines * P.TH + D(0, lines - 1) * P.TG
+	end
+	RQX.h.presetboard = function(cQ)
+		return cQ._hAnim or RQX.pb.height(cQ, cQ._go or 320)
+	end
+	RQX.draw.presetboard = function(cQ, hc, hd, go, he, eM, eN, hf)
+		local P = RQX.pb
+		cQ._go = go
+		local m = cQ.model
+		local H = P.height(cQ, go)
+		cQ._hAnim = bX(cQ._hAnim, H, 18)
+		if B(cQ._hAnim - H) < 0.5 then
+			cQ._hAnim = H
+		end
+		local base = baseAlpha(cQ)
+		local boxes, ch = P.layout(cQ, go)
+		local cards = m.cards or {}
+		local now = w() or 0
+		local arm = cQ._arm
+		if arm and now - arm.t > 3 then
+			cQ._arm, arm = nil, nil
+		end
+		cQ._ca = cQ._ca or {}
+		-- ---- preset cards
+		for i = 1, #cards + 1 do
+			local bx = boxes[i]
+			local cx0, cy0, cw = hc + bx[1], hd + bx[2], bx[3]
+			local a = base * fade(cy0, P.CH)
+			if a > 0.01 then
+				local hov = a > 0.5 and not hf and cA(cx0, cy0, cw, P.CH)
+				local midY = cy0 + P.CH / 2
+				if i <= #cards then
+					local nm = tostring(cards[i].name)
+					local st = cQ._ca[nm] or {}
+					cQ._ca[nm] = st
+					local sel = m.sel == i
+					local armed = arm ~= nil and arm.name == nm
+					local xX = cx0 + cw - 15
+					local onX = hov and cA(xX - 9, midY - 9, 18, 18)
+					st.h = bX(st.h, hov and 1 or 0, 16)
+					st.s = bX(st.s, sel and 1 or 0, 14)
+					st.x = bX(st.x, (onX or armed) and 1 or 0, 18)
+					local hv, sv, xh = st.h or 0, st.s or 0, st.x or 0
+					b6(cx0, cy0, cw, P.CH, ca(ak, az._accentMid, sv), 30, 6, (an.field + 0.11 * sv + 0.04 * hv) * a)
+					if armed then
+						b6(cx0, cy0, cw, P.CH, al.bad, 31, 6, 0.2 * a)
+					end
+					local edge = armed and al.bad or ca(ak, az._accentMid, sv)
+					bi(cx0, cy0, cw, P.CH, edge, 32, 6, (armed and 0.85 or (an.hairline + 0.2 * hv + 0.65 * sv)) * a)
+					local tcol = ca(ak, az._accentMid, sv)
+					bN(nm, cx0 + 12, bM(cy0, P.CH, 13), tcol, 13, aq, 33, false, false, cw - 40, (an.label + (an.hover - an.label) * D(hv, sv)) * a)
+					-- the x shows on hover (and stays on the picked card, faintly)
+					local xa = D(hv, sv * 0.4, xh)
+					if xa > 0.01 then
+						if xh > 0.01 then
+							b6(xX - 8, midY - 8, 16, 16, al.bad, 33, 4, 0.18 * xh * a)
+						end
+						RQX.icon("x", xX, midY, ca(ak, al.bad, xh), 34, (0.2 + 0.7 * xa) * a)
+					end
+					if hov then
+						if onX then
+							ha(armed and ("click again to delete " .. nm) or ("delete " .. nm), az.mouseX, az.mouseY)
+						elseif not sel then
+							ha("show " .. nm, az.mouseX, az.mouseY)
+						end
+					end
+					if eM and hov and not _G.RQBlockInput then
+						eM = false
+						if onX then
+							if armed then
+								cQ._arm = nil
+								cN(cQ.onDelete, i, nm)
+							else
+								cQ._arm = { name = nm, t = now }
+							end
+						else
+							cQ._arm = nil
+							cN(cQ.onSelect, i, nm)
+						end
+					end
+				else
+					-- the "new preset" card
+					cQ._addHv = bX(cQ._addHv, hov and 1 or 0, 16)
+					local t2 = cQ._addHv or 0
+					local tint = ca(ak, az._accentMid, t2)
+					b6(cx0, cy0, cw, P.CH, ak, 30, 6, (0.015 + 0.03 * t2) * a)
+					bi(cx0, cy0, cw, P.CH, tint, 32, 6, (0.12 + 0.4 * t2) * a)
+					RQX.icon("plus", cx0 + 16, midY, tint, 33, (0.45 + 0.5 * t2) * a)
+					bN(cQ.addText, cx0 + 30, bM(cy0, P.CH, 13), tint, 13, ap, 33, false, false, cw - 36, (an.dim + 0.45 * t2) * a)
+					if hov and cQ.addTip then
+						ha(cQ.addTip, az.mouseX, az.mouseY)
+					end
+					if eM and hov and not _G.RQBlockInput then
+						eM = false
+						cN(cQ.onAdd)
+					end
+				end
+			end
+		end
+		local y0 = hd + ch + 14
+		if not m.title then
+			-- nothing picked yet: one calm note instead of an empty board
+			local a = base * fade(y0, P.NOTE)
+			if a > 0.01 then
+				b6(hc, y0, go, P.NOTE, ak, 30, 8, 0.02 * a)
+				bi(hc, y0, go, P.NOTE, ak, 31, 8, an.hairline * a)
+				bN(cQ.empty, hc + 14, y0 + 11, ak, 13, aq, 32, false, false, go - 28, an.label * a)
+				local sub = P.val(m.hint)
+				if sub then
+					bN(tostring(sub), hc + 14, y0 + 31, ak, 12, ap, 32, false, false, go - 28, an.dim * a)
+				end
+			end
+			return eM, eN
+		end
+		-- ---- the picked preset: name + summary, Update / Apply on the right
+		local busy = P.val(m.busy) == true
+		local bh = 26
+		local aTxt = busy and "Applying..." or "Apply preset"
+		local aw = D(104, bC(aTxt, 13, aq) + 34)
+		local uw = bC("Update", 13, ap) + 30
+		local ax0 = hc + go - aw
+		local ux0 = ax0 - 8 - uw
+		local by0 = y0 + A((P.HD - bh) / 2) - 2
+		local a = base * fade(y0, P.HD)
+		if a > 0.01 then
+			local tw = ux0 - 14 - hc
+			bN(tostring(m.title), hc, y0 + 3, ak, 16, aq, 32, false, false, tw, an.text * a)
+			local meta = P.val(m.meta)
+			if meta then
+				bN(tostring(meta), hc, y0 + 25, ak, 12, ap, 32, false, false, tw, an.dim * a)
+			end
+			local live = a > 0.5 and not hf and not busy and not _G.RQBlockInput
+			-- Update: secondary, drawn like the lib's own buttons
+			local overU = live and cA(ux0, by0, uw, bh)
+			cQ._uh = bX(cQ._uh, overU and 1 or 0, 16)
+			local u2 = cQ._uh or 0
+			b6(ux0, by0, uw, bh, ak, 30, 6, (an.field + 0.06 * u2) * a)
+			bi(ux0, by0, uw, bh, ak, 31, 6, (an.hairline + 0.22 * u2) * a)
+			bV("Update", ux0 + uw / 2, by0 + bh / 2, ak, 13, ap, 32, (busy and 0.25 or (an.label + (an.hover - an.label) * u2)) * a)
+			if overU and cQ.updateTip then
+				ha(cQ.updateTip, az.mouseX, az.mouseY)
+			end
+			if eM and overU then
+				eM = false
+				cN(cQ.onUpdate)
+			end
+			-- Apply: the page's one primary action
+			local overA = live and cA(ax0, by0, aw, bh)
+			cQ._ah = bX(cQ._ah, overA and 1 or 0, 16)
+			local p2 = cQ._ah or 0
+			b6(ax0, by0, aw, bh, az._accentMid, 30, 6, (busy and 0.28 or (0.72 + 0.24 * p2)) * a)
+			bV(aTxt, ax0 + aw / 2, by0 + bh / 2, ak, 13, aq, 32, (busy and 0.6 or 0.96) * a)
+			if overA and cQ.applyTip then
+				ha(cQ.applyTip, az.mouseX, az.mouseY)
+			end
+			if eM and overA then
+				eM = false
+				cN(cQ.onApply)
+			end
+			bj(hc, y0 + P.HD + 6, hc + go, y0 + P.HD + 6, ak, 30, 1, an.hairline * a)
+		end
+		-- ---- one tile per section
+		local rows = m.rows or {}
+		local cols = P.cols(go)
+		local tw0 = (go - (cols - 1) * 10) / cols
+		local ty0 = y0 + P.HD + 14
+		cQ._ta = cQ._ta or {}
+		for i, r in ipairs(rows) do
+			local col, line = (i - 1) % cols, A((i - 1) / cols)
+			local tx, ty = hc + col * (tw0 + 10), ty0 + line * (P.TH + P.TG)
+			local ta = base * fade(ty, P.TH)
+			if ta > 0.01 then
+				local key = tostring(r.id or i)
+				local st = cQ._ta[key] or {}
+				cQ._ta[key] = st
+				local hov = ta > 0.5 and not hf and cA(tx, ty, tw0, P.TH)
+				st.h = bX(st.h, hov and 1 or 0, 16)
+				st.o = bX(st.o, r.on and 1 or 0, 14)
+				local hv, on = st.h or 0, st.o or 0
+				b6(tx, ty, tw0, P.TH, ca(ak, az._accentMid, on), 30, 7, (an.field * (0.6 + 0.4 * (1 - on)) + 0.05 * on + 0.03 * hv) * ta)
+				bi(tx, ty, tw0, P.TH, ca(ak, az._accentMid, on), 31, 7, (an.hairline + 0.14 * on + 0.15 * hv) * ta)
+				if on > 0.01 then
+					b6(tx, ty + 10, 3, P.TH - 20, az._accentMid, 32, 1, 0.9 * on * ta)
+				end
+				-- include mark: a box that fills in with a tick
+				local bx0, by1 = tx + 14, ty + A((P.TH - 14) / 2)
+				b6(bx0, by1, 14, 14, az._accentMid, 32, 4, 0.9 * on * ta)
+				bi(bx0, by1, 14, 14, on > 0.5 and az._accentMid or ak, 33, 4, ((1 - on) * (0.28 + 0.3 * hv) + on * 0.9) * ta)
+				if on > 0.05 then
+					bj(bx0 + 3.5, by1 + 7.5, bx0 + 6, by1 + 10, ak, 34, 1.6, on * ta)
+					bj(bx0 + 6, by1 + 10, bx0 + 10.5, by1 + 4.5, ak, 34, 1.6, on * ta)
+				end
+				local lx = bx0 + 26
+				local badge = r.badge and tostring(r.badge) or nil
+				local bw = badge and (bC(badge, 11, aq) + 14) or 0
+				local right = tx + tw0 - 12
+				bN(tostring(r.title or ""), lx, ty + 8, ak, 13, aq, 33, false, false, right - lx - (badge and (bw + 8) or 0), (0.45 + 0.4 * on + 0.1 * hv) * ta)
+				bN(tostring(r.value or ""), lx, ty + 26, ak, 12, ap, 33, false, false, right - lx, (0.3 + 0.32 * on + 0.08 * hv) * ta)
+				if badge then
+					local gx = right - bw
+					b6(gx, ty + 8, bw, 16, az._accentMid, 33, 4, 0.18 * on * ta)
+					bi(gx, ty + 8, bw, 16, az._accentMid, 34, 4, 0.7 * on * ta)
+					bV(badge, gx + bw / 2, ty + 16, az._accentMid, 11, aq, 35, 0.95 * on * ta)
+				end
+				if hov and r.tip then
+					ha(tostring(r.tip), az.mouseX, az.mouseY)
+				end
+				if eM and hov and not _G.RQBlockInput then
+					eM = false
+					cN(cQ.onRow, i, r.id)
 				end
 			end
 		end
