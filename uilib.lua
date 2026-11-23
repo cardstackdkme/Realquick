@@ -2,7 +2,8 @@
 -- can be read and edited; Verfall keeps the minified copy in cardstackdkme/Vrrrrr.
 -- Patches: #1-#12 as the Vrrrrr fork, plus #13 (RQX: ColorList, Swatches, header Action icons)
 -- and #14 (page tabs, by PowerDouble; built in here instead of patched into the text at load),
--- and #15 (PresetBoard: Requiem's Character presets page).
+-- and #15 (PresetBoard: Requiem's Character presets page),
+-- and #16 (ActionRow: Apply / Restore / Auto on one line, Character tab cards).
 local a = "INSui"
 local b = nil
 pcall(function()
@@ -1734,6 +1735,29 @@ local function dh(di, i, dj, dk)
 			return self
 		end
 		return h
+	end
+	-- RQ patch #16: one line of card actions (drawn by RQX.draw.actionrow). With `auto` the row IS that
+	-- toggle: its value, callback and saved-config key ("Tab.Section.Auto-Apply") work like a Toggle's,
+	-- so Set / Get and old configs keep working. `state()` returns the Apply text and whether it is lit.
+	function dl:ActionRow(opt)
+		opt = type(opt) == "table" and opt or {}
+		local hasAuto = type(opt.auto) == "function"
+		local cQ = {
+			type = "actionrow",
+			label = hasAuto and "Auto-Apply" or tostring(opt.applyName or "Apply"),
+			noSave = (not hasAuto) or nil,
+			callback = opt.auto,
+			onApply = opt.apply,
+			onRestore = opt.restore,
+			state = opt.state,
+			applyTip = opt.tip and tostring(opt.tip) or nil,
+			restoreTip = opt.restoreTip and tostring(opt.restoreTip) or nil,
+			autoTip = opt.autoTip and tostring(opt.autoTip) or nil,
+		}
+		if hasAuto then
+			cQ.value = false
+		end
+		return d1(d2, cQ)
 	end
 	-- RQ patch #15: the presets board (drawn by RQX.draw.presetboard, next to h9). The owner hands it
 	-- a model with :SetModel{cards={{name}}, sel=i, title, meta, hint, busy, rows={{id,title,value,on,auto,autoTip,tip}}}
@@ -4238,6 +4262,55 @@ do
 						cN(cQ.onRow, i, r.id)
 					end
 				end
+			end
+		end
+		return eM, eN
+	end
+
+	-- ---------------------------------------------------------------- ActionRow (RQ patch #16)
+	-- Same box, text and hover as the lib's own buttons; a lit one takes the accent.
+	RQX.h.actionrow = function()
+		return 26
+	end
+	function RQX.rowBtn(cQ, key, gx, gy, gw, text, lit, tip, he, live)
+		local over = live and cA(gx, gy, gw, 22)
+		cQ[key] = bX(cQ[key] or 0, over and 1 or 0, 16)
+		local t2 = cQ[key]
+		local tint = lit and az._accentMid or ak
+		b6(gx, gy, gw, 22, tint, 30, 5, ((lit and 0.15 or an.field) + 0.06 * t2) * he)
+		bi(gx, gy, gw, 22, tint, 31, 5, ((lit and 0.7 or an.hairline) + 0.22 * t2) * he)
+		bV(text, gx + gw / 2, gy + 11, tint, 13, lit and aq or ap, 32, (lit and 1 or (an.label + (an.hover - an.label) * t2)) * he)
+		if over and tip then
+			ha(tip, az.mouseX, az.mouseY)
+		end
+		return over
+	end
+	RQX.draw.actionrow = function(cQ, hc, hd, go, he, eM, eN, hf)
+		local live = he > 0.5 and not hf and not _G.RQBlockInput
+		local text, lit = "Apply", false
+		if cQ.state then
+			local ok, t, l = pcall(cQ.state)
+			if ok then
+				text, lit = t or text, l == true
+			end
+		end
+		local hasAuto = cQ.value ~= nil
+		local unit = (go - (hasAuto and 16 or 8)) / (hasAuto and 4.4 or 3.55)
+		local w1, w2 = unit * 2.3, unit * 1.25
+		local x2 = hc + w1 + 8
+		if RQX.rowBtn(cQ, "_h1", hc, hd, w1, text, lit, cQ.applyTip, he, live) and eM then
+			eM = false
+			cN(cQ.onApply)
+		end
+		if RQX.rowBtn(cQ, "_h2", x2, hd, w2, "Restore", false, cQ.restoreTip, he, live) and eM then
+			eM = false
+			cN(cQ.onRestore)
+		end
+		if hasAuto then
+			local x3 = x2 + w2 + 8
+			if RQX.rowBtn(cQ, "_h3", x3, hd, hc + go - x3, "Auto", cQ.value == true, cQ.autoTip, he, live) and eM then
+				eM = false
+				cX(cQ, not cQ.value, true)
 			end
 		end
 		return eM, eN

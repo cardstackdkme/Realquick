@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.72"
+GUI.Version = "v9.73"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12786,7 +12786,7 @@ end)()
         -- budget): run/title/order = every Apply button as a named action; applied/auto = what you
         -- applied and which Auto-Apply toggles are on (what Save Preset records); sl/ui = the slider
         -- and toggle handles a preset sets. The Presets section at the end of this tab fills in the rest.
-        local PRE = { run = {}, title = {}, order = {}, applied = {}, auto = {}, sl = {}, ui = {} }
+        local PRE = { run = {}, title = {}, order = {}, applied = {}, auto = {}, sl = {}, ui = {}, track = {}, sent = {} }
         GUI.CharLoad = function()
             if warmed or charLoading then return end
             charLoading = true
@@ -12824,15 +12824,70 @@ end)()
         -- The button runs it in a background task (so even the first sweep can't freeze the click) and
         -- shows the message; Apply Preset runs several in a row and reports once. A success marks the
         -- action applied, a Restore unmarks it: that is what Save Preset records.
+        -- What the card's Apply button says (v9.73). PRE.track[id] = the card's sliders as
+        -- { key, getter, stock }. Applied = what you set is in. Lit Apply = a slider differs from what
+        -- was applied, or from your own value if nothing was. `fn` may return a third value (noop): it
+        -- ran fine but wrote nothing, so the card must not claim "Applied".
+        function PRE.snap(id)
+            local tr = PRE.track[id]
+            if not tr then return end
+            local sent = {}
+            for _, t in ipairs(tr) do sent[t[1]] = t[2]() end
+            PRE.sent[id] = sent
+        end
+        function PRE.state(id)
+            local tr = PRE.track[id]
+            if PRE.auto[id] then return "Applied", false end       -- Auto-Apply keeps it in
+            if PRE.applied[id] then
+                local sent = PRE.sent[id]
+                if tr and sent then
+                    for _, t in ipairs(tr) do
+                        local was = sent[t[1]]
+                        if was and math.abs(t[2]() - was) > 0.001 then return "Apply", true end
+                    end
+                end
+                return "Applied", false
+            end
+            for _, t in ipairs(tr or {}) do
+                local own = savedDefault[t[1]] or t[3]
+                if own and math.abs(t[2]() - own) > 0.001 then return "Apply", true end
+            end
+            return "Apply", false
+        end
+        -- One line per card: Apply, Restore and (with o.auto) Auto. Returns the Auto handle, which works
+        -- like the old Toggle. The upstream fallback lib has no ActionRow, so it gets plain controls.
+        function PRE.row(sec, o)
+            local function restore()
+                PRE.sent[o.id] = nil
+                return o.restore()
+            end
+            if sec.ActionRow then
+                return sec:ActionRow({ applyName = o.applyName, restoreName = o.restoreName, apply = o.apply, restore = restore,
+                    auto = o.auto, tip = o.tip, autoTip = o.autoTip, state = function() return PRE.state(o.id) end })
+            end
+            local b = sec:Button(o.applyName, o.apply)
+            if o.tip then pcall(function() b:Tooltip(o.tip) end) end
+            sec:Button(o.restoreName or "Restore Default", restore)
+            if o.auto then
+                local h = sec:Toggle("Auto-Apply", false, o.auto)
+                if o.autoTip then pcall(function() h:Tooltip(o.autoTip) end) end
+                return h
+            end
+        end
         local function action(id, title, fn, name)
-            PRE.run[id], PRE.title[id] = fn, name or title
+            local function run()
+                local ok, msg, noop = fn()
+                if ok and not noop then PRE.snap(id) end
+                return ok, msg, noop
+            end
+            PRE.run[id], PRE.title[id] = run, name or title
             PRE.order[#PRE.order + 1] = id
             return function()
                 if not gateOK() then return end
                 task.spawn(function()
-                    local okc, ok, msg = pcall(fn)
+                    local okc, ok, msg, noop = pcall(run)
                     if not okc then ok, msg = false, "Failed - " .. tostring(ok) end
-                    if ok then PRE.applied[id] = true end
+                    if ok and not noop then PRE.applied[id] = true end
                     notif(title, msg or (ok and "Applied" or "Failed"), ok and 4 or 5)
                 end)
             end
@@ -12851,37 +12906,50 @@ end)()
             end)
         end
 
+        -- Movement's cards, in reading order (v9.73). Each row pairs two cards of the same shape, so
+        -- neither leaves a hole under it. RowAlign reads this order: Left starts a row, Right joins it.
+        PRE.mv = {}
+        for _, c in ipairs({
+            { "Grapple", "Left", "ODM hook range" },
+            { "Sprint", "Right", "Run speed, from the next sprint press" },
+            { "Velocity", "Left", "ODM speed build-up" },
+            { "Gas Saver", "Right", "Less drain when your gas is low" },
+            { "Parry", "Left", "Parry window (default 5s)" },
+            { "Aim Assist", "Right", "Grapple lock-on, from your next hook" },
+            { "Dash", "Left", "Canisters + Burst Dash" },
+        }) do PRE.mv[c[1]] = tab:Section(c[1], c[2], c[3]) end
+
         -- ---------- Grapple (ODM hook range) ----------
         -- Additional Range only. GearGrappleRangeMultiplier is no longer written at all (its slider
         -- was removed), so the projection is a plain 400 + additional.
-        local secGr = tab:Section("Grapple", "Left", "ODM hook range")
+        local secGr = PRE.mv.Grapple
         local grAdd = CFG.GearAdditionalGrappleRange.fb
         PRE.sl.grapple_range = secGr:Slider("Additional Range", grAdd, 50, 0, 5000, "", function(v) grAdd = math.floor(tonumber(v) or grAdd) end)
         secGr:Label(function()
             return string.format("Est. hook range  ~%d studs  (stock 400)", math.floor(grAdd + 400 + 0.5))
         end)
-        secGr:Button("Apply Grapple", action("Grapple", "Grapple", function()
-            return applyKeys({ "GearAdditionalGrappleRange" }, { grAdd })
-        end))
-        secGr:Button("Reset Default", function()
-            resetMany("Grapple", { "GearAdditionalGrappleRange" }, "Grapple")
-        end)
+        PRE.track.Grapple = { { "GearAdditionalGrappleRange", function() return grAdd end } }
+        PRE.row(secGr, { id = "Grapple", applyName = "Apply Grapple", restoreName = "Reset Default",
+            apply = action("Grapple", "Grapple", function()
+                return applyKeys({ "GearAdditionalGrappleRange" }, { grAdd })
+            end),
+            restore = function() resetMany("Grapple", { "GearAdditionalGrappleRange" }, "Grapple") end,
+        })
 
         -- ---------- Velocity (ODM speed build-up) ----------
-        -- Column layout is paired by row, and the ORDER OF THESE Section() CALLS is what sets it:
-        --   Grapple      | Velocity
-        --   Dash         | Parry
-        --   Firearm Auto | Thunderspears
-        -- Move a section by changing its "Left"/"Right" AND its position in this file.
-        local secVe = tab:Section("Velocity", "Right", "ODM speed build-up")
+        local secVe = PRE.mv.Velocity
         local veMax, veInc = CFG.GearMaxVelocityMultiplier.fb, CFG.GearVelocityIncreaseRate.fb
         PRE.sl.velocity_max = secVe:Slider("Max Velocity", veMax, 0.01, 0.5, 5, "x", function(v) veMax = tonumber(v) or veMax end)
         PRE.sl.velocity_rate = secVe:Slider("Increase Rate", veInc, 0.05, 0.5, 5, "x", function(v) veInc = tonumber(v) or veInc end)
-        secVe:Button("Apply Velocity", action("Velocity", "Velocity", function()
+        secVe:Label(function()
+            local m, r = savedDefault.GearMaxVelocityMultiplier, savedDefault.GearVelocityIncreaseRate
+            if m and r then return string.format("Your own: %.2fx max, %.2fx rate", m, r) end
+            return "Your own values show after Load Values"
+        end)
+        PRE.track.Velocity = { { "GearMaxVelocityMultiplier", function() return veMax end },
+            { "GearVelocityIncreaseRate", function() return veInc end } }
+        local veApply = action("Velocity", "Velocity", function()
             return applyKeys({ "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }, { veMax, veInc })
-        end))
-        secVe:Button("Reset Default", function()
-            resetMany("Velocity", { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }, "Velocity")
         end)
 
         -- SMART ADDITIVE auto-apply (no longer experimental, v9.63). The plain overwrite flattened server buffs;
@@ -12903,7 +12971,10 @@ end)()
         end
         -- Declared first so the callback can close over the handle and push the pill back.
         local uiVeAuto
-        uiVeAuto = secVe:Toggle("Auto-Apply", false, function(v)
+        uiVeAuto = PRE.row(secVe, { id = "Velocity", applyName = "Apply Velocity", restoreName = "Reset Default", apply = veApply,
+            restore = function() resetMany("Velocity", { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }, "Velocity") end,
+            autoTip = "Reads your LIVE velocity each cycle (instant memory read, no freeze) and STACKS your boost on top of server buffs; never lowers you",
+            auto = function(v)
             PRE.auto.Velocity = v == true or nil                    -- what Save Preset records
             if not v then veAutoGen = veAutoGen + 1; return end   -- off -> invalidate the running loop
             if not gateOK() then
@@ -12957,7 +13028,7 @@ end)()
                     task.wait(3)
                 end
             end)
-        end):Tooltip("Reads your LIVE velocity each cycle (instant memory read, no freeze) and STACKS your boost on top of server buffs; never lowers you")
+        end })
         PRE.ui.Velocity = uiVeAuto
 
         -- ---------- Dash (Canisters + Client Burst Dash) — ONE button sets all four ----------
@@ -12965,35 +13036,31 @@ end)()
         -- Burst Dash gas 100->0, Burst Force 280->350, Burst velocity gain 25->75.
         -- "Restore Default" puts your captured
         -- originals back. GAS_COST is the CLIENT Burst Dash only (its accept-range excludes 240).
-        local secDash = tab:Section("Dash", "Left", "Canisters + Burst Dash")
-        secDash:Label(function() return "Speed 220 | Gas 0/0 | Force 350" end)
-        secDash:Label(function() return "Burst velo gain 25 -> 75" end)
-        secDash:Button("Apply Dash", action("Dash", "Dash", function()
-            return applyKeys(
-                { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" },
-                { 220, 0, 0, 350, 75 })
-        end))
-        -- Spyglass: its OWN button, sitting here only for placement. Apply Dash and Restore Default
-        -- never touch it, so anyone who does not want it simply never presses it. Fixed values, no
-        -- slider, as asked: both zoomed-camera distances to 200. Takes effect the next time you
-        -- zoom in. Rejoining puts the game's own values back.
-        secDash:Button("Apply Spyglass", action("Spyglass", "Spyglass", function()
-            return applyKeys({ "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" }, { 200, 200 })
-        end))
-        secDash:Button("Restore Default", function()
-            resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" }, "Dash")
-        end)
+        local secDash = PRE.mv.Dash
+        secDash:Label(function() return "Speed 220 | Gas 0/0 | Force 350 | Burst +75" end)
+        PRE.row(secDash, { id = "Dash", applyName = "Apply Dash", restoreName = "Restore Default",
+            apply = action("Dash", "Dash", function()
+                return applyKeys(
+                    { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" },
+                    { 220, 0, 0, 350, 75 })
+            end),
+            restore = function()
+                resetMany("Dash", { "DASH_FALLBACK_MIN_SPEED", "DASH_BASE_GAS_COST", "GAS_COST", "BURST_FORCE", "VELOCITY_GAIN_ADDITION" }, "Dash")
+            end,
+        })
 
         -- ---------- Blades (non-successful parry window) — slider ----------
-        local secParry = tab:Section("Parry", "Right", "Parry window (default 5s)")
+        local secParry = PRE.mv.Parry
         local parryVal = CFG.NON_SUCCESSFUL_PARRY_WINDOW_SECONDS.fb
         PRE.sl.parry_window = secParry:Slider("Parry Window", parryVal, 0.1, 0, 5, "s", function(v) parryVal = tonumber(v) or parryVal end)
-        secParry:Button("Apply Parry", action("Parry", "Parry", function()
-            return applyKeys({ "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" }, { parryVal })
-        end))
-        secParry:Button("Restore Default", function()
-            resetMany("Parry", { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" }, "Parry")
-        end)
+        secParry:Label(function() return string.format("A missed parry locks you out for %.1f s", parryVal) end)
+        PRE.track.Parry = { { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS", function() return parryVal end } }
+        PRE.row(secParry, { id = "Parry", applyName = "Apply Parry", restoreName = "Restore Default",
+            apply = action("Parry", "Parry", function()
+                return applyKeys({ "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" }, { parryVal })
+            end),
+            restore = function() resetMany("Parry", { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" }, "Parry") end,
+        })
 
         -- ---------- Sprint (BasePlayerRunMultiplier) — slider, 1.6x to 3.5x only ----------
         -- Right column, under Parry. Sprint speed = walk speed (16) x this, from the NEXT sprint
@@ -13001,7 +13068,7 @@ end)()
         -- point changes the server's value, and the game then overwrites this one.
         local SPRINT = "BasePlayerRunMultiplier"
         local SPRINT_MIN, SPRINT_MAX = 1.6, 3.5   -- the game itself caps the multiplier at 3.75
-        local secSprint = tab:Section("Sprint", "Right", "Run speed, from the next sprint press")
+        local secSprint = PRE.mv.Sprint
         local sprintVal = SPRINT_MIN
         PRE.sl.sprint_speed = secSprint:Slider("Sprint Speed", sprintVal, 0.05, SPRINT_MIN, SPRINT_MAX, "x", function(v)
             sprintVal = math.max(SPRINT_MIN, math.min(SPRINT_MAX, tonumber(v) or sprintVal))
@@ -13061,16 +13128,17 @@ end)()
                 notif(title, msg, ok and 4 or (msg == "Nothing to restore yet" and 3 or 5))
             end)
         end
-        secSprint:Button("Apply Sprint", action("Sprint", "Sprint", function()
+        PRE.track.Sprint = { { SPRINT, function() return sprintVal end } }
+        local spApply = action("Sprint", "Sprint", function()
             return statWriteNow("Run speed", { SPRINT }, { sprintVal }, "Applied - let go of sprint and press it again")
-        end))
+        end)
         local uiSprintAuto
-        secSprint:Button("Restore Default", function()
+        local function spRestore()
             PRE.applied.Sprint = nil
             -- Auto-Apply would put the boost straight back, so Restore switches it off first.
             if uiSprintAuto then pcall(function() uiSprintAuto:Set(false) end) end
             statWrite("Sprint", "Run speed", { SPRINT }, nil, "Restored your own run speed")
-        end)
+        end
 
         -- Auto-Apply (v9.63) keeps your Sprint Speed in the slot. It checks 20 times a second (v9.68;
         -- v9.64 had misread "like 10" as every 10 s, so a reset sat there for up to 10 s and it looked
@@ -13082,7 +13150,10 @@ end)()
         -- A plain overwrite, not Velocity's additive boost: the slider IS the speed (1.6 .. 3.5),
         -- and stacking it on a Celerity bonus would pass the range the user set.
         local sprintAutoGen = 0
-        uiSprintAuto = secSprint:Toggle("Auto-Apply", false, function(v)
+        uiSprintAuto = PRE.row(secSprint, { id = "Sprint", applyName = "Apply Sprint", restoreName = "Restore Default",
+            apply = spApply, restore = spRestore,
+            autoTip = "Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan",
+            auto = function(v)
             PRE.auto.Sprint = v == true or nil                -- what Save Preset records
             sprintAutoGen = sprintAutoGen + 1                -- any flip ends the running loop
             if not v then return end
@@ -13137,7 +13208,7 @@ end)()
                     task.wait(0.05)
                 end
             end)
-        end):Tooltip("Keeps your Sprint Speed applied: follows the slider and re-writes it whenever the game changes it. Instant memory reads, never a scan")
+        end })
         PRE.ui.Sprint = uiSprintAuto
 
         -- ---------- Gas Saver (LowGasDrainThreshold / LowGasDrainMultiplier) — v9.65 ----------
@@ -13147,10 +13218,7 @@ end)()
         -- gas). Multiplier capped at 0.8 (the user's limit, raised from 0.7 in v9.66): 1 would stop all drain (gas stuck near
         -- full), and above 1 makes gas RISE while you fly, the most visible tell there is.
         local GAS_T, GAS_M, GAS_M_MAX = "LowGasDrainThreshold", "LowGasDrainMultiplier", 0.8
-        local secGasSave = tab:Section("Gas Saver", "Left", "Less drain when your gas is low")
-        -- RowAlign would start it a new row below Sprint, leaving a gap under Dash; `stack` (uilib
-        -- patch #12) continues the left column instead. On the upstream fallback lib it sits lower.
-        pcall(function() secGasSave._section.stack = true end)
+        local secGasSave = PRE.mv["Gas Saver"]
         local gsT, gsM = CFG[GAS_T].fb, CFG[GAS_M].fb
         PRE.sl.gas_threshold = secGasSave:Slider("Threshold", gsT, 0.05, 0, 1, "", function(v)
             gsT = math.max(0, math.min(1, tonumber(v) or gsT))
@@ -13162,14 +13230,17 @@ end)()
             if gsT <= 0 or gsM <= 0 then return "No saving at these values" end
             return string.format("Below %d%% gas: %d%% less drain", math.floor(gsT * 100 + 0.5), math.floor(gsM * 100 + 0.5))
         end)
-        secGasSave:Button("Apply Gas Saver", action("GasSaver", "Gas Saver", function()
-            return statWriteNow("Gas saver values", { GAS_T, GAS_M }, { gsT, math.min(gsM, GAS_M_MAX) },
-                "Applied - works from your next gas use")
-        end))
-        secGasSave:Button("Restore Default", function()
-            PRE.applied.GasSaver = nil
-            statWrite("Gas Saver", "Gas saver values", { GAS_T, GAS_M }, nil, "Restored your own gas drain")
-        end)
+        PRE.track.GasSaver = { { GAS_T, function() return gsT end }, { GAS_M, function() return gsM end } }
+        PRE.row(secGasSave, { id = "GasSaver", applyName = "Apply Gas Saver", restoreName = "Restore Default",
+            apply = action("GasSaver", "Gas Saver", function()
+                return statWriteNow("Gas saver values", { GAS_T, GAS_M }, { gsT, math.min(gsM, GAS_M_MAX) },
+                    "Applied - works from your next gas use")
+            end),
+            restore = function()
+                PRE.applied.GasSaver = nil
+                statWrite("Gas Saver", "Gas saver values", { GAS_T, GAS_M }, nil, "Restored your own gas drain")
+            end,
+        })
 
         -- A slider bound to ONE stat (v9.71: Aim Assist and the Misc page). It shows YOUR value once
         -- that is known, and Apply writes only sliders you moved, so a stray click can't change a stat
@@ -13213,7 +13284,7 @@ end)()
             for _, s in ipairs(list) do
                 if s.moved then keys[#keys + 1], vals[#vals + 1] = s.key, s.val end
             end
-            if #keys == 0 then return true, "No change - move the slider first" end
+            if #keys == 0 then return true, "No change - move the slider first", true end
             return statWriteNow(what, keys, vals, okMsg)
         end
 
@@ -13225,8 +13296,7 @@ end)()
         -- further through walls and leave a wider close-range dead zone (a ray that starts inside a
         -- ball misses it). No Auto-Apply on purpose.
         do
-            local secAim = tab:Section("Aim Assist", "Right", "Grapple lock-on, from your next hook")
-            pcall(function() secAim._section.stack = true end)
+            local secAim = PRE.mv["Aim Assist"]
             local size = PRE.statSlider(secAim, { key = "GearGrappleAimAssistMultiplier", label = "Assist Size",
                 def = 2, step = 0.05, min = 1, max = 3, suffix = "x", sl = "aim_assist" })
             secAim:Label(function()
@@ -13235,13 +13305,16 @@ end)()
                 if own then return string.format("Yours x%.2f  |  ~%.1f deg at 300 studs", own, deg) end
                 return string.format("~%.1f deg at 300 studs", deg)
             end)
-            secAim:Button("Apply Aim Assist", action("AimAssist", "Aim Assist", function()
-                return PRE.writeMoved("Aim assist", { size }, "Applied - works from your next hook")
-            end))
-            secAim:Button("Restore Default", function()
-                PRE.applied.AimAssist = nil
-                statWrite("Aim Assist", "Aim assist", { size.key }, nil, "Restored your own aim assist")
-            end)
+            PRE.track.AimAssist = { { size.key, function() return size.val end } }
+            PRE.row(secAim, { id = "AimAssist", applyName = "Apply Aim Assist", restoreName = "Restore Default",
+                apply = action("AimAssist", "Aim Assist", function()
+                    return PRE.writeMoved("Aim assist", { size }, "Applied - works from your next hook")
+                end),
+                restore = function()
+                    PRE.applied.AimAssist = nil
+                    statWrite("Aim Assist", "Aim assist", { size.key }, nil, "Restored your own aim assist")
+                end,
+            })
         end
 
         -- ---------- Firearms (EVERY gun): spread + recoil ----------
@@ -13461,18 +13534,20 @@ end)()
         -- loaded: otherwise its first lookup would start the big scan without being asked.
         if fa.pct and warmed then faKeep() end
 
-        secFire:Button("Apply Firearms", action("Firearms", "Firearms", function()
+        PRE.row(secFire, { id = "Firearms", applyName = "Apply Firearms", restoreName = "Restore Default",
+            apply = action("Firearms", "Firearms", function()
             local ok, why = faApply(0, 0)
             return ok, ok and "Every gun: no spread, no recoil (from your next shot)" or ("Failed - " .. tostring(why))
-        end)):Tooltip("Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half). Restore Default puts your own values back.")
-        secFire:Button("Restore Default", function()
+        end),
+            tip = "Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half). Restore Default puts your own values back.",
+            restore = function()
             if not gateOK() then return end
             PRE.applied.Firearms = nil
             task.spawn(function()
                 local n = faRestore() + fireRestore()
                 notif("Firearms", n > 0 and ("Restored " .. n .. " value(s)") or "Nothing to restore - no writes recorded", 3)
             end)
-        end)
+        end })
 
         -- ---------- Thunderspears ----------
         -- The spear's whole accuracy model is two numbers. It picks an aim point
@@ -13531,7 +13606,9 @@ end)()
                             or "Shake partly failed - throw a spear once, then retry")
                     .. (fixed > 0 and ("  |  repaired Frequency x" .. fixed) or "")
         end, "Spear shake")):Tooltip("Removes the camera kick when you throw. It is purely visual - the spear's direction comes from your body, so the shake never affected where it goes.")
-        secTS:Button("Apply Thunderspears", action("Thunderspears", "Thunderspears", function()
+        PRE.track.Thunderspears = { { "ts_inaccuracy", function() return tsInacc end, 15 }, { "ts_distance", function() return tsDist end, 100 } }
+        PRE.row(secTS, { id = "Thunderspears", applyName = "Apply Thunderspears", restoreName = "Restore Default",
+            apply = action("Thunderspears", "Thunderspears", function()
                 local ts, why = tsResolve()
                 if not ts then return false, "Failed - " .. tostring(why) end
                 -- spear-only subset of the shared inaccuracy key
@@ -13557,8 +13634,8 @@ end)()
                         tsInacc, tsDist, math.deg(math.atan(tsInacc / tsDist)))
                 end
                 return false, string.format("Partial - spread %d/%d, distance %d/%d", doneI, #list, doneD, #dist)
-        end))
-        secTS:Button("Restore Default", function()
+        end),
+            restore = function()
             if not gateOK() then return end
             PRE.applied.Thunderspears, PRE.applied.SpearShake = nil, nil   -- Restore undoes the shake too
             tsInacc, tsDist = 15, 100
@@ -13585,7 +13662,7 @@ end)()
                 notif("Thunderspears", n > 0 and ("Restored " .. n .. " spear values (incl. camera shake)")
                     or "Nothing to restore - no writes recorded", 3)
             end)
-        end)
+        end })
 
         -- ---------- Misc page (v9.71): swimming, breath, fog, anxiety ----------
         -- All four are plain stats, read when they are used. Fog is the exception on timing: the game
@@ -13596,11 +13673,14 @@ end)()
                 local sec = tab:Section(name, side, sub)
                 local st = PRE.statSlider(sec, o)
                 sec:Label(function() st.own(); return text(st.val) end)
-                sec:Button(applyText, action(id, name, function() return PRE.writeMoved(name, { st }, okMsg) end))
-                sec:Button("Restore Default", function()
-                    PRE.applied[id] = nil
-                    statWrite(name, name, { o.key }, nil, "Restored your own value")
-                end)
+                PRE.track[id] = { { o.key, function() return st.val end } }
+                PRE.row(sec, { id = id, applyName = applyText, restoreName = "Restore Default",
+                    apply = action(id, name, function() return PRE.writeMoved(name, { st }, okMsg) end),
+                    restore = function()
+                        PRE.applied[id] = nil
+                        statWrite(name, name, { o.key }, nil, "Restored your own value")
+                    end,
+                })
             end
             pin("Swimming", "Left", "Swim speed, read while you swim", "Swim",
                 { key = "SwimSpeedMultiplier", label = "Swim Speed", def = 1, step = 0.05, min = 1, max = 2.5, suffix = "x", sl = "swim_speed" },
@@ -13621,6 +13701,22 @@ end)()
                 { key = "AnxietyResistanceMultiplier", label = "Anxiety Gain", def = 1, step = 0.05, min = 0, max = 1, sl = "anxiety_gain" },
                 function(v) return v <= 0 and "No anxiety gain" or string.format("%d%% of normal anxiety", math.floor(v * 100 + 0.5)) end,
                 "Apply Anxiety", "Applied - works from the next change")
+            -- Spyglass: fixed values, no slider, as asked: both zoomed-camera distances to 200. Takes
+            -- effect the next time you zoom in. Rejoining also puts the game's own values back.
+            local SPY = { "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" }
+            local secSpy = tab:Section("Spyglass", "Left", "Zoomed camera distance")
+            secSpy:Label(function() return "Zoom distance 200" end)
+            PRE.row(secSpy, { id = "Spyglass", applyName = "Apply Spyglass", restoreName = "Restore Default",
+                apply = action("Spyglass", "Spyglass", function() return applyKeys(SPY, { 200, 200 }) end),
+                restore = function() resetMany("Spyglass", SPY, "Spyglass") end,
+            })
+        end
+        -- Presets list the sections in the order the pages show them.
+        do
+            local rank = {}
+            for i, id in ipairs({ "Grapple", "Sprint", "Velocity", "GasSaver", "Parry", "AimAssist", "Dash", "Firearms",
+                "SpearShake", "Thunderspears", "Swim", "Breath", "Fog", "Anxiety", "Spyglass" }) do rank[id] = i end
+            table.sort(PRE.order, function(x, y) return (rank[x] or 99) < (rank[y] or 99) end)
         end
 
         -- ---------- Presets (v9.67) ----------
@@ -13709,10 +13805,10 @@ end)()
             for _, id in ipairs(PRE.order) do
                 if want[id] then
                     total = total + 1
-                    local okc, ok, msg = pcall(PRE.run[id])
+                    local okc, ok, msg, noop = pcall(PRE.run[id])
                     if okc and ok then
                         done = done + 1
-                        PRE.applied[id] = true
+                        if not noop then PRE.applied[id] = true end
                     else
                         failed[#failed + 1] = PRE.title[id] .. ": " .. tostring(okc and msg or ok)
                     end
@@ -14903,9 +14999,9 @@ end)()
             { "HUD Bars", icon = "bars" },       -- Health / Gas Bar and their gradients
         })
         paginate(GUI._charTab, {
-            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Saver", "Aim Assist" }, icon = "dash" },
+            { "Movement", { "Grapple", "Sprint", "Velocity", "Gas Saver", "Parry", "Aim Assist", "Dash" }, icon = "dash" },
             { "Weapons", { "Firearm Auto", "Thunderspears" }, icon = "swords" },
-            { "Misc", { "Swimming", "Breath", "Fog", "Anxiety" }, icon = "grid" },
+            { "Misc", { "Swimming", "Breath", "Fog", "Anxiety", "Spyglass" }, icon = "grid" },
             { "Presets", icon = "sliders" },     -- Presets, Save Preset (the last page takes the rest)
         })
         paginate(GUI._setTab, {
