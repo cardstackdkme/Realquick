@@ -3962,6 +3962,12 @@ do
 		end
 		return v
 	end
+	-- like fade(), but a row is gone BEFORE it reaches the clip edge: the board is tall enough to
+	-- scroll, and a 46 px tile fading across the edge was drawn past the bottom of the window
+	function RQX.pb.fit(rt, rh)
+		local ct, cbt = az._rqCT or -999999999, az._rqCB or 999999999
+		return Z((rt - ct) / (rh * 0.4), 0, 1) * Z((cbt - rt - rh) / (rh * 0.4), 0, 1)
+	end
 	function RQX.pb.cols(go)
 		return go >= 520 and 2 or 1
 	end
@@ -4026,7 +4032,7 @@ do
 		for i = 1, #cards + 1 do
 			local bx = boxes[i]
 			local cx0, cy0, cw = hc + bx[1], hd + bx[2], bx[3]
-			local a = base * fade(cy0, P.CH)
+			local a = base * P.fit(cy0, P.CH)
 			if a > 0.01 then
 				local hov = a > 0.5 and not hf and cA(cx0, cy0, cw, P.CH)
 				local midY = cy0 + P.CH / 2
@@ -4101,7 +4107,7 @@ do
 		local y0 = hd + ch + 14
 		if not m.title then
 			-- nothing picked yet: one calm note instead of an empty board
-			local a = base * fade(y0, P.NOTE)
+			local a = base * P.fit(y0, P.NOTE)
 			if a > 0.01 then
 				b6(hc, y0, go, P.NOTE, ak, 30, 8, 0.02 * a)
 				bi(hc, y0, go, P.NOTE, ak, 31, 8, an.hairline * a)
@@ -4122,7 +4128,7 @@ do
 		local ax0 = hc + go - aw
 		local ux0 = ax0 - 8 - uw
 		local by0 = y0 + A((P.HD - bh) / 2) - 2
-		local a = base * fade(y0, P.HD)
+		local a = base * P.fit(y0, P.HD)
 		if a > 0.01 then
 			local tw = ux0 - 14 - hc
 			bN(tostring(m.title), hc, y0 + 3, ak, 16, aq, 32, false, false, tw, an.text * a)
@@ -4169,7 +4175,7 @@ do
 		for i, r in ipairs(rows) do
 			local col, line = (i - 1) % cols, A((i - 1) / cols)
 			local tx, ty = hc + col * (tw0 + 10), ty0 + line * (P.TH + P.TG)
-			local ta = base * fade(ty, P.TH)
+			local ta = base * P.fit(ty, P.TH)
 			if ta > 0.01 then
 				local key = tostring(r.id or i)
 				local st = cQ._ta[key] or {}
@@ -4916,6 +4922,9 @@ az.rqPage.icons = {
 			{ 0.42, 0.72, 0.26, 0.56 },
 			{ 0.34, 0.64, 0.12, 0.86 },
 		},
+	},
+	grid = { -- four small tiles
+		r = { { 0.10, 0.10, 0.34, 0.34 }, { 0.56, 0.10, 0.34, 0.34 }, { 0.10, 0.56, 0.34, 0.34 }, { 0.56, 0.56, 0.34, 0.34 } },
 	},
 	layout = { -- a window split into panels
 		r = { { 0.08, 0.12, 0.84, 0.76 } },

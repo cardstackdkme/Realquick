@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.70"
+GUI.Version = "v9.71"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12380,6 +12380,16 @@ end)()
             -- Game base 1, live 2026-11-23: 2 (Enraged also touches it). The window keeps out the
             -- name->hash cache (46512); written only at the ONE slot inside the stat table (statSlot).
             GearGrappleAimAssistMultiplier      = { lo = 0, hi = 10,     fb = 1 },
+            -- v9.71. Accuracy: hook scatter x (1 - this), so 1 = no random scatter; it does not touch
+            -- the assist balls. Swim: speed = 18 x this. Breath: drain per second (x2 with gear on).
+            -- Fog: atmosphere density x this, the client clamps it to 0..1. Anxiety: every gain x this
+            -- (lower = less, despite "Resistance"). Live 2026-11-23: 0, 1, 5, 1, 1. These windows keep
+            -- out the name->hash cache (3912 .. 46161) and SwimSpeedMultiplier's look-alike (18).
+            GearGrappleAccuracyMultiplier       = { lo = -1, hi = 2,     fb = 0 },
+            SwimSpeedMultiplier                 = { lo = 0, hi = 10,     fb = 1 },
+            BreathDepletionRate                 = { lo = 0, hi = 100,    fb = 5 },
+            FogVisibilityMultiplier             = { lo = 0, hi = 2,      fb = 1 },
+            AnxietyResistanceMultiplier         = { lo = 0, hi = 10,     fb = 1 },
         }
         -- Cross-run cache: getgc addresses stay valid for as long as you STAY in one server (same
         -- game.JobId = same Lua VM), and _G survives a script re-run -- so the scan is stashed in _G
@@ -12697,6 +12707,10 @@ end)()
             notif("Values", "Scanning memory... (~15s freeze)", 2)
             pcall(warm)
             charLoading = false
+            -- The lock overlay only clears this on its next frame, and every control callback is
+            -- dropped while it is set. "Apply after Load Values" runs right here, before that frame,
+            -- so its sliders and Auto-Apply toggles changed on screen and never reached the code.
+            if warmed then _G.RQBlockInput = nil end
             notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
         end
         -- Presets (v9.67). One table, not a dozen locals (this function is a long way into its local
@@ -13017,18 +13031,20 @@ end)()
             local myGen, token = sprintAutoGen, {}
             _G.__RQ_SPRINTAUTO = token                       -- one loop, even across re-runs
             task.spawn(function()
-                local addr, nextFull = gcAddr(e), 0
+                -- Only a slot that stays bad for GRACE seconds ends the loop: one failed read in a lag
+                -- spike used to switch Auto-Apply off for good. Any number passes here, because the
+                -- game's own value leaving the slider's range does not mean the slot is gone.
+                local GRACE, ANY = 5, { lo = -1000, hi = 1000 }
+                local addr, nextFull, badSince = gcAddr(e), 0, nil
                 while sprintAutoGen == myGen and GUI.Running and _G.__RQ_SPRINTAUTO == token do
                     local okr, raw = pcall(memory_read, "double", addr)
                     local quick = okr and gcNum(raw) or nil
                     -- the full check: once a second, and whenever the quick read says it needs a write
                     if os.clock() >= nextFull or not quick or math.abs(quick - sprintVal) > 0.001 then
                         nextFull = os.clock() + 1
-                        local cur = slotHolds(SPRINT, e, CFG[SPRINT])   -- nil = slot gone (rejoin, table rebuilt)
-                        local why
-                        if not cur then
-                            why = "run speed lost - Load Values again"
-                        elseif math.abs(cur - sprintVal) > 0.001 then
+                        local cur = slotHolds(SPRINT, e, ANY)   -- nil = bad read, or the slot is gone
+                        local why = not cur and "run speed lost - Load Values again" or nil
+                        if cur and math.abs(cur - sprintVal) > 0.001 then
                             local last = velState.last[SPRINT]
                             if not (last and math.abs(cur - last) <= 0.001) then savedDefault[SPRINT] = cur end
                             if landWrite(SPRINT, e, sprintVal) then
@@ -13038,10 +13054,15 @@ end)()
                                 why = "the write did not land - Load Values again"
                             end
                         end
-                        if why then
-                            notif("Sprint", "Auto-Apply stopped: " .. why, 6)
-                            pcall(function() uiSprintAuto:Set(false) end)
-                            break
+                        if not why then
+                            badSince = nil
+                        else
+                            badSince = badSince or os.clock()
+                            if os.clock() - badSince >= GRACE then
+                                notif("Sprint", "Auto-Apply stopped: " .. why, 6)
+                                pcall(function() uiSprintAuto:Set(false) end)
+                                break
+                            end
                         end
                     end
                     task.wait(0.05)
@@ -13081,56 +13102,83 @@ end)()
             statWrite("Gas Saver", "Gas saver values", { GAS_T, GAS_M }, nil, "Restored your own gas drain")
         end)
 
-        -- ---------- Aim Assist (GearGrappleAimAssistMultiplier) — v9.70 ----------
-        -- ClientAimAssistRunner: on each grapple attempt, every other fast character gets an invisible
-        -- ball, diameter = this x 20 x clamp(speed / 200, 0, 1) x clamp(distance / 300, 0.5, 1). A hook
-        -- ray that meets a ball first goes to that character's root part. The value is never sent,
-        -- but the hook is, and the duel trace records your aim around PvP kills. Capped at x3: bigger
-        -- balls reach further through walls and leave a wider close-range dead zone (a ray that starts
-        -- inside a ball misses it). No Auto-Apply on purpose. In a do-block: this function is near
+        -- A slider bound to ONE stat (v9.71: Aim Assist and the Misc page). It shows YOUR value once
+        -- that is known, and Apply writes only sliders you moved, so a stray click can't change a stat
+        -- (a buff can put it outside the slider's range). own() reads the ONE real slot once after
+        -- Load Values, because the sweep's first hit, which savedDefault starts as, can be a
+        -- look-alike. Cached slots only, so a label never sweeps. Lives on PRE: this function is near
         -- its local limit.
-        do
-            local AIM, AIM_MIN, AIM_MAX = "GearGrappleAimAssistMultiplier", 1, 3
-            local secAim = tab:Section("Aim Assist", "Right", "Grapple lock-on, from your next hook")
-            pcall(function() secAim._section.stack = true end)
-            -- The slider shows YOUR value once it is known. Until you move it, Apply changes nothing,
-            -- so a value above the slider's range can't be lowered by a stray click.
-            local aimVal, aimMoved, aimSynced, aimSyncing = 2, false, false, false
-            PRE.sl.aim_assist = secAim:Slider("Assist Size", aimVal, 0.05, AIM_MIN, AIM_MAX, "x", function(v)
-                aimVal = math.max(AIM_MIN, math.min(AIM_MAX, tonumber(v) or aimVal))
-                if not aimSyncing then aimMoved = true end
+        function PRE.statSlider(sec, o)
+            local s = { key = o.key, val = o.def, moved = false }
+            local synced, syncing = false, false
+            local function fit(v) return math.max(o.min, math.min(o.max, v)) end
+            local h = sec:Slider(o.label, s.val, o.step, o.min, o.max, o.suffix or "", function(v)
+                s.val = fit(tonumber(v) or s.val)
+                if not syncing then s.moved = true end
             end)
-            secAim:Label(function()
-                -- Once, after Load Values: read the ONE real slot. The sweep's first hit, which is what
-                -- savedDefault starts as, can be a look-alike. Cached slots only, so a label never sweeps.
-                if not aimSynced and gateOK() then
-                    local e = statSlot(AIM, cachedFor)
+            PRE.sl[o.sl] = h
+            function s.own()
+                if not synced and gateOK() then
+                    local e = statSlot(o.key, cachedFor)
                     local okr, cur = false, nil
                     if e and type(memory_read) == "function" then okr, cur = pcall(memory_read, "double", gcAddr(e)) end
                     cur = okr and gcNum(cur) or nil
                     if cur then
-                        aimSynced = true
-                        local last = velState.last[AIM]
-                        if not (last and math.abs(cur - last) <= 0.001) then savedDefault[AIM] = cur end
-                        if not aimMoved then
-                            aimSyncing, aimVal = true, math.max(AIM_MIN, math.min(AIM_MAX, cur))
-                            pcall(function() PRE.sl.aim_assist:Set(aimVal) end)
-                            aimSyncing = false
+                        synced = true
+                        local last = velState.last[o.key]
+                        if not (last and math.abs(cur - last) <= 0.001) then savedDefault[o.key] = cur end
+                        if not s.moved then
+                            syncing, s.val = true, fit(cur)
+                            pcall(function() h:Set(s.val) end)
+                            syncing = false
                         end
                     end
                 end
-                local own = aimSynced and savedDefault[AIM] or nil
-                local deg = math.deg(math.asin(10 * aimVal / 300))    -- a full-size ball at 300 studs
+                if synced then return savedDefault[o.key] end
+                return nil
+            end
+            return s
+        end
+        function PRE.writeMoved(what, list, okMsg)      -- inside a task: ok, message
+            local keys, vals = {}, {}
+            for _, s in ipairs(list) do
+                if s.moved then keys[#keys + 1], vals[#vals + 1] = s.key, s.val end
+            end
+            if #keys == 0 then return true, "No change - move the slider first" end
+            return statWriteNow(what, keys, vals, okMsg)
+        end
+
+        -- ---------- Aim Assist (GearGrappleAimAssistMultiplier + GearGrappleAccuracyMultiplier) ----------
+        -- ClientAimAssistRunner: on each grapple attempt, every other fast character gets an invisible
+        -- ball, diameter = size x 20 x clamp(speed / 200, 0, 1) x clamp(distance / 300, 0.5, 1). A hook
+        -- ray that meets a ball first goes to that character's root part. Accuracy is separate: it
+        -- scales the hook's random scatter by (1 - this). Neither value is sent, but the hook is, and
+        -- the duel trace records your aim around PvP kills. Size capped at x3: bigger balls reach
+        -- further through walls and leave a wider close-range dead zone (a ray that starts inside a
+        -- ball misses it). No Auto-Apply on purpose.
+        do
+            local secAim = tab:Section("Aim Assist", "Right", "Grapple lock-on + accuracy, next hook")
+            pcall(function() secAim._section.stack = true end)
+            local size = PRE.statSlider(secAim, { key = "GearGrappleAimAssistMultiplier", label = "Assist Size",
+                def = 2, step = 0.05, min = 1, max = 3, suffix = "x", sl = "aim_assist" })
+            local acc = PRE.statSlider(secAim, { key = "GearGrappleAccuracyMultiplier", label = "Hook Accuracy",
+                def = 0, step = 0.05, min = 0, max = 1, sl = "aim_accuracy" })
+            secAim:Label(function()
+                local own = size.own()
+                local deg = math.deg(math.asin(10 * size.val / 300))  -- a full-size ball at 300 studs
                 if own then return string.format("Yours x%.2f  |  ~%.1f deg at 300 studs", own, deg) end
                 return string.format("~%.1f deg at 300 studs", deg)
             end)
+            secAim:Label(function()
+                acc.own()
+                return string.format("Hook scatter: %d%% of normal", math.floor((1 - acc.val) * 100 + 0.5))
+            end)
             secAim:Button("Apply Aim Assist", action("AimAssist", "Aim Assist", function()
-                if not aimMoved then return true, "No change - move the slider first" end
-                return statWriteNow("Aim assist", { AIM }, { aimVal }, "Applied - works from your next hook")
+                return PRE.writeMoved("Aim assist", { size, acc }, "Applied - works from your next hook")
             end))
             secAim:Button("Restore Default", function()
                 PRE.applied.AimAssist = nil
-                statWrite("Aim Assist", "Aim assist", { AIM }, nil, "Restored your own aim assist")
+                statWrite("Aim Assist", "Aim assist", { size.key, acc.key }, nil, "Restored your own aim assist")
             end)
         end
 
@@ -13477,6 +13525,42 @@ end)()
             end)
         end)
 
+        -- ---------- Misc page (v9.71): swimming, breath, fog, anxiety ----------
+        -- All four are plain stats, read when they are used. Fog is the exception on timing: the game
+        -- recomputes the atmosphere only when lighting changes or the server changes this stat, and a
+        -- memory write doesn't fire that, so it shows at the next lighting change.
+        do
+            local function pin(name, side, sub, id, o, text, applyText, okMsg)
+                local sec = tab:Section(name, side, sub)
+                local st = PRE.statSlider(sec, o)
+                sec:Label(function() st.own(); return text(st.val) end)
+                sec:Button(applyText, action(id, name, function() return PRE.writeMoved(name, { st }, okMsg) end))
+                sec:Button("Restore Default", function()
+                    PRE.applied[id] = nil
+                    statWrite(name, name, { o.key }, nil, "Restored your own value")
+                end)
+            end
+            pin("Swimming", "Left", "Swim speed, read while you swim", "Swim",
+                { key = "SwimSpeedMultiplier", label = "Swim Speed", def = 1, step = 0.05, min = 1, max = 2.5, suffix = "x", sl = "swim_speed" },
+                function(v) return string.format("~%.1f studs/s swimming  (18 x %.2f)", 18 * v, v) end,
+                "Apply Swim", "Applied - works right away")
+            pin("Breath", "Right", "Breath lost per second underwater", "Breath",
+                { key = "BreathDepletionRate", label = "Breath Loss", def = 5, step = 0.25, min = 0, max = 5, sl = "breath_rate" },
+                function(v)
+                    if v <= 0 then return "No breath loss underwater" end
+                    return string.format("%.2f a second  (%.2f with gear on)", v, v * 2)
+                end,
+                "Apply Breath", "Applied - works right away")
+            pin("Fog", "Left", "Shows at the next lighting change", "Fog",
+                { key = "FogVisibilityMultiplier", label = "Fog Amount", def = 1, step = 0.05, min = 0, max = 1, sl = "fog_amount" },
+                function(v) return v <= 0 and "No fog" or string.format("%d%% of normal fog", math.floor(v * 100 + 0.5)) end,
+                "Apply Fog", "Applied - shows at the next lighting change")
+            pin("Anxiety", "Right", "How much anxiety you gain", "Anxiety",
+                { key = "AnxietyResistanceMultiplier", label = "Anxiety Gain", def = 1, step = 0.05, min = 0, max = 1, sl = "anxiety_gain" },
+                function(v) return v <= 0 and "No anxiety gain" or string.format("%d%% of normal anxiety", math.floor(v * 100 + 0.5)) end,
+                "Apply Anxiety", "Applied - works from the next change")
+        end
+
         -- ---------- Presets (v9.67) ----------
         -- Set things up by hand once, then Save Preset records it under a name: every slider value,
         -- the sections you applied (and didn't restore since), and the Auto-Apply toggles that are on.
@@ -13522,6 +13606,24 @@ end)()
             if #autos > 0 then s = s .. (#names > 0 and "  |  " or "") .. "Auto-Apply: " .. table.concat(autos, ", ") end
             return s
         end
+        -- The library's Set() only runs a control's callback when the value CHANGES. So a slider already
+        -- showing the preset's number, or a toggle already lit whose loop has died, did nothing and kept
+        -- the stale value. These run the callback either way (both callbacks are safe to repeat: a
+        -- toggle's callback ends the old loop and starts a fresh one, or puts the pill back).
+        function PRE.setSlider(h, v)
+            pcall(function()
+                h:Set(v)
+                local it = h.item
+                if type(it) == "table" and type(it.callback) == "function" then it.callback(tonumber(it.value) or v) end
+            end)
+        end
+        function PRE.startAuto(h)
+            pcall(function()
+                h:Set(true)
+                local it = h.item
+                if type(it) == "table" and type(it.callback) == "function" and it.value == true then it.callback(true) end
+            end)
+        end
         -- Inside a task: sliders first (the actions read them), then each recorded action in the menu's
         -- order, then the Auto-Apply toggles. Only turns things ON; a toggle you switched on by hand
         -- stays on. One summary, plus one line per failure (up to 3).
@@ -13539,7 +13641,7 @@ end)()
             end
             for k, v in pairs(type(p.values) == "table" and p.values or {}) do
                 local h = PRE.sl[k]
-                if h and tonumber(v) then pcall(function() h:Set(tonumber(v)) end) end
+                if h and tonumber(v) then PRE.setSlider(h, tonumber(v)) end
             end
             local want, done, total, failed = PRE.toSet(p.applied), 0, 0, {}
             for _, id in ipairs(PRE.order) do
@@ -13558,7 +13660,7 @@ end)()
             for _, id in ipairs(type(p.auto) == "table" and p.auto or {}) do
                 local h = PRE.ui[id]
                 if h then
-                    pcall(function() h:Set(true) end)
+                    PRE.startAuto(h)
                     if PRE.auto[id] then autoOn[#autoOn + 1] = id end   -- its callback turned it back off if it couldn't run
                 end
             end
@@ -13610,7 +13712,24 @@ end)()
                 end,
                 AimAssist = function(v)
                     local m = math.max(1, math.min(3, PRE.num(v, "aim_assist", 2)))
-                    return string.format("%.2fx", m) .. PRE.DOT .. string.format("~%.1f deg lock", math.deg(math.asin(m / 30)))
+                    return string.format("%.2fx", m) .. PRE.DOT .. string.format("~%.1f deg", math.deg(math.asin(m / 30)))
+                        .. PRE.DOT .. string.format("Scatter %d%%", math.floor((1 - PRE.num(v, "aim_accuracy", 0)) * 100 + 0.5))
+                end,
+                Swim = function(v)
+                    local m = PRE.num(v, "swim_speed", 1)
+                    return string.format("%.2fx", m) .. PRE.DOT .. string.format("~%.1f studs/s", 18 * m)
+                end,
+                Breath = function(v)
+                    local r = PRE.num(v, "breath_rate", 5)
+                    return r <= 0 and "No breath loss" or string.format("%.2f a second", r)
+                end,
+                Fog = function(v)
+                    local f = PRE.num(v, "fog_amount", 1)
+                    return f <= 0 and "No fog" or string.format("%d%% of normal fog", math.floor(f * 100 + 0.5))
+                end,
+                Anxiety = function(v)
+                    local a = PRE.num(v, "anxiety_gain", 1)
+                    return a <= 0 and "No anxiety gain" or string.format("%d%% of normal", math.floor(a * 100 + 0.5))
                 end,
                 Firearms = function() return "No spread" .. PRE.DOT .. "No recoil" end,
                 SpearShake = function() return "No camera shake on throw" end,
@@ -14725,6 +14844,7 @@ end)()
         paginate(GUI._charTab, {
             { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Saver", "Aim Assist" }, icon = "dash" },
             { "Weapons", { "Firearm Auto", "Thunderspears" }, icon = "swords" },
+            { "Misc", { "Swimming", "Breath", "Fog", "Anxiety" }, icon = "grid" },
             { "Presets", icon = "sliders" },     -- Presets, Save Preset (the last page takes the rest)
         })
         paginate(GUI._setTab, {
