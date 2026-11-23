@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.73"
+GUI.Version = "v9.74"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12906,18 +12906,23 @@ end)()
             end)
         end
 
-        -- Movement's cards, in reading order (v9.73). Each row pairs two cards of the same shape, so
-        -- neither leaves a hole under it. RowAlign reads this order: Left starts a row, Right joins it.
+        -- Movement's cards, in the user's long-standing spots (restored v9.74): left column Grapple,
+        -- Dash, Gas Saver; right column Velocity, Parry, Sprint, Aim Assist. RowAlign reads this order.
+        -- `stack` (uilib patch #12) keeps Gas Saver directly under Dash instead of starting a new row.
         PRE.mv = {}
         for _, c in ipairs({
             { "Grapple", "Left", "ODM hook range" },
-            { "Sprint", "Right", "Run speed, from the next sprint press" },
-            { "Velocity", "Left", "ODM speed build-up" },
-            { "Gas Saver", "Right", "Less drain when your gas is low" },
-            { "Parry", "Left", "Parry window (default 5s)" },
-            { "Aim Assist", "Right", "Grapple lock-on, from your next hook" },
+            { "Velocity", "Right", "ODM speed build-up" },
             { "Dash", "Left", "Canisters + Burst Dash" },
-        }) do PRE.mv[c[1]] = tab:Section(c[1], c[2], c[3]) end
+            { "Parry", "Right", "Parry window (default 5s)" },
+            { "Sprint", "Right", "Run speed, from the next sprint press" },
+            { "Gas Saver", "Left", "Less drain when your gas is low", stack = true },
+            { "Aim Assist", "Right", "Grapple lock-on, from your next hook" },
+        }) do
+            local s = tab:Section(c[1], c[2], c[3])
+            PRE.mv[c[1]] = s
+            if c.stack then pcall(function() s._section.stack = true end) end
+        end
 
         -- ---------- Grapple (ODM hook range) ----------
         -- Additional Range only. GearGrappleRangeMultiplier is no longer written at all (its slider
@@ -13714,7 +13719,7 @@ end)()
         -- Presets list the sections in the order the pages show them.
         do
             local rank = {}
-            for i, id in ipairs({ "Grapple", "Sprint", "Velocity", "GasSaver", "Parry", "AimAssist", "Dash", "Firearms",
+            for i, id in ipairs({ "Grapple", "Velocity", "Dash", "Parry", "Sprint", "GasSaver", "AimAssist", "Firearms",
                 "SpearShake", "Thunderspears", "Swim", "Breath", "Fog", "Anxiety", "Spyglass" }) do rank[id] = i end
             table.sort(PRE.order, function(x, y) return (rank[x] or 99) < (rank[y] or 99) end)
         end
@@ -14999,7 +15004,7 @@ end)()
             { "HUD Bars", icon = "bars" },       -- Health / Gas Bar and their gradients
         })
         paginate(GUI._charTab, {
-            { "Movement", { "Grapple", "Sprint", "Velocity", "Gas Saver", "Parry", "Aim Assist", "Dash" }, icon = "dash" },
+            { "Movement", { "Grapple", "Velocity", "Dash", "Parry", "Sprint", "Gas Saver", "Aim Assist" }, icon = "dash" },
             { "Weapons", { "Firearm Auto", "Thunderspears" }, icon = "swords" },
             { "Misc", { "Swimming", "Breath", "Fog", "Anxiety", "Spyglass" }, icon = "grid" },
             { "Presets", icon = "sliders" },     -- Presets, Save Preset (the last page takes the rest)
