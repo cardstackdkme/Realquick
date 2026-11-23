@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.71"
+GUI.Version = "v9.72"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12380,12 +12380,10 @@ end)()
             -- Game base 1, live 2026-11-23: 2 (Enraged also touches it). The window keeps out the
             -- name->hash cache (46512); written only at the ONE slot inside the stat table (statSlot).
             GearGrappleAimAssistMultiplier      = { lo = 0, hi = 10,     fb = 1 },
-            -- v9.71. Accuracy: hook scatter x (1 - this), so 1 = no random scatter; it does not touch
-            -- the assist balls. Swim: speed = 18 x this. Breath: drain per second (x2 with gear on).
-            -- Fog: atmosphere density x this, the client clamps it to 0..1. Anxiety: every gain x this
-            -- (lower = less, despite "Resistance"). Live 2026-11-23: 0, 1, 5, 1, 1. These windows keep
-            -- out the name->hash cache (3912 .. 46161) and SwimSpeedMultiplier's look-alike (18).
-            GearGrappleAccuracyMultiplier       = { lo = -1, hi = 2,     fb = 0 },
+            -- v9.71. Swim: speed = 18 x this. Breath: drain per second (x2 with gear on). Fog: atmosphere
+            -- density x this, the client clamps it to 0..1. Anxiety: every gain x this (lower = less,
+            -- despite "Resistance"). Live 2026-11-23: 1, 5, 1, 1. These windows keep out the name->hash
+            -- cache (3912 .. 46161) and SwimSpeedMultiplier's look-alike (18).
             SwimSpeedMultiplier                 = { lo = 0, hi = 10,     fb = 1 },
             BreathDepletionRate                 = { lo = 0, hi = 100,    fb = 5 },
             FogVisibilityMultiplier             = { lo = 0, hi = 2,      fb = 1 },
@@ -12461,6 +12459,54 @@ end)()
             end
             return false
         end
+        -- REAL STAT SLOTS ONLY (v9.72). getgc can also return records that are not table slots at all:
+        -- the name sits next to unrelated bytes, read as a tiny number like 1.27e-313 (live 2026-11-23:
+        -- type tag 387 instead of 3). Those passed the value window, so Velocity wrote into foreign
+        -- memory, Reset's "your value" became garbage, and when one came first the 32 KB anchor pointed
+        -- at it and every stat pin (Sprint first) said "not found". So a stat entry must be a real number
+        -- slot keyed by its own name, in the one table that holds most of the stats.
+        local STAT = {}
+        for _, k in ipairs({ "GearAdditionalGrappleRange", "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate",
+            "FirearmAccuracyMultiplier", "FirearmRecoilMultiplier", "BasePlayerRunMultiplier", "LowGasDrainThreshold",
+            "LowGasDrainMultiplier", "GearGrappleAimAssistMultiplier", "SwimSpeedMultiplier", "BreathDepletionRate",
+            "FogVisibilityMultiplier", "AnxietyResistanceMultiplier" }) do STAT[k] = true end
+        local function bogusNum(v)
+            v = tonumber(v)
+            return v ~= nil and v ~= 0 and math.abs(v) < 0.000000001
+        end
+        local function scrubStats()
+            local real = type(memory_read) == "function"
+            local count, best, top = {}, nil, 0
+            local function tblOf(e)
+                local t = e.tbl
+                if type(t) == "string" then return tonumber(t) or tonumber((t:gsub("^0[xX]", "")), 16) end
+                return t
+            end
+            for k in pairs(STAT) do
+                local list, good = cache[k], {}
+                if list and #list > 0 then
+                    for _, e in ipairs(list) do
+                        if not bogusNum(e.value) and (not real or slotHolds(k, e, CFG[k])) then good[#good + 1] = e end
+                    end
+                    cache[k] = good
+                    for _, e in ipairs(good) do
+                        local t = tblOf(e)
+                        if t then
+                            count[t] = (count[t] or 0) + 1
+                            if count[t] > top then best, top = t, count[t] end
+                        end
+                    end
+                end
+            end
+            if not best or top < 3 then return end
+            for k in pairs(STAT) do
+                local list, good = cache[k], {}
+                if list and #list > 0 then
+                    for _, e in ipairs(list) do if tblOf(e) == best then good[#good + 1] = e end end
+                    cache[k] = good
+                end
+            end
+        end
         local fileRestored = 0
         if not reuse then
             local data
@@ -12476,7 +12522,8 @@ end)()
                             local v = type(e) == "table" and e.key == k and slotHolds(k, e, cfg)
                             if v then e.value = tostring(v); good[#good + 1] = e end
                         end
-                        if #good == #list then cache[k] = good; fileRestored = fileRestored + 1 end
+                        -- a stat has one real slot, so a fake copy beside it must not cost us the real one
+                        if #good == #list or (STAT[k] and #good > 0) then cache[k] = good; fileRestored = fileRestored + 1 end
                     end
                 end
             end
@@ -12516,10 +12563,12 @@ end)()
             for k, entries in pairs(cache) do
                 if not CFG[k] then
                     local orig = savedDefault[k]
-                    if orig ~= nil and type(applygc) == "function" then
+                    if orig ~= nil and not bogusNum(orig) and type(applygc) == "function" then
                         for _, e in ipairs(entries) do
-                            pcall(function() applygc({ e }, k, orig) end)
-                            retiredFixed = retiredFixed + 1
+                            if type(memory_read) ~= "function" or slotHolds(k, e, { lo = -1000000, hi = 1000000 }) then
+                                pcall(function() applygc({ e }, k, orig) end)
+                                retiredFixed = retiredFixed + 1
+                            end
                         end
                     end
                     cache[k] = nil
@@ -12544,7 +12593,10 @@ end)()
             end
         end
         -- CFG[k] guard is load-bearing: without it a retired key's leftovers report the tab as loaded.
+        scrubStats()
         for k, entries in pairs(cache) do if CFG[k] and #entries > 0 then warmed = true; break end end
+        -- Every stat pin finds its slot from the Velocity slot, so without it the tab is not loaded.
+        if #(cache.GearMaxVelocityMultiplier or {}) == 0 then warmed = false end
         if warmed then saveCache() end   -- e.g. reused from _G: make sure a Matcha restart keeps them too
         -- `bb` rides along on the same JobId key: it holds the BlunderBuss's resolved GC slots + the
         -- last value written to each, so a script RE-RUN in the same server reuses them instead of
@@ -12579,6 +12631,14 @@ end)()
                 end
             end
         end
+        -- "Your value" read from a fake entry by an older build. A JSON round trip can flush such a tiny
+        -- number to 0, so a saved 0 is dropped too on a stat whose stock value isn't 0: the next
+        -- write simply re-reads it from the real slot.
+        for _, t in ipairs({ savedDefault, velState.nat }) do
+            for k, v in pairs(t) do
+                if bogusNum(v) or (v == 0 and STAT[k] and CFG[k] and CFG[k].fb ~= 0) then t[k] = nil end
+            end
+        end
         local stateEnc = nil
         local function saveState()   -- writes only when something changed
             local base = {}
@@ -12600,7 +12660,7 @@ end)()
         end
         local function keep(cfg, e)   -- is this getgc entry the real numeric config value (not a hash decoy)?
             if type(e) ~= "table" or e.type ~= "number" then return false end
-            local v = tonumber(e.value); return v ~= nil and v >= cfg.lo and v <= cfg.hi
+            local v = tonumber(e.value); return v ~= nil and not bogusNum(v) and v >= cfg.lo and v <= cfg.hi
         end
 
         -- ONE getgc sweep for EVERY key, filtered + cached. getgc scans the whole Lua GC (slow),
@@ -12614,12 +12674,21 @@ end)()
             local ok, entries = pcall(function() return getgc(keys) end)   -- getgc accepts a key LIST
             if not ok or type(entries) ~= "table" then return false end
             if GUI.GasFromSweep then pcall(GUI.GasFromSweep, entries) end
-            local found = 0
+            local found, have = 0, {}
+            for k, list in pairs(cache) do       -- a repeat sweep must not list the same slot twice
+                for _, e in ipairs(list) do have[k .. "@" .. tostring(gcKey(e))] = true end
+            end
             for _, e in pairs(entries) do
                 local cfg = e and CFG[e.key]
-                if cfg and keep(cfg, e) then
-                    local c = cache[e.key]; c[#c + 1] = e; found = found + 1
-                    if savedDefault[e.key] == nil then savedDefault[e.key] = tonumber(e.value) end
+                if cfg and keep(cfg, e) and not have[e.key .. "@" .. tostring(gcKey(e))] then
+                    local c = cache[e.key]; c[#c + 1] = e
+                end
+            end
+            scrubStats()
+            for k, list in pairs(cache) do       -- only now: the first hit could have been a fake one
+                if CFG[k] and #list > 0 then
+                    found = found + #list
+                    if savedDefault[k] == nil then savedDefault[k] = tonumber(list[1].value) end
                 end
             end
             saveState()
@@ -12638,12 +12707,12 @@ end)()
             if not ok or type(entries) ~= "table" then return {} end
             local safe = {}
             for _, e in pairs(entries) do
-                if e and e.key == key and keep(cfg, e) then
-                    safe[#safe + 1] = e
-                    if savedDefault[key] == nil then savedDefault[key] = tonumber(e.value) end
-                end
+                if e and e.key == key and keep(cfg, e) then safe[#safe + 1] = e end
             end
             cache[key] = safe
+            scrubStats()
+            safe = cache[key]
+            if safe[1] and savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value) end
             if #safe > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
             saveCache()
             return safe
@@ -13148,37 +13217,30 @@ end)()
             return statWriteNow(what, keys, vals, okMsg)
         end
 
-        -- ---------- Aim Assist (GearGrappleAimAssistMultiplier + GearGrappleAccuracyMultiplier) ----------
+        -- ---------- Aim Assist (GearGrappleAimAssistMultiplier) ----------
         -- ClientAimAssistRunner: on each grapple attempt, every other fast character gets an invisible
         -- ball, diameter = size x 20 x clamp(speed / 200, 0, 1) x clamp(distance / 300, 0.5, 1). A hook
-        -- ray that meets a ball first goes to that character's root part. Accuracy is separate: it
-        -- scales the hook's random scatter by (1 - this). Neither value is sent, but the hook is, and
-        -- the duel trace records your aim around PvP kills. Size capped at x3: bigger balls reach
+        -- ray that meets a ball first goes to that character's root part. The value is never sent,
+        -- but the hook is, and the duel trace records your aim around PvP kills. Capped at x3: bigger balls reach
         -- further through walls and leave a wider close-range dead zone (a ray that starts inside a
         -- ball misses it). No Auto-Apply on purpose.
         do
-            local secAim = tab:Section("Aim Assist", "Right", "Grapple lock-on + accuracy, next hook")
+            local secAim = tab:Section("Aim Assist", "Right", "Grapple lock-on, from your next hook")
             pcall(function() secAim._section.stack = true end)
             local size = PRE.statSlider(secAim, { key = "GearGrappleAimAssistMultiplier", label = "Assist Size",
                 def = 2, step = 0.05, min = 1, max = 3, suffix = "x", sl = "aim_assist" })
-            local acc = PRE.statSlider(secAim, { key = "GearGrappleAccuracyMultiplier", label = "Hook Accuracy",
-                def = 0, step = 0.05, min = 0, max = 1, sl = "aim_accuracy" })
             secAim:Label(function()
                 local own = size.own()
                 local deg = math.deg(math.asin(10 * size.val / 300))  -- a full-size ball at 300 studs
                 if own then return string.format("Yours x%.2f  |  ~%.1f deg at 300 studs", own, deg) end
                 return string.format("~%.1f deg at 300 studs", deg)
             end)
-            secAim:Label(function()
-                acc.own()
-                return string.format("Hook scatter: %d%% of normal", math.floor((1 - acc.val) * 100 + 0.5))
-            end)
             secAim:Button("Apply Aim Assist", action("AimAssist", "Aim Assist", function()
-                return PRE.writeMoved("Aim assist", { size, acc }, "Applied - works from your next hook")
+                return PRE.writeMoved("Aim assist", { size }, "Applied - works from your next hook")
             end))
             secAim:Button("Restore Default", function()
                 PRE.applied.AimAssist = nil
-                statWrite("Aim Assist", "Aim assist", { size.key, acc.key }, nil, "Restored your own aim assist")
+                statWrite("Aim Assist", "Aim assist", { size.key }, nil, "Restored your own aim assist")
             end)
         end
 
@@ -13712,8 +13774,7 @@ end)()
                 end,
                 AimAssist = function(v)
                     local m = math.max(1, math.min(3, PRE.num(v, "aim_assist", 2)))
-                    return string.format("%.2fx", m) .. PRE.DOT .. string.format("~%.1f deg", math.deg(math.asin(m / 30)))
-                        .. PRE.DOT .. string.format("Scatter %d%%", math.floor((1 - PRE.num(v, "aim_accuracy", 0)) * 100 + 0.5))
+                    return string.format("%.2fx", m) .. PRE.DOT .. string.format("~%.1f deg lock", math.deg(math.asin(m / 30)))
                 end,
                 Swim = function(v)
                     local m = PRE.num(v, "swim_speed", 1)
