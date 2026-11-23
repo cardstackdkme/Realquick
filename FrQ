@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.78"
+GUI.Version = "v9.79"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -13374,7 +13374,14 @@ end)()
         -- misses some of their fields, and it also returns look-alike entries from the modules'
         -- constant lists where each name sits on the PREVIOUS field's value. Writing one of those
         -- rewrites gun code, e.g. M1911 fireDelay. The stat route has none of that.
+        -- Weapons' cards, in the user's layout (v9.79): Firearm Manual | Thunderspears, Firearm Auto
+        -- under them. RowAlign reads creation order (Left starts a row), so all three are made here.
+        local secFM = tab:Section("Firearm Manual", "Left", "Keep a share of spread and recoil")
+        local secTS = tab:Section("Thunderspears", "Right", "Spear accuracy")
         local secFire = tab:Section("Firearm Auto", "Left", "One press: no spread / no recoil")
+        -- `stack`: right under Manual. A new row would start below the taller Thunderspears card and
+        -- leave a bigger gap here than everywhere else.
+        pcall(function() secFire._section.stack = true end)
         secFire:Label(function() return "Spread 0 | Recoil 0   (every gun, next shot)" end)
         -- LEGACY: what pre-v8.0 builds wrote, so Restore can still undo it in the same server.
         local FIRE_KEYS = { "BASE_INACCURACY_OFFSET", "BASE_RECOIL_IMPULSE" }
@@ -13613,7 +13620,6 @@ end)()
         -- as a plain local, a script re-run kept the writes but lost the way back.
         local tsOrig = bbState.tsOrig or {}
         bbState.tsOrig = tsOrig
-        local secTS = tab:Section("Thunderspears", "Right", "Spear accuracy")
         PRE.sl.spear_inaccuracy = secTS:Slider("Spear Inaccuracy", tsInacc, 0.1, 0, 15, "",
             function(v) tsInacc = tonumber(v) or tsInacc end,
             "Random scatter applied to the aim point, in studs. Stock 15 - by far the loosest weapon in the game. 0 = perfectly straight.")
@@ -13713,13 +13719,10 @@ end)()
 
         -- ---------- Firearm Manual (back in v9.78) ----------
         -- The same two stats as Firearm Auto, as a share of YOUR value: 100% = unchanged, 0% = none.
-        -- Both cards drive one override (faApply), so whichever was pressed last is what's on. Stacked
-        -- under Firearm Auto, beside Thunderspears.
+        -- Both cards drive one override (faApply), so whichever was pressed last is what's on.
         do
             local spreadKept = fa.pct and math.floor(fa.pct.spread * 100 + 0.5) or 100
             local recoilKept = fa.pct and math.floor(fa.pct.recoil * 100 + 0.5) or 100
-            local secFM = tab:Section("Firearm Manual", "Left", "Keep a share of spread and recoil")
-            pcall(function() secFM._section.stack = true end)
             PRE.sl.firearm_spread = secFM:Slider("Spread Kept", spreadKept, 5, 0, 100, "%", function(v)
                 spreadKept = math.max(0, math.min(100, tonumber(v) or spreadKept))
             end, "How much of your normal aim scatter every gun keeps. 100% = stock, 0% = dead centre. From your next shot, gun in hand included.")
@@ -13791,15 +13794,15 @@ end)()
         -- Presets list the sections in the order the pages show them.
         do
             local rank = {}
-            for i, id in ipairs({ "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash", "Firearms", "FirearmManual",
-                "SpearShake", "Thunderspears", "Swim", "Breath", "Anxiety", "Spyglass" }) do rank[id] = i end
+            for i, id in ipairs({ "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash", "FirearmManual", "Thunderspears",
+                "Firearms", "SpearShake", "Swim", "Breath", "Anxiety", "Spyglass" }) do rank[id] = i end
             table.sort(PRE.order, function(x, y) return (rank[x] or 99) < (rank[y] or 99) end)
         end
         -- The preset popup groups sections by page. The two firearm cards replace each other.
         PRE.group = {}
         for g, ids in pairs({
             Movement = { "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash" },
-            Weapons = { "Firearms", "FirearmManual", "SpearShake", "Thunderspears" },
+            Weapons = { "FirearmManual", "Thunderspears", "Firearms", "SpearShake" },
             Misc = { "Swim", "Breath", "Anxiety", "Spyglass" },
         }) do
             for _, id in ipairs(ids) do PRE.group[id] = g end
@@ -15089,7 +15092,7 @@ end)()
         })
         paginate(GUI._charTab, {
             { "Movement", { "Gas Saver", "Velocity", "Grapple", "Aim Assist", "Parry", "Sprint", "Dash" }, icon = "dash" },
-            { "Weapons", { "Firearm Auto", "Firearm Manual", "Thunderspears" }, icon = "swords" },
+            { "Weapons", { "Firearm Manual", "Thunderspears", "Firearm Auto" }, icon = "swords" },
             { "Misc", { "Swimming", "Breath", "Anxiety", "Spyglass" }, icon = "grid" },
             { "Presets", icon = "sliders" },     -- Presets, Save Preset (the last page takes the rest)
         })
