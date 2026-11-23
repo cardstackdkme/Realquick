@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.77"
+GUI.Version = "v9.78"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12380,13 +12380,13 @@ end)()
             -- Game base 1, live 2026-11-23: 2 (Enraged also touches it). The window keeps out the
             -- name->hash cache (46512); written only at the ONE slot inside the stat table (statSlot).
             GearGrappleAimAssistMultiplier      = { lo = 0, hi = 10,     fb = 1 },
-            -- v9.71. Swim: speed = 18 x this. Breath: drain per second (x2 with gear on). Fog: atmosphere
-            -- density x this, the client clamps it to 0..1. Anxiety: every gain x this (lower = less,
-            -- despite "Resistance"). Live 2026-11-23: 1, 5, 1, 1. These windows keep out the name->hash
+            -- v9.71. Swim: speed = 18 x this. Breath: drain per second (x2 with gear on). Anxiety: every
+            -- gain x this (lower = less, despite "Resistance"). Live 2026-11-23: 1, 5, 1. Fog was removed
+            -- in v9.78 (no visible effect), so a re-run puts back any value an older build wrote (RETIRED
+            -- KEYS below). These windows keep out the name->hash
             -- cache (3912 .. 46161) and SwimSpeedMultiplier's look-alike (18).
             SwimSpeedMultiplier                 = { lo = 0, hi = 10,     fb = 1 },
             BreathDepletionRate                 = { lo = 0, hi = 100,    fb = 5 },
-            FogVisibilityMultiplier             = { lo = 0, hi = 2,      fb = 1 },
             AnxietyResistanceMultiplier         = { lo = 0, hi = 10,     fb = 1 },
         }
         -- Cross-run cache: getgc addresses stay valid for as long as you STAY in one server (same
@@ -12472,7 +12472,7 @@ end)()
         for _, k in ipairs({ "GearAdditionalGrappleRange", "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate",
             "FirearmAccuracyMultiplier", "FirearmRecoilMultiplier", "BasePlayerRunMultiplier", "LowGasDrainThreshold",
             "LowGasDrainMultiplier", "GearGrappleAimAssistMultiplier", "SwimSpeedMultiplier", "BreathDepletionRate",
-            "FogVisibilityMultiplier", "AnxietyResistanceMultiplier" }) do STAT[k] = true end
+            "AnxietyResistanceMultiplier" }) do STAT[k] = true end
         local function bogusNum(v)
             v = tonumber(v)
             return v ~= nil and v ~= 0 and math.abs(v) < 0.000000001
@@ -13584,12 +13584,13 @@ end)()
         PRE.row(secFire, { id = "Firearms", applyName = "Apply Firearms", restoreName = "Restore Default",
             apply = action("Firearms", "Firearms", function()
             local ok, why = faApply(0, 0)
+            if ok then PRE.applied.FirearmManual = nil end   -- one override: the last one pressed is on
             return ok, ok and "Every gun: no spread, no recoil (from your next shot)" or ("Failed - " .. tostring(why))
-        end),
+        end, "Firearm Auto"),
             tip = "Sets your firearm accuracy stat to full and your recoil stat to zero, so every gun fires dead centre with no camera kick from your next shot - no re-equip needed. Pellet guns keep a small cone (the BlunderBuss keeps half). Restore Default puts your own values back.",
             restore = function()
             if not gateOK() then return end
-            PRE.applied.Firearms = nil
+            PRE.applied.Firearms, PRE.applied.FirearmManual = nil, nil
             task.spawn(function()
                 local n = faRestore() + fireRestore()
                 notif("Firearms", n > 0 and ("Restored " .. n .. " value(s)") or "Nothing to restore - no writes recorded", 3)
@@ -13710,10 +13711,45 @@ end)()
             end)
         end })
 
-        -- ---------- Misc page (v9.71): swimming, breath, fog, anxiety ----------
-        -- All four are plain stats, read when they are used. Fog is the exception on timing: the game
-        -- recomputes the atmosphere only when lighting changes or the server changes this stat, and a
-        -- memory write doesn't fire that, so it shows at the next lighting change.
+        -- ---------- Firearm Manual (back in v9.78) ----------
+        -- The same two stats as Firearm Auto, as a share of YOUR value: 100% = unchanged, 0% = none.
+        -- Both cards drive one override (faApply), so whichever was pressed last is what's on. Stacked
+        -- under Firearm Auto, beside Thunderspears.
+        do
+            local spreadKept = fa.pct and math.floor(fa.pct.spread * 100 + 0.5) or 100
+            local recoilKept = fa.pct and math.floor(fa.pct.recoil * 100 + 0.5) or 100
+            local secFM = tab:Section("Firearm Manual", "Left", "Keep a share of spread and recoil")
+            pcall(function() secFM._section.stack = true end)
+            PRE.sl.firearm_spread = secFM:Slider("Spread Kept", spreadKept, 5, 0, 100, "%", function(v)
+                spreadKept = math.max(0, math.min(100, tonumber(v) or spreadKept))
+            end, "How much of your normal aim scatter every gun keeps. 100% = stock, 0% = dead centre. From your next shot, gun in hand included.")
+            PRE.sl.firearm_recoil = secFM:Slider("Recoil Kept", recoilKept, 5, 0, 100, "%", function(v)
+                recoilKept = math.max(0, math.min(100, tonumber(v) or recoilKept))
+            end, "How much camera kick every gun keeps. 100% = stock, 0% = none. From your next shot.")
+            secFM:Label(function()
+                return string.format("Every gun keeps %d%% spread, %d%% recoil", spreadKept, recoilKept)
+            end)
+            PRE.row(secFM, { id = "FirearmManual", applyName = "Apply Firearm Manual", restoreName = "Restore Default",
+                apply = action("FirearmManual", "Firearm Manual", function()
+                    local ok, why = faApply(spreadKept / 100, recoilKept / 100)
+                    if ok then PRE.applied.Firearms = nil end
+                    return ok, ok and string.format("Every gun: %d%% spread, %d%% recoil (from your next shot)", spreadKept, recoilKept)
+                        or ("Failed - " .. tostring(why))
+                end),
+                tip = "Keeps this share of your own spread and recoil on every gun. It replaces Firearm Auto until you press that again.",
+                restore = function()
+                    if not gateOK() then return end
+                    PRE.applied.Firearms, PRE.applied.FirearmManual = nil, nil
+                    task.spawn(function()
+                        local n = faRestore() + fireRestore()
+                        notif("Firearm Manual", n > 0 and ("Restored " .. n .. " value(s)") or "Nothing to restore - no writes recorded", 3)
+                    end)
+                end,
+            })
+        end
+
+        -- ---------- Misc page (v9.71): swimming, breath, anxiety, spyglass ----------
+        -- Plain stats, read when they are used.
         do
             local function pin(name, side, sub, id, o, text, applyText, okMsg)
                 local sec = tab:Section(name, side, sub)
@@ -13728,7 +13764,7 @@ end)()
                 })
             end
             pin("Swimming", "Left", "Swim speed, read while you swim", "Swim",
-                { key = "SwimSpeedMultiplier", label = "Swim Speed", def = 1, step = 0.05, min = 1, max = 2.5, suffix = "x", sl = "swim_speed" },
+                { key = "SwimSpeedMultiplier", label = "Swim Speed", def = 1, step = 0.05, min = 1, max = 3, suffix = "x", sl = "swim_speed" },
                 function(v) return string.format("~%.1f studs/s swimming  (18 x %.2f)", 18 * v, v) end,
                 "Apply Swim", "Applied - works right away")
             pin("Breath", "Right", "Breath lost per second underwater", "Breath",
@@ -13738,18 +13774,14 @@ end)()
                     return string.format("%.2f a second  (%.2f with gear on)", v, v * 2)
                 end,
                 "Apply Breath", "Applied - works right away")
-            pin("Fog", "Left", "Shows at the next lighting change", "Fog",
-                { key = "FogVisibilityMultiplier", label = "Fog Amount", def = 1, step = 0.05, min = 0, max = 1, sl = "fog_amount" },
-                function(v) return v <= 0 and "No fog" or string.format("%d%% of normal fog", math.floor(v * 100 + 0.5)) end,
-                "Apply Fog", "Applied - shows at the next lighting change")
-            pin("Anxiety", "Right", "How much anxiety you gain", "Anxiety",
+            pin("Anxiety", "Left", "How much anxiety you gain", "Anxiety",
                 { key = "AnxietyResistanceMultiplier", label = "Anxiety Gain", def = 1, step = 0.05, min = 0, max = 1, sl = "anxiety_gain" },
                 function(v) return v <= 0 and "No anxiety gain" or string.format("%d%% of normal anxiety", math.floor(v * 100 + 0.5)) end,
                 "Apply Anxiety", "Applied - works from the next change")
             -- Spyglass: fixed values, no slider, as asked: both zoomed-camera distances to 200. Takes
             -- effect the next time you zoom in. Rejoining also puts the game's own values back.
             local SPY = { "ZOOMED_CAMERA_MAX_DISTANCE", "ZOOMED_CAMERA_MIN_DISTANCE" }
-            local secSpy = tab:Section("Spyglass", "Left", "Zoomed camera distance")
+            local secSpy = tab:Section("Spyglass", "Right", "Zoomed camera distance")
             secSpy:Label(function() return "Zoom distance 200" end)
             PRE.row(secSpy, { id = "Spyglass", applyName = "Apply Spyglass", restoreName = "Restore Default",
                 apply = action("Spyglass", "Spyglass", function() return applyKeys(SPY, { 200, 200 }) end),
@@ -13759,10 +13791,20 @@ end)()
         -- Presets list the sections in the order the pages show them.
         do
             local rank = {}
-            for i, id in ipairs({ "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash", "Firearms",
-                "SpearShake", "Thunderspears", "Swim", "Breath", "Fog", "Anxiety", "Spyglass" }) do rank[id] = i end
+            for i, id in ipairs({ "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash", "Firearms", "FirearmManual",
+                "SpearShake", "Thunderspears", "Swim", "Breath", "Anxiety", "Spyglass" }) do rank[id] = i end
             table.sort(PRE.order, function(x, y) return (rank[x] or 99) < (rank[y] or 99) end)
         end
+        -- The preset popup groups sections by page. The two firearm cards replace each other.
+        PRE.group = {}
+        for g, ids in pairs({
+            Movement = { "GasSaver", "Velocity", "Grapple", "AimAssist", "Parry", "Sprint", "Dash" },
+            Weapons = { "Firearms", "FirearmManual", "SpearShake", "Thunderspears" },
+            Misc = { "Swim", "Breath", "Anxiety", "Spyglass" },
+        }) do
+            for _, id in ipairs(ids) do PRE.group[id] = g end
+        end
+        PRE.excl = { Firearms = "FirearmManual", FirearmManual = "Firearms" }
 
         -- ---------- Presets (v9.67) ----------
         -- Set things up by hand once, then Save Preset records it under a name: every slider value,
@@ -13879,8 +13921,9 @@ end)()
         end
 
         -- (v9.68) The whole Presets page is ONE board (uilib patch #15): a card per preset, the picked
-        -- preset's summary with Update / Apply, and a tile per section saying exactly what applying it
-        -- sets. Clicking a tile adds or drops that section. On the upstream fallback lib (no board) the
+        -- preset's summary with Update / Apply, and a tile per section it includes, saying exactly what
+        -- applying it sets. (v9.78) The tile's x drops a section, the Add tile opens a popup listing them
+        -- all. On the upstream fallback lib (no board) the
         -- v9.67 plain controls below take over, in this same section.
         local secPre = tab:Section("Presets", "Full", "Save what you applied, then apply it all in one click")
         if secPre.PresetBoard then
@@ -13925,15 +13968,15 @@ end)()
                     local r = PRE.num(v, "breath_rate", 5)
                     return r <= 0 and "No breath loss" or string.format("%.2f a second", r)
                 end,
-                Fog = function(v)
-                    local f = PRE.num(v, "fog_amount", 1)
-                    return f <= 0 and "No fog" or string.format("%d%% of normal fog", math.floor(f * 100 + 0.5))
-                end,
                 Anxiety = function(v)
                     local a = PRE.num(v, "anxiety_gain", 1)
                     return a <= 0 and "No anxiety gain" or string.format("%d%% of normal", math.floor(a * 100 + 0.5))
                 end,
                 Firearms = function() return "No spread" .. PRE.DOT .. "No recoil" end,
+                FirearmManual = function(v)
+                    return string.format("Spread %d%%", PRE.num(v, "firearm_spread", 100)) .. PRE.DOT
+                        .. string.format("Recoil %d%%", PRE.num(v, "firearm_recoil", 100))
+                end,
                 SpearShake = function() return "No camera shake on throw" end,
                 Thunderspears = function(v)
                     local i, d = PRE.num(v, "spear_inaccuracy", 15), PRE.num(v, "spear_distance", 100)
@@ -13995,11 +14038,11 @@ end)()
                     end
                     m.rows[#m.rows + 1] = {
                         id = id, title = t, value = okf and val or "", on = on, auto = av, autoTip = atip,
-                        tip = on and ("click to leave " .. t .. " out of this preset")
-                            or ("click to add " .. t .. " to this preset, with the value shown"),
+                        group = PRE.group[id], tip = "remove " .. t .. " from this preset",
                     }
                 end
                 m.title = sel
+                m.pickTitle = "Add to " .. sel
                 m.meta = function()
                     local s = nOn .. " of " .. #PRE.order .. " sections" .. PRE.DOT .. "saved " .. PRE.ago(p.savedAt)
                     local L = PRE.last
@@ -14085,6 +14128,7 @@ end)()
                         p.auto = keep
                     else
                         want[id] = true
+                        if PRE.excl[id] then want[PRE.excl[id]] = nil end
                     end
                     local list = {}
                     for _, x in ipairs(PRE.order) do if want[x] then list[#list + 1] = x end end
@@ -15045,8 +15089,8 @@ end)()
         })
         paginate(GUI._charTab, {
             { "Movement", { "Gas Saver", "Velocity", "Grapple", "Aim Assist", "Parry", "Sprint", "Dash" }, icon = "dash" },
-            { "Weapons", { "Firearm Auto", "Thunderspears" }, icon = "swords" },
-            { "Misc", { "Swimming", "Breath", "Fog", "Anxiety", "Spyglass" }, icon = "grid" },
+            { "Weapons", { "Firearm Auto", "Firearm Manual", "Thunderspears" }, icon = "swords" },
+            { "Misc", { "Swimming", "Breath", "Anxiety", "Spyglass" }, icon = "grid" },
             { "Presets", icon = "sliders" },     -- Presets, Save Preset (the last page takes the rest)
         })
         paginate(GUI._setTab, {

@@ -1240,7 +1240,7 @@ local function cD(cE)
 	if cF and az.gameInput == "always" then
 		cF = false
 	elseif cF and az.gameInput ~= false then
-		local cG = az.dropdown or az.colorpicker or az.keyMenu or az.spotlightOpen
+		local cG = az.dropdown or az.colorpicker or az.keyMenu or az.spotlightOpen or az.rqPick
 		if not cG and not cA(az.x, az.y, az.w, az.h) then
 			cF = false
 		end
@@ -3975,8 +3975,8 @@ do
 
 	-- ---------------------------------------------------------------- PresetBoard (RQ patch #15)
 	-- The Character presets page: a card per preset (+ a "new" card), then the picked preset with
-	-- its summary, Update / Apply on the right, and one tile per section saying exactly what
-	-- applying it will set. Clicking a tile adds or drops that section. All state lives on RQX.pb
+	-- its summary, Update / Apply on the right, and one tile per section it includes, saying exactly
+	-- what applying it will set. A tile's x drops it; the Add tile opens a popup. All state lives on RQX.pb
 	-- and cQ: this block sits in the lib's main chunk, which is at 199/200 locals.
 	RQX.pb = { CH = 28, CG = 8, HD = 46, TH = 46, TG = 8, NOTE = 56 }
 	function RQX.pb.val(v) -- model fields may be live functions
@@ -4028,7 +4028,8 @@ do
 		if not m.title then
 			return ch + 14 + P.NOTE
 		end
-		local lines = math.ceil(#(m.rows or {}) / P.cols(go))
+		local shown, more = P.shown(m)
+		local lines = math.ceil((#shown + (more > 0 and 1 or 0)) / P.cols(go))
 		return ch + 14 + P.HD + 14 + lines * P.TH + D(0, lines - 1) * P.TG
 	end
 	RQX.h.presetboard = function(cQ)
@@ -4190,13 +4191,13 @@ do
 			end
 			bj(hc, y0 + P.HD + 6, hc + go, y0 + P.HD + 6, ak, 30, 1, an.hairline * a)
 		end
-		-- ---- one tile per section
-		local rows = m.rows or {}
+		-- ---- one tile per section the preset includes, then the Add tile
+		local shown, more = P.shown(m)
 		local cols = P.cols(go)
 		local tw0 = (go - (cols - 1) * 10) / cols
 		local ty0 = y0 + P.HD + 14
 		cQ._ta = cQ._ta or {}
-		for i, r in ipairs(rows) do
+		for i, r in ipairs(shown) do
 			local col, line = (i - 1) % cols, A((i - 1) / cols)
 			local tx, ty = hc + col * (tw0 + 10), ty0 + line * (P.TH + P.TG)
 			local ta = base * P.fit(ty, P.TH)
@@ -4206,65 +4207,254 @@ do
 				cQ._ta[key] = st
 				local hov = ta > 0.5 and not hf and cA(tx, ty, tw0, P.TH)
 				st.h = bX(st.h, hov and 1 or 0, 16)
-				st.o = bX(st.o, r.on and 1 or 0, 14)
-				local hv, on = st.h or 0, st.o or 0
-				b6(tx, ty, tw0, P.TH, ca(ak, az._accentMid, on), 30, 7, (an.field * (0.6 + 0.4 * (1 - on)) + 0.05 * on + 0.03 * hv) * ta)
-				bi(tx, ty, tw0, P.TH, ca(ak, az._accentMid, on), 31, 7, (an.hairline + 0.14 * on + 0.15 * hv) * ta)
-				if on > 0.01 then
-					b6(tx, ty + 10, 3, P.TH - 20, az._accentMid, 32, 1, 0.9 * on * ta)
+				local hv = st.h or 0
+				local midY = ty + A(P.TH / 2)
+				b6(tx, ty, tw0, P.TH, az._accentMid, 30, 7, (an.field * 0.6 + 0.05 + 0.03 * hv) * ta)
+				bi(tx, ty, tw0, P.TH, az._accentMid, 31, 7, (an.hairline + 0.14 + 0.15 * hv) * ta)
+				b6(tx, ty + 10, 3, P.TH - 20, az._accentMid, 32, 1, 0.9 * ta)
+				-- the x is always there, faint, and lights up as you reach it
+				local xCx = tx + tw0 - 18
+				local onX = hov and cA(xCx - 11, midY - 11, 22, 22)
+				st.x = bX(st.x, onX and 1 or 0, 18)
+				local xh = st.x or 0
+				if xh > 0.01 then
+					b6(xCx - 10, midY - 10, 20, 20, al.bad, 33, 5, 0.18 * xh * ta)
 				end
-				-- include mark: a box that fills in with a tick
-				local bx0, by1 = tx + 14, ty + A((P.TH - 14) / 2)
-				b6(bx0, by1, 14, 14, az._accentMid, 32, 4, 0.9 * on * ta)
-				bi(bx0, by1, 14, 14, on > 0.5 and az._accentMid or ak, 33, 4, ((1 - on) * (0.28 + 0.3 * hv) + on * 0.9) * ta)
-				if on > 0.05 then
-					bj(bx0 + 3.5, by1 + 7.5, bx0 + 6, by1 + 10, ak, 34, 1.6, on * ta)
-					bj(bx0 + 6, by1 + 10, bx0 + 10.5, by1 + 4.5, ak, 34, 1.6, on * ta)
-				end
-				local lx = bx0 + 26
-				-- AUTO: a switch of its own, always shown on a section that has one (grey = off)
+				RQX.icon("x", xCx, midY, ca(ak, al.bad, xh), 34, (0.24 + 0.3 * hv + 0.41 * xh) * ta)
+				local lx = tx + 16
 				local hasAuto = r.auto ~= nil
 				local badge = hasAuto and "AUTO" or (r.badge and tostring(r.badge) or nil)
 				local bw = badge and (bC(badge, 11, aq) + 14) or 0
-				local right = tx + tw0 - 12
-				bN(tostring(r.title or ""), lx, ty + 8, ak, 13, aq, 33, false, false, right - lx - (badge and (bw + 8) or 0), (0.45 + 0.4 * on + 0.1 * hv) * ta)
-				bN(tostring(r.value or ""), lx, ty + 26, ak, 12, ap, 33, false, false, right - lx, (0.3 + 0.32 * on + 0.08 * hv) * ta)
+				local right = xCx - 15
+				bN(tostring(r.title or ""), lx, ty + 8, ak, 13, aq, 33, false, false, right - lx - (badge and (bw + 8) or 0), (0.85 + 0.1 * hv) * ta)
+				bN(tostring(r.value or ""), lx, ty + 26, ak, 12, ap, 33, false, false, right - lx - (badge and (bw + 8) or 0), (0.62 + 0.08 * hv) * ta)
 				local onAuto = false
 				if badge then
 					local gx = right - bw
+					local gy = midY - 8
 					if hasAuto then
-						onAuto = hov and cA(gx - 4, ty + 3, bw + 8, 26)   -- a little bigger than it looks
+						onAuto = hov and cA(gx - 4, gy - 5, bw + 8, 26) -- a little bigger than it looks
 						st.au = bX(st.au, r.auto and 1 or 0, 16)
 						st.ah = bX(st.ah, onAuto and 1 or 0, 18)
 						local au, ah = st.au or 0, st.ah or 0
-						local da = (0.6 + 0.4 * on) * ta   -- on a section left out it stays readable
-						local col = ca(ak, az._accentMid, au)
-						b6(gx, ty + 8, bw, 16, col, 33, 4, C(1, 0.05 + 0.13 * au + 0.06 * ah) * da)
-						bi(gx, ty + 8, bw, 16, col, 34, 4, C(1, 0.22 + 0.48 * au + 0.25 * ah) * da)
-						bV(badge, gx + bw / 2, ty + 16, col, 11, aq, 35, C(1, 0.42 + 0.53 * au + 0.2 * ah) * da)
+						local bcol = ca(ak, az._accentMid, au)
+						b6(gx, gy, bw, 16, bcol, 33, 4, C(1, 0.05 + 0.13 * au + 0.06 * ah) * ta)
+						bi(gx, gy, bw, 16, bcol, 34, 4, C(1, 0.22 + 0.48 * au + 0.25 * ah) * ta)
+						bV(badge, gx + bw / 2, gy + 8, bcol, 11, aq, 35, C(1, 0.42 + 0.53 * au + 0.2 * ah) * ta)
 					else
-						b6(gx, ty + 8, bw, 16, az._accentMid, 33, 4, 0.18 * on * ta)
-						bi(gx, ty + 8, bw, 16, az._accentMid, 34, 4, 0.7 * on * ta)
-						bV(badge, gx + bw / 2, ty + 16, az._accentMid, 11, aq, 35, 0.95 * on * ta)
+						b6(gx, gy, bw, 16, az._accentMid, 33, 4, 0.18 * ta)
+						bi(gx, gy, bw, 16, az._accentMid, 34, 4, 0.7 * ta)
+						bV(badge, gx + bw / 2, gy + 8, az._accentMid, 11, aq, 35, 0.95 * ta)
 					end
 				end
 				if hov then
-					local tip = onAuto and r.autoTip or r.tip
+					local tip = (onAuto and r.autoTip) or (onX and r.tip) or nil
 					if tip then
 						ha(tostring(tip), az.mouseX, az.mouseY)
 					end
 				end
 				if eM and hov and not _G.RQBlockInput then
 					eM = false
-					if onAuto then
-						cN(cQ.onAuto, i, r.id) -- never also toggles the tile
-					else
+					if onX then
 						cN(cQ.onRow, i, r.id)
+					elseif onAuto then
+						cN(cQ.onAuto, i, r.id)
 					end
 				end
 			end
 		end
+		if more > 0 then
+			local i = #shown
+			local tx, ty = hc + (i % cols) * (tw0 + 10), ty0 + A(i / cols) * (P.TH + P.TG)
+			local ta = base * P.fit(ty, P.TH)
+			if ta > 0.01 then
+				local hov = ta > 0.5 and not hf and cA(tx, ty, tw0, P.TH)
+				cQ._pa = bX(cQ._pa, hov and 1 or 0, 16)
+				local t2 = cQ._pa or 0
+				local tint = ca(ak, az._accentMid, t2)
+				b6(tx, ty, tw0, P.TH, ak, 30, 7, (0.015 + 0.03 * t2) * ta)
+				bi(tx, ty, tw0, P.TH, tint, 31, 7, (0.12 + 0.4 * t2) * ta)
+				local px, py = tx + 13, ty + A((P.TH - 22) / 2)
+				b6(px, py, 22, 22, tint, 32, 6, (0.06 + 0.1 * t2) * ta)
+				RQX.icon("plus", px + 11, py + 11, tint, 33, (0.6 + 0.35 * t2) * ta)
+				bN("Add section", px + 34, ty + 8, tint, 13, aq, 33, false, false, tw0 - 60, (0.66 + 0.3 * t2) * ta)
+				bN(more .. " more to choose from", px + 34, ty + 26, ak, 12, ap, 33, false, false, tw0 - 60, (0.36 + 0.2 * t2) * ta)
+				if eM and hov and not _G.RQBlockInput then
+					eM = false
+					P.open(cQ)
+				end
+			end
+		end
 		return eM, eN
+	end
+	-- the tiles to draw (what the preset includes) and how many sections are left to add
+	function RQX.pb.shown(m)
+		local out, all = {}, m.rows or {}
+		for _, r in ipairs(all) do
+			if r.on then
+				out[#out + 1] = r
+			end
+		end
+		return out, #all - #out
+	end
+	-- ---------------------------------------------------------------- the Add section popup
+	-- Centred on the menu, drawn after the page with its input cut off (like the lib's Dialog). Every
+	-- section is listed by page; a click adds or drops it through the board's onRow, so the popup
+	-- stays open for picking several. x, Esc or a click outside closes it.
+	function RQX.pb.open(cQ)
+		az.rqPick = { item = cQ, y = 0, ty = 0, fresh = true }
+		az._pkLast = az.rqPick
+	end
+	function RQX.pb.pick(click)
+		local pk = az.rqPick
+		if pk and (not az.open or not pk.item.model.title) then
+			az.rqPick, pk = nil, nil
+		end
+		az._pkA = bX(az._pkA or 0, pk and 1 or 0, 18)
+		local show = az._pkA or 0
+		local a = show * (az.drawVisible or 1)
+		local last = pk or az._pkLast
+		if a < 0.01 or not last then
+			return
+		end
+		local cQ, wx, wy, ww, wh = last.item, az.x, az.y, az.w, az.h
+		local m = cQ.model
+		local live = pk ~= nil and a > 0.5 and not az.dialog and not _G.RQBlockInput
+		if pk and pk.fresh then
+			click, pk.fresh = false, false -- the click that opened it
+		end
+		local groups, byName, nOn, nAll = {}, {}, 0, 0
+		for _, r in ipairs(m.rows or {}) do
+			local gn = tostring(r.group or "Sections")
+			local g = byName[gn]
+			if not g then
+				g = { name = gn, rows = {} }
+				byName[gn] = g
+				groups[#groups + 1] = g
+			end
+			g.rows[#g.rows + 1] = r
+			nAll = nAll + 1
+			nOn = nOn + (r.on and 1 or 0)
+		end
+		local RH, RG, GH, PAD, HEAD = 50, 8, 26, 22, 70
+		local mw = C(ww - 40, 640)
+		local cols = mw >= 460 and 2 or 1
+		local rw = (mw - PAD * 2 - (cols - 1) * 10) / cols
+		local bodyH = 0
+		for i, g in ipairs(groups) do
+			local ln = math.ceil(#g.rows / cols)
+			bodyH = bodyH + GH + ln * RH + (ln - 1) * RG + (i < #groups and 10 or 0)
+		end
+		local mh = C(wh - 32, HEAD + bodyH + 20)
+		local mx, my = A(wx + (ww - mw) / 2), A(wy + (wh - mh) / 2 - (1 - show) * 10)
+		b6(wx, wy, ww, wh, y(0, 0, 0), 430, 8, 0.52 * a)
+		b6(mx + 3, my + 8, mw, mh, y(0, 0, 0), 431, 14, 0.34 * a)
+		b6(mx, my, mw, mh, al.bg, 432, 12, 0.995 * a)
+		bi(mx - 1, my - 1, mw + 2, mh + 2, az._accentMid, 433, 13, 0.1 * a)
+		bi(mx, my, mw, mh, ak, 433, 12, 0.18 * a)
+		local textW = mw - PAD * 2 - 44
+		bN(tostring(m.pickTitle or "Add section"), mx + PAD, my + 18, ak, 16, aq, 435, false, false, textW, an.text * a)
+		bN(nOn .. " of " .. nAll .. " in this preset", mx + PAD, my + 40, ak, 12, ap, 435, false, false, textW, an.dim * a)
+		local xx, xy = mx + mw - PAD - 30, my + 18
+		local overX = live and cA(xx, xy, 30, 30)
+		last.xh = bX(last.xh, overX and 1 or 0, 18)
+		local xh = last.xh or 0
+		b6(xx, xy, 30, 30, ak, 434, 7, (0.035 + 0.06 * xh) * a)
+		bi(xx, xy, 30, 30, ak, 435, 7, (an.hairline + 0.2 * xh) * a)
+		RQX.icon("x", xx + 15, xy + 15, ak, 436, (0.62 + 0.33 * xh) * a)
+		local bTop, bh = my + HEAD, mh - HEAD - 12
+		local maxS = D(0, bodyH - bh + 8)
+		local thumb = maxS > 0 and D(30, bh * bh / bodyH) or 0
+		if pk then
+			if live and maxS > 0 then
+				if az.mouseScroll ~= 0 and cA(mx, my, mw, mh) then
+					pk.ty = pk.ty - (az.mouseScroll > 0 and 1 or -1) * 58
+				end
+				if aC.up.click then
+					pk.ty = pk.ty - 58
+				end
+				if aC.down.click then
+					pk.ty = pk.ty + 58
+				end
+				if click and cA(mx + mw - 16, bTop, 16, bh) then -- the bar: grab it, or jump to the click
+					click, pk.drag = false, thumb / 2
+				end
+				if pk.drag then
+					if aC.m1.held then
+						pk.ty = (az.mouseY - pk.drag - bTop) / (bh - thumb) * maxS
+						pk.y = Z(pk.ty, 0, maxS)
+					else
+						pk.drag = nil
+					end
+				end
+			end
+			pk.ty = Z(pk.ty, 0, maxS)
+			pk.y = bX(pk.y, pk.ty, 15)
+		end
+		local function vis(t, h) -- text can't be clipped: a row fades out before the popup's edge
+			if maxS <= 0 then
+				return 1
+			end
+			local f = h * 0.24 -- gone before it reaches the card's edge
+			return Z((t - bTop + f) / f, 0, 1) * Z((bTop + bh - t - h + f) / f, 0, 1)
+		end
+		cQ._pr = cQ._pr or {}
+		local yy, hitI, hitR, idx = bTop - (last.y or 0), nil, nil, 0
+		for gi, g in ipairs(groups) do
+			local ga = vis(yy, 16) * a
+			if ga > 0.01 then
+				bN(string.upper(g.name), mx + PAD, yy + 1, az._accentMid, 12, aq, 435, false, false, mw - PAD * 2, 0.9 * ga)
+			end
+			yy = yy + GH
+			for ri, r in ipairs(g.rows) do
+				idx = idx + 1
+				local c0, ln = (ri - 1) % cols, A((ri - 1) / cols)
+				local rx, ry = mx + PAD + c0 * (rw + 10), yy + ln * (RH + RG)
+				local ra = vis(ry, RH) * a
+				local key = tostring(r.id or idx)
+				local st = cQ._pr[key] or {}
+				cQ._pr[key] = st
+				local hov = live and ra > 0.5 and cA(rx, ry, rw, RH) and cA(mx, bTop, mw, bh)
+				st.h = bX(st.h, hov and 1 or 0, 16)
+				st.o = bX(st.o, r.on and 1 or 0, 14)
+				local hv, on = st.h or 0, st.o or 0
+				if hov then
+					hitI, hitR = idx, r
+				end
+				if ra > 0.01 then
+					local tone = ca(ak, az._accentMid, on)
+					b6(rx, ry, rw, RH, tone, 434, 8, (0.03 + 0.07 * on + 0.03 * hv) * ra)
+					bi(rx, ry, rw, RH, tone, 435, 8, (an.hairline + 0.5 * on + 0.16 * hv) * ra)
+					bN(tostring(r.title or ""), rx + 14, ry + 9, ak, 13, aq, 436, false, false, rw - 52, (0.74 + 0.22 * D(on, hv)) * ra)
+					bN(tostring(r.value or ""), rx + 14, ry + 28, ak, 12, ap, 436, false, false, rw - 52, (0.42 + 0.16 * D(on, hv)) * ra)
+					local dx, dy = rx + rw - 30, ry + A((RH - 16) / 2)
+					b6(dx, dy, 16, 16, az._accentMid, 436, 8, on * ra)
+					bi(dx, dy, 16, 16, on > 0.5 and az._accentMid or ak, 437, 8, ((1 - on) * (0.3 + 0.3 * hv) + on) * ra)
+					if on > 0.05 then
+						bj(dx + 4.5, dy + 8.5, dx + 7, dy + 11, ak, 438, 1.6, on * ra)
+						bj(dx + 7, dy + 11, dx + 11.5, dy + 5.5, ak, 438, 1.6, on * ra)
+					end
+				end
+			end
+			local ln = math.ceil(#g.rows / cols)
+			yy = yy + ln * RH + (ln - 1) * RG + (gi < #groups and 10 or 0)
+		end
+		if maxS > 0 then
+			local tt = bTop + (last.y or 0) / maxS * (bh - thumb)
+			b6(mx + mw - 9, tt, 3, thumb, ak, 436, 2, ((pk and pk.drag) and 0.5 or 0.24) * a)
+		end
+		if live then
+			if aC.esc.click then
+				aC.esc.click = false
+				az.rqPick = nil
+			elseif click then
+				if overX or not cA(mx, my, mw, mh) then
+					az.rqPick = nil
+				elseif hitR then
+					cN(cQ.onRow, hitI, hitR.id)
+				end
+			end
+		end
 	end
 
 	-- ---------------------------------------------------------------- ActionRow (RQ patch #16)
@@ -5092,7 +5282,7 @@ function az.rqPage.bar(di, eM, hf, h3, iB, hy)
 	return eM
 end
 local function iA(di, eM, fl, eN, h3, iB, hy, iC)
-	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+	local hf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil or az.rqPick ~= nil
 	local secs = di.sections
 	local pages = di.pages
 	if pages and #pages > 1 then
@@ -5429,7 +5619,7 @@ local function jg(eM, fl, eN)
 	local jq = 42
 	local jr, js = 58, D(150, A(b9 * 0.29))
 	local jt = jr + (js - jr) * (az._sbX or 0)
-	local ju = not az.dropdown and not az.colorpicker and not az.keyMenu and not az.spotlightOpen
+	local ju = not az.dropdown and not az.colorpicker and not az.keyMenu and not az.spotlightOpen and not az.rqPick
 	local jv = jp and ju and cA(b7, b8 + gw, jt, ba - gw)
 	az._sbX = bX(az._sbX or 0, jv and 1 or 0, 10)
 	local jw = (az.lite or az.sidebarPinned or not jp) and 1 or az._sbX
@@ -5893,7 +6083,7 @@ local function jg(eM, fl, eN)
 		if rqT and rqT.pages and #rqT.pages > 1 then
 			az._rqHdrPages = true
 			local rqF = bA(aq)
-			local rqHf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil
+			local rqHf = az.dropdown ~= nil or az.colorpicker ~= nil or az.keyMenu ~= nil or az.dialog ~= nil or az.rqPick ~= nil
 			local rqAcc = az._accentMid
 			local rqH = 26
 			local rqY = b8 + gw + (kh - rqH) / 2
@@ -5969,6 +6159,7 @@ local function jg(eM, fl, eN)
 				or az.colorpicker ~= nil
 				or az.keyMenu ~= nil
 				or az.dialog ~= nil
+				or az.rqPick ~= nil
 				or az.spotlightOpen == true
 			),
 			tab = (az.activeTab and az.activeTab.name),
@@ -6899,7 +7090,7 @@ local function cR()
 	end
 	l5()
 	az._accentMid = ca(al.accentA, al.accentB, 0.5)
-	if az.open and not az.spotlightOpen and not az.focus and not az.dropdown and not az.colorpicker and #az.tabs > 0 then
+	if az.open and not az.spotlightOpen and not az.focus and not az.dropdown and not az.colorpicker and not az.rqPick and #az.tabs > 0 then
 		if aC.left.click then
 			local a5 = az.activeIndex
 			repeat
@@ -6947,6 +7138,7 @@ local function cR()
 		eM = fN(eM, fl)
 		eM = gd(eM)
 		kn()
+		az.rqPick = nil
 		l6(eM)
 		aZ()
 		return
@@ -6960,7 +7152,7 @@ local function cR()
 		eN = false
 		fl = false
 	end
-	if az.dialog then
+	if az.dialog or az.rqPick then
 		eM = false
 		eN = false
 		fl = false
@@ -6988,6 +7180,7 @@ local function cR()
 	eM = fN(eM, fl)
 	eM = gd(le and lf or false)
 	kn()
+	az.rqx.pb.pick(lg)
 	l6(lg)
 	if not az.lite and (az.minA or 0) < 0.06 then
 		local V = az._winRect
