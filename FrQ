@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.76"
+GUI.Version = "v9.77"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12877,7 +12877,7 @@ end)()
         -- budget): run/title/order = every Apply button as a named action; applied/auto = what you
         -- applied and which Auto-Apply toggles are on (what Save Preset records); sl/ui = the slider
         -- and toggle handles a preset sets. The Presets section at the end of this tab fills in the rest.
-        local PRE = { run = {}, title = {}, order = {}, applied = {}, auto = {}, sl = {}, ui = {}, track = {}, sent = {} }
+        local PRE = { run = {}, title = {}, order = {}, applied = {}, auto = {}, sl = {}, ui = {} }
         GUI.CharLoad = function()
             if warmed or charLoading then return end
             charLoading = true
@@ -12915,50 +12915,18 @@ end)()
         -- The button runs it in a background task (so even the first sweep can't freeze the click) and
         -- shows the message; Apply Preset runs several in a row and reports once. A success marks the
         -- action applied, a Restore unmarks it: that is what Save Preset records.
-        -- What the card's Apply button says (v9.73). PRE.track[id] = the card's sliders as
-        -- { key, getter, stock }. Applied = what you set is in. Lit Apply = a slider differs from what
-        -- was applied, or from your own value if nothing was. `fn` may return a third value (noop): it
-        -- ran fine but wrote nothing, so the card must not claim "Applied".
-        function PRE.snap(id)
-            local tr = PRE.track[id]
-            if not tr then return end
-            local sent = {}
-            for _, t in ipairs(tr) do sent[t[1]] = t[2]() end
-            PRE.sent[id] = sent
-        end
-        function PRE.state(id)
-            local tr = PRE.track[id]
-            if PRE.auto[id] then return "Applied", false end       -- Auto-Apply keeps it in
-            if PRE.applied[id] then
-                local sent = PRE.sent[id]
-                if tr and sent then
-                    for _, t in ipairs(tr) do
-                        local was = sent[t[1]]
-                        if was and math.abs(t[2]() - was) > 0.001 then return "Apply", true end
-                    end
-                end
-                return "Applied", false
-            end
-            for _, t in ipairs(tr or {}) do
-                local own = savedDefault[t[1]] or t[3]
-                if own and math.abs(t[2]() - own) > 0.001 then return "Apply", true end
-            end
-            return "Apply", false
-        end
+        -- `fn` may return a third value (noop): it ran fine but wrote nothing, so it is not recorded
+        -- as applied. The Apply button itself always just says Apply (v9.77, the user's call).
         -- One line per card: Apply, Restore and (with o.auto) Auto. Returns the Auto handle, which works
         -- like the old Toggle. The upstream fallback lib has no ActionRow, so it gets plain controls.
         function PRE.row(sec, o)
-            local function restore()
-                PRE.sent[o.id] = nil
-                return o.restore()
-            end
             if sec.ActionRow then
-                return sec:ActionRow({ applyName = o.applyName, restoreName = o.restoreName, apply = o.apply, restore = restore,
-                    auto = o.auto, tip = o.tip, autoTip = o.autoTip, state = function() return PRE.state(o.id) end })
+                return sec:ActionRow({ applyName = o.applyName, restoreName = o.restoreName, apply = o.apply, restore = o.restore,
+                    auto = o.auto, tip = o.tip, autoTip = o.autoTip })
             end
             local b = sec:Button(o.applyName, o.apply)
             if o.tip then pcall(function() b:Tooltip(o.tip) end) end
-            sec:Button(o.restoreName or "Restore Default", restore)
+            sec:Button(o.restoreName or "Restore Default", o.restore)
             if o.auto then
                 local h = sec:Toggle("Auto-Apply", false, o.auto)
                 if o.autoTip then pcall(function() h:Tooltip(o.autoTip) end) end
@@ -12966,17 +12934,12 @@ end)()
             end
         end
         local function action(id, title, fn, name)
-            local function run()
-                local ok, msg, noop = fn()
-                if ok and not noop then PRE.snap(id) end
-                return ok, msg, noop
-            end
-            PRE.run[id], PRE.title[id] = run, name or title
+            PRE.run[id], PRE.title[id] = fn, name or title
             PRE.order[#PRE.order + 1] = id
             return function()
                 if not gateOK() then return end
                 task.spawn(function()
-                    local okc, ok, msg, noop = pcall(run)
+                    local okc, ok, msg, noop = pcall(fn)
                     if not okc then ok, msg = false, "Failed - " .. tostring(ok) end
                     if ok and not noop then PRE.applied[id] = true end
                     notif(title, msg or (ok and "Applied" or "Failed"), ok and 4 or 5)
@@ -13019,7 +12982,6 @@ end)()
         secGr:Label(function()
             return string.format("Est. hook range  ~%d studs  (stock 400)", math.floor(grAdd + 400 + 0.5))
         end)
-        PRE.track.Grapple = { { "GearAdditionalGrappleRange", function() return grAdd end } }
         PRE.row(secGr, { id = "Grapple", applyName = "Apply Grapple", restoreName = "Reset Default",
             apply = action("Grapple", "Grapple", function()
                 return applyKeys({ "GearAdditionalGrappleRange" }, { grAdd })
@@ -13037,8 +12999,6 @@ end)()
             if m and r then return string.format("Your own: %.2fx max, %.2fx rate", m, r) end
             return "Your own values show after Load Values"
         end)
-        PRE.track.Velocity = { { "GearMaxVelocityMultiplier", function() return veMax end },
-            { "GearVelocityIncreaseRate", function() return veInc end } }
         local veApply = action("Velocity", "Velocity", function()
             return applyKeys({ "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate" }, { veMax, veInc })
         end)
@@ -13145,7 +13105,6 @@ end)()
         local parryVal = CFG.NON_SUCCESSFUL_PARRY_WINDOW_SECONDS.fb
         PRE.sl.parry_window = secParry:Slider("Parry Window", parryVal, 0.1, 0, 5, "s", function(v) parryVal = tonumber(v) or parryVal end)
         secParry:Label(function() return string.format("A missed parry locks you out for %.1f s", parryVal) end)
-        PRE.track.Parry = { { "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS", function() return parryVal end } }
         PRE.row(secParry, { id = "Parry", applyName = "Apply Parry", restoreName = "Restore Default",
             apply = action("Parry", "Parry", function()
                 return applyKeys({ "NON_SUCCESSFUL_PARRY_WINDOW_SECONDS" }, { parryVal })
@@ -13219,7 +13178,6 @@ end)()
                 notif(title, msg, ok and 4 or (msg == "Nothing to restore yet" and 3 or 5))
             end)
         end
-        PRE.track.Sprint = { { SPRINT, function() return sprintVal end } }
         local spApply = action("Sprint", "Sprint", function()
             return statWriteNow("Run speed", { SPRINT }, { sprintVal }, "Applied - let go of sprint and press it again")
         end)
@@ -13321,7 +13279,6 @@ end)()
             if gsT <= 0 or gsM <= 0 then return "No saving at these values" end
             return string.format("Below %d%% gas: %d%% less drain", math.floor(gsT * 100 + 0.5), math.floor(gsM * 100 + 0.5))
         end)
-        PRE.track.GasSaver = { { GAS_T, function() return gsT end }, { GAS_M, function() return gsM end } }
         PRE.row(secGasSave, { id = "GasSaver", applyName = "Apply Gas Saver", restoreName = "Restore Default",
             apply = action("GasSaver", "Gas Saver", function()
                 return statWriteNow("Gas saver values", { GAS_T, GAS_M }, { gsT, math.min(gsM, GAS_M_MAX) },
@@ -13396,7 +13353,6 @@ end)()
                 if own then return string.format("Yours x%.2f  |  ~%.1f deg at 300 studs", own, deg) end
                 return string.format("~%.1f deg at 300 studs", deg)
             end)
-            PRE.track.AimAssist = { { size.key, function() return size.val end } }
             PRE.row(secAim, { id = "AimAssist", applyName = "Apply Aim Assist", restoreName = "Restore Default",
                 apply = action("AimAssist", "Aim Assist", function()
                     return PRE.writeMoved("Aim assist", { size }, "Applied - works from your next hook")
@@ -13697,7 +13653,6 @@ end)()
                             or "Shake partly failed - throw a spear once, then retry")
                     .. (fixed > 0 and ("  |  repaired Frequency x" .. fixed) or "")
         end, "Spear shake")):Tooltip("Removes the camera kick when you throw. It is purely visual - the spear's direction comes from your body, so the shake never affected where it goes.")
-        PRE.track.Thunderspears = { { "ts_inaccuracy", function() return tsInacc end, 15 }, { "ts_distance", function() return tsDist end, 100 } }
         PRE.row(secTS, { id = "Thunderspears", applyName = "Apply Thunderspears", restoreName = "Restore Default",
             apply = action("Thunderspears", "Thunderspears", function()
                 local ts, why = tsResolve()
@@ -13764,7 +13719,6 @@ end)()
                 local sec = tab:Section(name, side, sub)
                 local st = PRE.statSlider(sec, o)
                 sec:Label(function() st.own(); return text(st.val) end)
-                PRE.track[id] = { { o.key, function() return st.val end } }
                 PRE.row(sec, { id = id, applyName = applyText, restoreName = "Restore Default",
                     apply = action(id, name, function() return PRE.writeMoved(name, { st }, okMsg) end),
                     restore = function()
