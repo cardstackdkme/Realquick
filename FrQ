@@ -35,7 +35,7 @@ local GUI = {}
 -- content header, so there is exactly one place to edit. Format vMAJOR.MINOR; minor for normal
 -- changes, major for a rework.
 -- ============================================================
-GUI.Version = "v9.75"
+GUI.Version = "v9.76"
 GUI.Elements = {}
 GUI.ContentElements = {}
 GUI.SubTabElements = {}
@@ -12464,7 +12464,10 @@ end)()
         -- type tag 387 instead of 3). Those passed the value window, so Velocity wrote into foreign
         -- memory, Reset's "your value" became garbage, and when one came first the 32 KB anchor pointed
         -- at it and every stat pin (Sprint first) said "not found". So a stat entry must be a real number
-        -- slot keyed by its own name, in the one table that holds most of the stats.
+        -- slot keyed by its own name, in the one 32 KB stretch of memory that holds most of the stats.
+        -- (v9.76: by address, NOT by getgc's `tbl`. On a big table `tbl` can differ from key to key, so
+        -- keeping the biggest `tbl` group threw real slots away, Velocity included, and every stat pin
+        -- then said "not found" until a rejoin.)
         local STAT = {}
         for _, k in ipairs({ "GearAdditionalGrappleRange", "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate",
             "FirearmAccuracyMultiplier", "FirearmRecoilMultiplier", "BasePlayerRunMultiplier", "LowGasDrainThreshold",
@@ -12476,36 +12479,103 @@ end)()
         end
         local function scrubStats()
             local real = type(memory_read) == "function"
-            local count, best, top = {}, nil, 0
-            local function tblOf(e)
-                local t = e.tbl
-                if type(t) == "string" then return tonumber(t) or tonumber((t:gsub("^0[xX]", "")), 16) end
-                return t
-            end
+            local addrs = {}
             for k in pairs(STAT) do
                 local list, good = cache[k], {}
                 if list and #list > 0 then
                     for _, e in ipairs(list) do
-                        if not bogusNum(e.value) and (not real or slotHolds(k, e, CFG[k])) then good[#good + 1] = e end
-                    end
-                    cache[k] = good
-                    for _, e in ipairs(good) do
-                        local t = tblOf(e)
-                        if t then
-                            count[t] = (count[t] or 0) + 1
-                            if count[t] > top then best, top = t, count[t] end
+                        if not bogusNum(e.value) and (not real or slotHolds(k, e, CFG[k])) then
+                            good[#good + 1] = e
+                            addrs[#addrs + 1] = gcAddr(e)
                         end
                     end
+                    cache[k] = good
                 end
             end
-            if not best or top < 3 then return end
+            table.sort(addrs)
+            local from, top, j = nil, 0, 1          -- the 32 KB stretch holding the most slots
+            for i = 1, #addrs do
+                while addrs[i] - addrs[j] > 32768 do j = j + 1 end
+                if i - j + 1 > top then from, top = addrs[j], i - j + 1 end
+            end
+            if not from or top < 3 then return end
             for k in pairs(STAT) do
                 local list, good = cache[k], {}
                 if list and #list > 0 then
-                    for _, e in ipairs(list) do if tblOf(e) == best then good[#good + 1] = e end end
+                    for _, e in ipairs(list) do
+                        local a = gcAddr(e)
+                        if a and a >= from and a <= from + 32768 then good[#good + 1] = e end
+                    end
                     cache[k] = good
                 end
             end
+        end
+        -- Every stat pin finds its slot from the Velocity slot, so without it the tab is not loaded.
+        local function statsReady() return #(cache.GearMaxVelocityMultiplier or {}) > 0 end
+        -- FIND THE REST WITHOUT A SCAN (v9.76). getgc can miss keys of a big table, and one missing
+        -- Velocity slot used to break every stat pin. All stats share one hash table of 32-byte slots
+        -- (value +0, type +12, key +16, key text at key+24), so one found slot leads to the others by
+        -- plain memory reads: no freeze. Read-only. A slot is only accepted if slotHolds passes and its
+        -- name appears exactly once. Returns how many stats it added.
+        local function walkStats()
+            if type(memory_read) ~= "function" then return 0 end
+            local want, left, lo, hi, model = {}, 0, nil, nil, nil
+            for k in pairs(STAT) do
+                local list = cache[k]
+                if list and #list > 0 then
+                    for _, e in ipairs(list) do
+                        local a = gcAddr(e)
+                        if a then lo, hi, model = math.min(lo or a, a), math.max(hi or a, a), model or e end
+                    end
+                else
+                    want[k], left = true, left + 1
+                end
+            end
+            if left == 0 or not lo then return 0 end
+            -- true, name for a table slot (name nil when it is empty); false for anything else
+            local function slotAt(a)
+                local okT, tag = pcall(memory_read, "int", a + 12)
+                local okK, kp = pcall(memory_read, "uintptr", a + 16)
+                if not (okT and okK and type(tag) == "number" and type(kp) == "number") then return false end
+                if tag < 0 or tag > 15 then return false end
+                if kp == 0 then return true, nil end
+                if kp <= 65536 or kp >= 140737488355328 then return false end   -- not a user-space pointer
+                local okS, name = pcall(memory_read, "string", kp + 24)
+                if not okS or type(name) ~= "string" then return false end
+                return true, name
+            end
+            local base = lo
+            local a = lo - 32
+            while a >= hi - 32768 do                -- back to the first slot of the table
+                local isSlot, name = slotAt(a)
+                if not isSlot then break end
+                if name then base = a end
+                a = a - 32
+            end
+            local size = 16384                      -- a table's slot count is a power of two
+            while base + size <= hi do size = size * 2 end
+            local hits, seen = {}, {}
+            a = base
+            while a < base + size do
+                local isSlot, name = slotAt(a)
+                if isSlot and name and want[name] then
+                    seen[name] = (seen[name] or 0) + 1
+                    hits[name] = a
+                end
+                a = a + 32
+            end
+            local added = 0
+            for k, at in pairs(hits) do
+                local e = { key = k, type = "number", addr = at, tbl = model.tbl, vtt = model.vtt }
+                local v = seen[k] == 1 and slotHolds(k, e, CFG[k])
+                if v and not bogusNum(v) then
+                    e.value = tostring(v)
+                    cache[k] = { e }
+                    if savedDefault[k] == nil then savedDefault[k] = v end
+                    added = added + 1
+                end
+            end
+            return added
         end
         local fileRestored = 0
         if not reuse then
@@ -12595,8 +12665,7 @@ end)()
         -- CFG[k] guard is load-bearing: without it a retired key's leftovers report the tab as loaded.
         scrubStats()
         for k, entries in pairs(cache) do if CFG[k] and #entries > 0 then warmed = true; break end end
-        -- Every stat pin finds its slot from the Velocity slot, so without it the tab is not loaded.
-        if #(cache.GearMaxVelocityMultiplier or {}) == 0 then warmed = false end
+        if not statsReady() then warmed = false end
         if warmed then saveCache() end   -- e.g. reused from _G: make sure a Matcha restart keeps them too
         -- `bb` rides along on the same JobId key: it holds the BlunderBuss's resolved GC slots + the
         -- last value written to each, so a script RE-RUN in the same server reuses them instead of
@@ -12685,6 +12754,7 @@ end)()
                 end
             end
             scrubStats()
+            walkStats()                          -- whatever the sweep missed, from the slots it did find
             for k, list in pairs(cache) do       -- only now: the first hit could have been a fake one
                 if CFG[k] and #list > 0 then
                     found = found + #list
@@ -12693,8 +12763,13 @@ end)()
             end
             saveState()
             saveCache()
-            if found > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
-            return found > 0
+            -- Loaded means the stat pins can work. Anything less stays locked, so Load Values can be
+            -- pressed again: a half load used to hide the button and leave a rejoin as the only way out.
+            if found > 0 and statsReady() then
+                warmed = true
+                if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end
+            end
+            return warmed
         end
 
         -- cached entries for a key; lazily sweep just that one key if the cache is still empty
@@ -12703,6 +12778,10 @@ end)()
             if not warmed then pcall(warm) end            -- first use this session: ONE sweep for ALL keys
             if cache[key] and #cache[key] > 0 then return cache[key] end
             local cfg = CFG[key]; if not cfg then return {} end
+            if STAT[key] then                             -- a stat the sweep missed: no second freeze
+                if walkStats() > 0 then saveState(); saveCache() end
+                if cache[key] and #cache[key] > 0 then return cache[key] end
+            end
             local ok, entries = pcall(function() return getgc(key) end)
             if not ok or type(entries) ~= "table" then return {} end
             local safe = {}
@@ -12713,7 +12792,7 @@ end)()
             scrubStats()
             safe = cache[key]
             if safe[1] and savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value) end
-            if #safe > 0 then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
+            if #safe > 0 and statsReady() then warmed = true; if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end end
             saveCache()
             return safe
         end
@@ -12773,14 +12852,26 @@ end)()
         -- The one sweep, inside a task: Load Values, or Apply Preset when nothing is loaded yet.
         local function loadNow()
             charLoading = true
-            notif("Values", "Scanning memory... (~15s freeze)", 2)
-            pcall(warm)
+            -- A half load saved earlier in this server: the missing stats are a few reads away, no freeze.
+            local okW, added = pcall(walkStats)
+            if okW and added > 0 and statsReady() then
+                warmed = true
+                if _G.RequiemCharVals then _G.RequiemCharVals.warmed = true end
+                saveState()
+                saveCache()
+            else
+                notif("Values", "Scanning memory... (~15s freeze)", 2)
+                pcall(warm)
+            end
             charLoading = false
             -- The lock overlay only clears this on its next frame, and every control callback is
             -- dropped while it is set. "Apply after Load Values" runs right here, before that frame,
             -- so its sliders and Auto-Apply toggles changed on screen and never reached the code.
             if warmed then _G.RQBlockInput = nil end
-            notif("Values", warmed and "Loaded - pins are instant now" or "Failed - join a round, then retry", warmed and 3 or 4)
+            local lost = 0
+            for k in pairs(STAT) do if #(cache[k] or {}) == 0 then lost = lost + 1 end end
+            notif("Values", not warmed and "Failed - join a round, then press Load Values again"
+                or lost > 0 and ("Loaded - " .. lost .. " stat(s) not found") or "Loaded - pins are instant now", warmed and 3 or 4)
         end
         -- Presets (v9.67). One table, not a dozen locals (this function is a long way into its local
         -- budget): run/title/order = every Apply button as a named action; applied/auto = what you
